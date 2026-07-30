@@ -2,8 +2,9 @@
 # ============================================================================
 # etapas/00-inventario.sh - Capítulo 3: Inventário de Hardware
 # ============================================================================
-# Levanta a identificação completa do hardware e grava em um arquivo datado
-# em ~/inventario-hardware/. Somente leitura: nada é alterado no sistema.
+# Levanta a identificação completa do hardware e grava em um arquivo datado.
+# Não instala pacotes nem altera configurações do host; cria somente o relatório
+# prometido em ~/inventario-hardware/.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -24,24 +25,66 @@ exigir_sudo
 
 titulo "Capítulo 3: Inventário de Hardware"
 
-# dmidecode pode não existir antes da etapa 12 (pacotes base); resolve aqui.
-if ! command -v dmidecode >/dev/null 2>&1; then
-    info "Instalando dmidecode (necessário para ler SMBIOS/DMI)..."
-    sudo apt-get update -qq
-    sudo apt-get install -y dmidecode
-fi
-
 mkdir -p "$HOME/inventario-hardware"
 ARQUIVO="$HOME/inventario-hardware/inventario-$(date +%Y%m%d).txt"
+DMIDECODE_AUSENTE="(indisponível: dmidecode ausente; execute etapas/12-pacotes-base.sh e gere novamente o inventário)"
 
 {
-    echo "== CPU ==";        lscpu
-    echo "== RAM ==";        sudo dmidecode --type memory
-    echo "== BASEBOARD =="; sudo dmidecode -t baseboard
-    echo "== BIOS ==";       sudo dmidecode -t bios
-    echo "== PCI ==";        lspci -nnk
-    echo "== BLOCK DEVICES =="; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
-    echo "== IOMMU/DMAR (pré-configuração) =="; sudo dmesg | grep -i -e DMAR -e IOMMU || echo "(vazio: normal antes da etapa 30)"
+    echo "== CPU =="
+    if command -v lscpu >/dev/null 2>&1; then
+        lscpu 2>&1 || echo "(indisponível: falha ao executar lscpu)"
+    else
+        echo "(indisponível: comando lscpu ausente)"
+    fi
+
+    echo "== RAM =="
+    if command -v dmidecode >/dev/null 2>&1; then
+        sudo dmidecode --type memory 2>&1 || echo "(indisponível: falha ao executar dmidecode)"
+    else
+        echo "$DMIDECODE_AUSENTE"
+    fi
+
+    echo "== BASEBOARD =="
+    if command -v dmidecode >/dev/null 2>&1; then
+        sudo dmidecode -t baseboard 2>&1 || echo "(indisponível: falha ao executar dmidecode)"
+    else
+        echo "$DMIDECODE_AUSENTE"
+    fi
+
+    echo "== BIOS =="
+    if command -v dmidecode >/dev/null 2>&1; then
+        sudo dmidecode -t bios 2>&1 || echo "(indisponível: falha ao executar dmidecode)"
+    else
+        echo "$DMIDECODE_AUSENTE"
+    fi
+
+    echo "== PCI =="
+    if command -v lspci >/dev/null 2>&1; then
+        lspci -nnk 2>&1 || echo "(indisponível: falha ao executar lspci)"
+    else
+        echo "(indisponível: lspci ausente; execute etapas/12-pacotes-base.sh e gere novamente o inventário)"
+    fi
+
+    echo "== BLOCK DEVICES =="
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL 2>&1 \
+            || echo "(indisponível: falha ao executar lsblk)"
+    else
+        echo "(indisponível: comando lsblk ausente)"
+    fi
+
+    echo "== IOMMU/DMAR (pré-configuração) =="
+    if command -v dmesg >/dev/null 2>&1; then
+        if SAIDA_DMESG="$(sudo dmesg 2>&1)"; then
+            grep -i -e DMAR -e IOMMU <<< "$SAIDA_DMESG" \
+                || echo "(vazio: normal antes da etapa 30)"
+        else
+            echo "$SAIDA_DMESG"
+            echo "(indisponível: não foi possível ler dmesg)"
+        fi
+    else
+        echo "(indisponível: comando dmesg ausente)"
+    fi
 } | tee "$ARQUIVO"
 
 echo
