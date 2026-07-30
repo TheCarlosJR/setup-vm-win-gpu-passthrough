@@ -41,6 +41,109 @@ dispositivo_bloco_valido() {
     [[ "${1:-}" == /dev/* ]] && [ -b "$1" ]
 }
 
+resolver_disco_fisico() {
+    local dispositivo="${1:-}" canonico saida nome tipo extra disco
+    local -A discos=()
+
+    _DISCO_FISICO_ERRO=""
+    _DISCO_FISICO_CANONICO=""
+
+    if ! command -v lsblk >/dev/null 2>&1 || ! command -v readlink >/dev/null 2>&1; then
+        _DISCO_FISICO_ERRO="lsblk e readlink são necessários para resolver discos físicos."
+        return 1
+    fi
+    canonico="$(readlink -f -- "$dispositivo" 2>/dev/null || true)"
+    if [ -z "$canonico" ] || [[ "$canonico" == *$'\n'* ]] \
+        || ! dispositivo_bloco_valido "$canonico"; then
+        _DISCO_FISICO_ERRO="Dispositivo de bloco inválido ou indisponível: $dispositivo"
+        return 1
+    fi
+
+    saida="$(LC_ALL=C lsblk -srpn -o KNAME,TYPE -- "$canonico" 2>/dev/null)" \
+        || { _DISCO_FISICO_ERRO="Não foi possível percorrer a cadeia lsblk de $canonico."; return 1; }
+    [ -n "$saida" ] \
+        || { _DISCO_FISICO_ERRO="A cadeia lsblk de $canonico está vazia."; return 1; }
+
+    while read -r nome tipo extra; do
+        [ -n "$nome" ] || continue
+        if [ -n "$extra" ] || [ -z "$tipo" ]; then
+            _DISCO_FISICO_ERRO="Saída lsblk ambígua ao resolver $canonico."
+            return 1
+        fi
+        [[ "$nome" == /dev/* ]] || nome="/dev/$nome"
+        nome="$(readlink -f -- "$nome" 2>/dev/null || true)"
+        if [ "$tipo" = "disk" ]; then
+            if ! dispositivo_bloco_valido "$nome"; then
+                _DISCO_FISICO_ERRO="Disco físico inválido na cadeia de $canonico: $nome"
+                return 1
+            fi
+            discos[$nome]=1
+        fi
+    done <<< "$saida"
+
+    if [ "${#discos[@]}" -ne 1 ]; then
+        _DISCO_FISICO_ERRO="A cadeia de $canonico não leva inequivocamente a um único disco físico."
+        return 1
+    fi
+    for disco in "${!discos[@]}"; do
+        _DISCO_FISICO_CANONICO="$disco"
+    done
+}
+
+resolver_disco_sistema() {
+    local origem
+
+    _DISCO_SISTEMA_ERRO=""
+    _DISCO_SISTEMA_CANONICO=""
+
+    command -v findmnt >/dev/null 2>&1 \
+        || { _DISCO_SISTEMA_ERRO="findmnt é necessário para identificar o dispositivo de /."; return 1; }
+    origem="$(findmnt -nro SOURCE --target / 2>/dev/null)" \
+        || { _DISCO_SISTEMA_ERRO="Não foi possível identificar o dispositivo montado em /."; return 1; }
+    if [ -z "$origem" ] || [[ "$origem" == *$'\n'* ]]; then
+        _DISCO_SISTEMA_ERRO="A origem de / não pôde ser determinada de modo inequívoco."
+        return 1
+    fi
+    # Em Btrfs, findmnt pode acrescentar o subvolume como [/subvolume].
+    origem="${origem%%\[*}"
+    if ! resolver_disco_fisico "$origem"; then
+        _DISCO_SISTEMA_ERRO="Não foi possível resolver o disco físico de /: $_DISCO_FISICO_ERRO"
+        return 1
+    fi
+    _DISCO_SISTEMA_CANONICO="$_DISCO_FISICO_CANONICO"
+}
+
+validar_nvme_sistema() {
+    local nvme="${1:-}" disco_sistema="${2:-}" canonico disco_fisico
+
+    _NVME_SISTEMA_ERRO=""
+    _NVME_DEVICE_CANONICO=""
+
+    canonico="$(readlink -f -- "$nvme" 2>/dev/null || true)"
+    if ! dispositivo_bloco_valido "$canonico"; then
+        _NVME_SISTEMA_ERRO="NVME_DEVICE é inválido ou indisponível: $nvme"
+        return 1
+    fi
+    if [ "$nvme" != "$canonico" ]; then
+        _NVME_SISTEMA_ERRO="NVME_DEVICE deve usar o caminho canônico do bloco inteiro: $canonico"
+        return 1
+    fi
+    if ! resolver_disco_fisico "$canonico"; then
+        _NVME_SISTEMA_ERRO="Não foi possível validar NVME_DEVICE: $_DISCO_FISICO_ERRO"
+        return 1
+    fi
+    disco_fisico="$_DISCO_FISICO_CANONICO"
+    if [ "$canonico" != "$disco_fisico" ]; then
+        _NVME_SISTEMA_ERRO="NVME_DEVICE deve apontar para o disco físico inteiro, não para $canonico."
+        return 1
+    fi
+    if [ "$disco_fisico" != "$disco_sistema" ]; then
+        _NVME_SISTEMA_ERRO="NVME_DEVICE=$nvme diverge do disco físico que contém / ($disco_sistema)."
+        return 1
+    fi
+    _NVME_DEVICE_CANONICO="$disco_fisico"
+}
+
 gpu_valores_validos() {
     [[ "${1:-}" =~ ^0000:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[0-7]$ ]] \
         && [[ "${2:-}" =~ ^0000:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[0-7]$ ]] \
@@ -60,8 +163,7 @@ _blkid_hd2() {
 
 resolver_hd2() {
     local uuid="${1:-}" nvme="${2:-}" usar_sudo="${3:-0}"
-    local dev tipo fstype uuid_confirmado pkname pai tipo_pai
-    local nvme_canonico tipo_nvme nvme_pkname nvme_pai
+    local dev tipo fstype uuid_confirmado pai nvme_canonico nvme_pai
 
     _HD2_ERRO=""
     _HD2_DEV_CANONICO=""
@@ -103,48 +205,28 @@ resolver_hd2() {
         return 1
     fi
 
-    pkname="$(lsblk -dn -o PKNAME -- "$dev" 2>/dev/null || true)"
-    if [ -z "$pkname" ] || [[ "$pkname" == *$'\n'* ]]; then
-        _HD2_ERRO="Não foi possível derivar o disco-pai de $dev."
+    if ! resolver_disco_fisico "$dev"; then
+        _HD2_ERRO="Não foi possível derivar o disco físico do HD2: $_DISCO_FISICO_ERRO"
         return 1
     fi
-    [[ "$pkname" == /* ]] && pai="$pkname" || pai="/dev/$pkname"
-    pai="$(readlink -f -- "$pai" 2>/dev/null || true)"
-    if ! dispositivo_bloco_valido "$pai"; then
-        _HD2_ERRO="Disco-pai derivado do HD2 é inválido: $pai"
-        return 1
-    fi
-    tipo_pai="$(lsblk -dn -o TYPE -- "$pai" 2>/dev/null || true)"
-    if [ "$tipo_pai" != "disk" ]; then
-        _HD2_ERRO="O pai canônico de $dev não é um disco físico."
-        return 1
-    fi
+    pai="$_DISCO_FISICO_CANONICO"
 
     nvme_canonico="$(readlink -f -- "$nvme" 2>/dev/null || true)"
     if ! dispositivo_bloco_valido "$nvme_canonico"; then
         _HD2_ERRO="NVME_DEVICE é inválido ou indisponível: $nvme"
         return 1
     fi
-    tipo_nvme="$(lsblk -dn -o TYPE -- "$nvme_canonico" 2>/dev/null || true)"
-    case "$tipo_nvme" in
-        disk)
-            nvme_pai="$nvme_canonico"
-            ;;
-        part)
-            nvme_pkname="$(lsblk -dn -o PKNAME -- "$nvme_canonico" 2>/dev/null || true)"
-            [ -n "$nvme_pkname" ] && [[ "$nvme_pkname" != *$'\n'* ]] \
-                || { _HD2_ERRO="Não foi possível derivar o disco físico de NVME_DEVICE."; return 1; }
-            [[ "$nvme_pkname" == /* ]] && nvme_pai="$nvme_pkname" || nvme_pai="/dev/$nvme_pkname"
-            nvme_pai="$(readlink -f -- "$nvme_pai" 2>/dev/null || true)"
-            ;;
-        *)
-            _HD2_ERRO="NVME_DEVICE não resolve para disco ou partição física."
-            return 1
-            ;;
-    esac
-    if ! dispositivo_bloco_valido "$nvme_pai" \
-        || [ "$(lsblk -dn -o TYPE -- "$nvme_pai" 2>/dev/null || true)" != "disk" ]; then
-        _HD2_ERRO="Não foi possível validar o disco físico de NVME_DEVICE."
+    if [ "$nvme" != "$nvme_canonico" ]; then
+        _HD2_ERRO="NVME_DEVICE deve usar o caminho canônico do bloco inteiro: $nvme_canonico"
+        return 1
+    fi
+    if ! resolver_disco_fisico "$nvme_canonico"; then
+        _HD2_ERRO="Não foi possível validar o disco físico de NVME_DEVICE: $_DISCO_FISICO_ERRO"
+        return 1
+    fi
+    nvme_pai="$_DISCO_FISICO_CANONICO"
+    if [ "$nvme_canonico" != "$nvme_pai" ]; then
+        _HD2_ERRO="NVME_DEVICE deve apontar para o disco físico inteiro."
         return 1
     fi
     if [ "$pai" = "$nvme_pai" ]; then
@@ -177,7 +259,9 @@ valores_cpu_validos() {
     IFS=',' read -r -a lista_vm <<< "$cpus_vm"
     IFS=',' read -r -a lista_host <<< "$cpus_host"
     [ "${#lista_vm[@]}" -eq "$((10#$vcpus))" ] || return 1
-    [ "${#lista_host[@]}" -gt 0 ] || return 1
+    # A etapa 53 exige ao menos duas CPUs lógicas para o host. Como todas as
+    # CPUs online são conferidas abaixo, a regra também mantém núcleos completos.
+    [ "${#lista_host[@]}" -ge 2 ] || return 1
 
     command -v lscpu >/dev/null 2>&1 || return 1
     saida="$(LC_ALL=C lscpu -e=CPU,CORE,SOCKET,ONLINE 2>/dev/null)" || return 1
@@ -231,6 +315,11 @@ valores_cpu_validos() {
     done
 }
 
+# Margem mínima defensiva para o host; não é uma recomendação de
+# dimensionamento. A referência de 16 GiB de VM em 32 GiB continua sendo uma
+# margem confortável, enquanto esta guarda impede apenas reservas impraticáveis.
+RAM_HOST_MIN_MB=4096
+
 valores_memoria_validos() {
     local ram="${1:-}" hugepages="${2:-}" total="${3:-}"
     inteiro_positivo "$ram" && inteiro_positivo "$hugepages" \
@@ -239,12 +328,13 @@ valores_memoria_validos() {
         && [ "${#total}" -le 12 ] || return 1
     [ $((10#$ram % 1024)) -eq 0 ] \
         && [ "$((10#$hugepages))" -eq "$((10#$ram / 1024))" ] \
-        && [ "$((10#$ram))" -lt "$((10#$total))" ]
+        && [ "$((10#$ram))" -le "$((10#$total - RAM_HOST_MIN_MB))" ]
 }
 
 verificar() {
     [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
-    local var caminho ram_total_mb
+    local var caminho ram_total_mb disco_sistema="" hd2_fisico=""
+    local hd1_alvo="" hd1_fisico=""
     local -a obrigatorias=(
         USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_AUDIO_PCI_ID
         GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID DM_SERVICE NVME_DEVICE
@@ -290,20 +380,50 @@ verificar() {
     [ -z "${QCOW2_TAMANHO:-}" ] || [[ "$QCOW2_TAMANHO" =~ ^[1-9][0-9]*[KMGT]$ ]] \
         || v_falta "QCOW2_TAMANHO tem formato inválido."
 
+    if resolver_disco_sistema; then
+        disco_sistema="$_DISCO_SISTEMA_CANONICO"
+        if [ -n "${NVME_DEVICE:-}" ] \
+            && ! validar_nvme_sistema "$NVME_DEVICE" "$disco_sistema"; then
+            v_falta "$_NVME_SISTEMA_ERRO"
+        fi
+    else
+        v_falta "$_DISCO_SISTEMA_ERRO"
+    fi
+
     if [ -n "${UUID_HD2:-}" ] && [ -n "${NVME_DEVICE:-}" ] \
         && uuid_basico_valido "$UUID_HD2"; then
         if resolver_hd2 "$UUID_HD2" "$NVME_DEVICE" 0; then
-            [ "${HD2_DISCO_PAI:-}" = "$_HD2_DISCO_PAI_CANONICO" ] \
-                || v_falta "HD2_DISCO_PAI não corresponde ao disco-pai canônico de UUID_HD2."
+            hd2_fisico="$_HD2_DISCO_PAI_CANONICO"
+            [ "${HD2_DISCO_PAI:-}" = "$hd2_fisico" ] \
+                || v_falta "HD2_DISCO_PAI não corresponde ao disco físico canônico de UUID_HD2."
+            [ -z "$disco_sistema" ] || [ "$hd2_fisico" != "$disco_sistema" ] \
+                || v_falta "UUID_HD2 pertence ao mesmo disco físico que contém /."
         else
             v_falta "$_HD2_ERRO"
+        fi
+    fi
+
+    if [ -n "${HD1_BY_ID_PATH:-}" ]; then
+        hd1_alvo="$(readlink -f -- "$HD1_BY_ID_PATH" 2>/dev/null || true)"
+        if ! dispositivo_bloco_valido "$hd1_alvo"; then
+            v_falta "HD1_BY_ID_PATH não resolve para um dispositivo de bloco acessível."
+        elif ! resolver_disco_fisico "$hd1_alvo"; then
+            v_falta "Não foi possível resolver o disco físico do HD1: $_DISCO_FISICO_ERRO"
+        else
+            hd1_fisico="$_DISCO_FISICO_CANONICO"
+            [ "$hd1_alvo" = "$hd1_fisico" ] \
+                || v_falta "HD1_BY_ID_PATH deve apontar para um disco físico inteiro."
+            [ -z "$disco_sistema" ] || [ "$hd1_fisico" != "$disco_sistema" ] \
+                || v_falta "HD1 aponta para o mesmo disco físico que contém /."
+            [ -z "$hd2_fisico" ] || [ "$hd1_fisico" != "$hd2_fisico" ] \
+                || v_falta "HD1 e HD2 apontam para o mesmo disco físico."
         fi
     fi
 
     if [ -n "${CPUS_VM:-}${CPUS_HOST:-}${VM_CORES:-}${VM_THREADS:-}${VM_VCPUS:-}" ] \
         && ! valores_cpu_validos "${CPUS_VM:-}" "${CPUS_HOST:-}" \
             "${VM_CORES:-}" "${VM_THREADS:-}" "${VM_VCPUS:-}"; then
-        v_falta "Topologia ou listas de CPU inválidas/inconsistentes com as CPUs online."
+        v_falta "Topologia inválida: preserve irmãos SMT e ao menos 2 CPUs lógicas em núcleo(s) completo(s) para o host."
     fi
 
     ram_total_mb="$(awk '/MemTotal/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null || true)"
@@ -311,7 +431,7 @@ verificar() {
         v_falta "Não foi possível detectar a RAM total do host."
     elif [ -n "${VM_RAM_MB:-}${HUGEPAGES_1G:-}" ] \
         && ! valores_memoria_validos "${VM_RAM_MB:-}" "${HUGEPAGES_1G:-}" "$ram_total_mb"; then
-        v_falta "Reserva de RAM/HugePages inválida, inconsistente ou impossível para a RAM total."
+        v_falta "Reserva de RAM/HugePages inválida; preserve no mínimo ${RAM_HOST_MIN_MB} MiB para o host."
     fi
     v_fim
 }
@@ -322,7 +442,7 @@ REDETECTAR=0
 
 exigir_nao_root
 exigir_sudo
-exigir_comando lspci lsblk blkid lscpu ip awk sed readlink flock stat
+exigir_comando lspci lsblk blkid lscpu findmnt ip awk sed readlink flock stat
 
 # ja_definido VAR: retorna 0 se a variável já tem valor e não estamos redetectando
 ja_definido() {
@@ -470,22 +590,18 @@ echo "Visão geral (compare com o inventário do Capítulo 3):"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL,TRAN
 echo
 
-# 5a. NVMe
+# 5a. NVMe (nome normativo do projeto para o disco físico do sistema)
+if ! resolver_disco_sistema; then
+    falhar "$_DISCO_SISTEMA_ERRO"
+fi
+DISCO_SISTEMA="$_DISCO_SISTEMA_CANONICO"
 if ja_definido NVME_DEVICE; then
-    dispositivo_bloco_valido "$NVME_DEVICE" || falhar "NVME_DEVICE inválido ou inexistente: $NVME_DEVICE"
-    info "NVME_DEVICE já definido: $NVME_DEVICE"
+    validar_nvme_sistema "$NVME_DEVICE" "$DISCO_SISTEMA" \
+        || falhar "$_NVME_SISTEMA_ERRO"
+    info "NVME_DEVICE já definido e confirmado pelo dispositivo de /: $NVME_DEVICE"
 else
-    mapfile -t NVMES < <(lsblk -dn -o NAME,TRAN | awk '$2=="nvme"{print "/dev/"$1}')
-    case "${#NVMES[@]}" in
-        0) aviso "Nenhum NVMe detectado; informe manualmente."
-           NVME_ESCOLHIDO="$(perguntar 'Dispositivo do disco do sistema' '/dev/nvme0n1')" ;;
-        1) ok "NVMe detectado: ${NVMES[0]}"
-           NVME_ESCOLHIDO="${NVMES[0]}" ;;
-        *) echo "Mais de um NVMe:"; printf '  %s\n' "${NVMES[@]}"
-           NVME_ESCOLHIDO="$(perguntar 'Qual é o disco do SISTEMA?' "${NVMES[0]}")" ;;
-    esac
-    dispositivo_bloco_valido "$NVME_ESCOLHIDO" \
-        || falhar "Dispositivo do sistema inválido ou inexistente: $NVME_ESCOLHIDO"
+    NVME_ESCOLHIDO="$DISCO_SISTEMA"
+    ok "Disco físico do sistema derivado de /: $NVME_ESCOLHIDO"
     salvar_conf NVME_DEVICE "$NVME_ESCOLHIDO"
 fi
 
@@ -564,16 +680,21 @@ else
     HD1_NOVO=1
 fi
 
-HD1_ALVO="$(readlink -f "$HD1")"
+HD1_ALVO="$(readlink -f -- "$HD1" 2>/dev/null || true)"
 dispositivo_bloco_valido "$HD1_ALVO" || falhar "HD1 inválido ou inexistente: $HD1"
-NVME_ALVO="$(readlink -f "$NVME_DEVICE")"
-HD2_PAI_ALVO="$(readlink -f "$HD2_DISCO_PAI")"
-[ "$HD1_ALVO" = "$NVME_ALVO" ] \
-    && falhar "O caminho escolhido aponta para o NVMe do sistema. Abortado."
-[ "$HD1_ALVO" = "$HD2_PAI_ALVO" ] \
-    && falhar "O caminho escolhido aponta para o disco do HD2. Abortado."
+if ! resolver_disco_fisico "$HD1_ALVO"; then
+    falhar "Não foi possível resolver o disco físico do HD1: $_DISCO_FISICO_ERRO"
+fi
+HD1_DISCO_FISICO="$_DISCO_FISICO_CANONICO"
+[ "$HD1_ALVO" = "$HD1_DISCO_FISICO" ] \
+    || falhar "HD1 deve apontar para um disco físico inteiro. Abortado."
+[ "$HD1_DISCO_FISICO" != "$DISCO_SISTEMA" ] \
+    || falhar "O caminho escolhido aponta para o disco físico do sistema. Abortado."
+[ "$HD1_DISCO_FISICO" != "$HD2_DISCO_PAI_NOVO" ] \
+    || falhar "O caminho escolhido aponta para o disco físico do HD2. Abortado."
 if [ "$HD1_NOVO" -eq 1 ]; then
-    confirmar "Confirmar HD1 = $HD1 ($HD1_ALVO)? Confira modelo/serial no inventário." || falhar "Cancelado."
+    confirmar "Confirmar HD1 = $HD1 ($HD1_DISCO_FISICO)? Confira modelo/serial no inventário." \
+        || falhar "Cancelado."
     salvar_conf HD1_BY_ID_PATH "$HD1"
 fi
 
@@ -603,18 +724,25 @@ else
 
     mapfile -t NUCLEOS < <(printf '%s\n' "${!NUCLEO_THREADS[@]}" | sort -t: -k1,1n -k2,2n)
     TOTAL_NUCLEOS="${#NUCLEOS[@]}"
-    [ "$TOTAL_NUCLEOS" -ge 2 ] \
-        || falhar "São necessários ao menos 2 núcleos físicos online para reservar um ao host."
+    [ "$TOTAL_NUCLEOS" -gt 0 ] || falhar "Nenhum núcleo físico online foi detectado."
     THREADS_POR_NUCLEO="$(awk -F',' '{print NF}' <<< "${NUCLEO_THREADS[${NUCLEOS[0]}]}")"
     inteiro_positivo "$THREADS_POR_NUCLEO" || falhar "Número de threads por núcleo inválido."
+    for CORE in "${NUCLEOS[@]}"; do
+        QTD_THREADS_CORE="$(awk -F',' '{print NF}' <<< "${NUCLEO_THREADS[$CORE]}")"
+        [ "$QTD_THREADS_CORE" -eq "$THREADS_POR_NUCLEO" ] \
+            || falhar "A topologia online tem núcleos com quantidades diferentes de threads."
+    done
+    NUCLEOS_HOST_MIN=$(( (2 + THREADS_POR_NUCLEO - 1) / THREADS_POR_NUCLEO ))
+    MAX_NUCLEOS_VM=$((TOTAL_NUCLEOS - NUCLEOS_HOST_MIN))
+    [ "$MAX_NUCLEOS_VM" -ge 1 ] \
+        || falhar "Não há núcleos suficientes para a VM e ao menos 2 CPUs lógicas completas para o host."
     info "Detectados $TOTAL_NUCLEOS núcleos físicos, $THREADS_POR_NUCLEO thread(s) por núcleo."
 
     PADRAO_VM=6
-    [ "$TOTAL_NUCLEOS" -le 4 ] && PADRAO_VM=$((TOTAL_NUCLEOS-1))
-    [ "$PADRAO_VM" -lt "$TOTAL_NUCLEOS" ] || PADRAO_VM=$((TOTAL_NUCLEOS-1))
-    NUC_VM="$(perguntar "Núcleos físicos dedicados à VM (o restante fica com o host)" "$PADRAO_VM")"
-    indice_array_valido "$NUC_VM" "$((TOTAL_NUCLEOS - 1))" \
-        || falhar "Número de núcleos inválido; reserve ao menos 1 núcleo físico para o host."
+    [ "$PADRAO_VM" -le "$MAX_NUCLEOS_VM" ] || PADRAO_VM="$MAX_NUCLEOS_VM"
+    NUC_VM="$(perguntar "Núcleos físicos dedicados à VM (mínimo de $NUCLEOS_HOST_MIN fica com o host)" "$PADRAO_VM")"
+    indice_array_valido "$NUC_VM" "$MAX_NUCLEOS_VM" \
+        || falhar "Número inválido; preserve ao menos 2 CPUs lógicas em núcleo(s) completo(s) para o host."
     NUC_VM=$((10#$NUC_VM))
 
     LISTA_VM=""; LISTA_HOST=""
@@ -652,6 +780,7 @@ titulo "7/8 Memória da VM"
 RAM_TOTAL_MB="$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)"
 inteiro_positivo "$RAM_TOTAL_MB" || falhar "Não foi possível detectar a RAM total do host."
 info "RAM total do host: ${RAM_TOTAL_MB} MiB"
+info "Margem mínima defensiva do host: ${RAM_HOST_MIN_MB} MiB (não é meta de dimensionamento)."
 if ja_definido VM_RAM_MB; then
     RAM_VM="$VM_RAM_MB"
     info "VM_RAM_MB já definido: $VM_RAM_MB"
@@ -661,8 +790,8 @@ fi
 inteiro_positivo "$RAM_VM" && [ "${#RAM_VM}" -le 9 ] \
     || falhar "RAM da VM deve ser um inteiro positivo em MiB."
 RAM_VM=$((10#$RAM_VM))
-[ "$RAM_VM" -lt "$RAM_TOTAL_MB" ] \
-    || falhar "RAM da VM deve ser menor que a RAM total para deixar memória ao host."
+[ "$RAM_VM" -le "$((RAM_TOTAL_MB - RAM_HOST_MIN_MB))" ] \
+    || falhar "RAM da VM deve preservar no mínimo ${RAM_HOST_MIN_MB} MiB para o host."
 [ $((RAM_VM % 1024)) -eq 0 ] \
     || falhar "RAM da VM deve ser múltipla de 1024 MiB para HugePages de 1 GiB."
 HUGEPAGES_CALCULADAS=$((RAM_VM / 1024))

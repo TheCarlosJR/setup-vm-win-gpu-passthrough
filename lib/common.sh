@@ -271,7 +271,7 @@ _conf_com_lock() (
 )
 
 _conf_gravar_atomico() (
-    local linha chave codificado numero=0 temporario=""
+    local linha chave codificado numero=0 temporario="" conf_destino="$CONF_ARQUIVO"
     local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}"
     local regex_comentario='^[[:blank:]]*(#.*)?$'
     local -a ordem=()
@@ -299,24 +299,32 @@ _conf_gravar_atomico() (
             while IFS= read -r linha || [ -n "$linha" ]; do
                 numero=$((numero + 1))
                 if [[ "$linha" =~ $regex_comentario ]]; then
-                    printf '%s\n' "$linha"
+                    printf '%s\n' "$linha" || return 1
                     continue
                 fi
                 _conf_decodificar_linha "$linha" "$numero"
                 chave="$_CONF_LINHA_CHAVE"
                 if [ -n "${novos[$chave]+definida}" ]; then
-                    printf '%s="%s"%s\n' "$chave" "${novos[$chave]}" "$_CONF_LINHA_SUFIXO"
+                    printf '%s="%s"%s\n' \
+                        "$chave" "${novos[$chave]}" "$_CONF_LINHA_SUFIXO" || return 1
                     encontrados[$chave]=1
                 else
-                    printf '%s\n' "$linha"
+                    printf '%s\n' "$linha" || return 1
                 fi
             done < "$CONF_ARQUIVO"
         fi
         for chave in "${ordem[@]}"; do
-            [ -n "${encontrados[$chave]+definida}" ] \
-                || printf '%s="%s"\n' "$chave" "${novos[$chave]}"
+            if [ -z "${encontrados[$chave]+definida}" ]; then
+                printf '%s="%s"\n' "$chave" "${novos[$chave]}" || return 1
+            fi
         done
     } > "$temporario" || return 1
+
+    # Recarrega o batch completo pelo parser seguro sem alterar as variáveis
+    # já carregadas e sem tentar adquirir novamente o lock ainda mantido.
+    CONF_ARQUIVO="$temporario"
+    _conf_validar_arquivo 0 || return 1
+    CONF_ARQUIVO="$conf_destino"
 
     mv -f -- "$temporario" "$CONF_ARQUIVO" || return 1
     temporario=""
