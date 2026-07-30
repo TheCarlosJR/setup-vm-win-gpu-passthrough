@@ -51,26 +51,208 @@ exigir_comando() {
     done
 }
 
+# --- Validadores simples ------------------------------------------------------
+inteiro_positivo() {
+    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+indice_array_valido() {
+    # indice_array_valido ESCOLHA TAMANHO -> índice humano entre 1 e TAMANHO
+    local indice="${1:-}" tamanho="${2:-}"
+    inteiro_positivo "$indice" || return 1
+    [[ "$tamanho" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    [ "${#indice}" -le 18 ] && [ "${#tamanho}" -le 18 ] || return 1
+    (( 10#$indice <= 10#$tamanho ))
+}
+
+ipv4_valido() {
+    local ip="${1:-}" octeto
+    local -a octetos
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r -a octetos <<< "$ip"
+    for octeto in "${octetos[@]}"; do
+        [ "${#octeto}" -eq 1 ] || [ "${octeto:0:1}" != "0" ] || return 1
+        (( 10#$octeto <= 255 )) || return 1
+    done
+}
+
 # --- Configuração central (passthrough.conf) ---------------------------------
-carregar_conf() {
-    if [ -f "$CONF_ARQUIVO" ]; then
-        # shellcheck disable=SC1090
-        source "$CONF_ARQUIVO"
+conf_chave_permitida() {
+    case "${1:-}" in
+        USUARIO_LINUX|VM_NAME|BOOTLOADER|GPU_PCI_ID|GPU_AUDIO_PCI_ID|\
+        GPU_VENDOR_DEVICE_ID|GPU_AUDIO_VENDOR_DEVICE_ID|IOMMU_GROUP_GPU|\
+        DM_SERVICE|NVME_DEVICE|UUID_HD2|HD2_DISCO_PAI|HD1_BY_ID_PATH|\
+        DOCS4_MONTAGEM|QCOW2_PATH|QCOW2_TAMANHO|VM_RAM_MB|VM_VCPUS|\
+        VM_CORES|VM_THREADS|CPUS_VM|CPUS_HOST|HUGEPAGES_1G|ISO_WINDOWS|\
+        ISO_VIRTIO|INTERFACE_FISICA|VM_IP_FIXO|IP_FIXO_HOST|TRANSFER_USER)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_conf_decodificar_linha() {
+    # Define _CONF_LINHA_CHAVE, _CONF_LINHA_VALOR e _CONF_LINHA_SUFIXO.
+    local linha="$1" numero="$2" resto caractere proximo valor="" i=1
+    local regex_chave='^([A-Z][A-Z0-9_]*)='
+    local regex_sufixo='^[[:blank:]]*(#.*)?$'
+
+    if [[ "$linha" =~ $regex_chave ]]; then
+        _CONF_LINHA_CHAVE="${BASH_REMATCH[1]}"
+    else
+        falhar "Linha $numero malformada em $CONF_ARQUIVO."
+    fi
+    conf_chave_permitida "$_CONF_LINHA_CHAVE" \
+        || falhar "Chave desconhecida '$_CONF_LINHA_CHAVE' na linha $numero de $CONF_ARQUIVO."
+
+    resto="${linha#*=}"
+    [ "${resto:0:1}" = '"' ] \
+        || falhar "Linha $numero malformada em $CONF_ARQUIVO: o valor deve estar entre aspas."
+
+    while [ "$i" -lt "${#resto}" ]; do
+        caractere="${resto:i:1}"
+        if [ "$caractere" = '"' ]; then
+            _CONF_LINHA_SUFIXO="${resto:i+1}"
+            [[ "$_CONF_LINHA_SUFIXO" =~ $regex_sufixo ]] \
+                || falhar "Conteúdo inválido após o valor na linha $numero de $CONF_ARQUIVO."
+            _CONF_LINHA_VALOR="$valor"
+            return 0
+        fi
+        if [ "$caractere" = '\' ]; then
+            [ $((i + 1)) -lt "${#resto}" ] \
+                || falhar "Escape incompleto na linha $numero de $CONF_ARQUIVO."
+            proximo="${resto:i+1:1}"
+            if [ "$proximo" = '\' ] || [ "$proximo" = '"' ] \
+                || [ "$proximo" = '$' ] || [ "$proximo" = '`' ]; then
+                valor+="$proximo"
+                i=$((i + 2))
+                continue
+            fi
+            # Compatibilidade com arquivos antigos: escapes que o serializer
+            # não emite são mantidos literalmente, nunca interpretados.
+            valor+='\'
+            i=$((i + 1))
+            continue
+        fi
+        valor+="$caractere"
+        i=$((i + 1))
+    done
+
+    falhar "Aspas de fechamento ausentes na linha $numero de $CONF_ARQUIVO."
+}
+
+_conf_validar_arquivo() {
+    local carregar="${1:-0}" linha chave numero=0 status antes_nul
+    local regex_comentario='^[[:blank:]]*(#.*)?$'
+    local -A valores=()
+
+    [ -r "$CONF_ARQUIVO" ] || falhar "Sem permissão para ler $CONF_ARQUIVO."
+    if IFS= read -r -d '' antes_nul < "$CONF_ARQUIVO"; then
+        falhar "Byte NUL encontrado em $CONF_ARQUIVO."
+    fi
+    if LC_ALL=C grep -q '[[:cntrl:]]' "$CONF_ARQUIVO"; then
+        falhar "Caractere de controle encontrado em $CONF_ARQUIVO."
+    else
+        status=$?
+        [ "$status" -eq 1 ] || falhar "Não foi possível validar $CONF_ARQUIVO."
+    fi
+
+    while IFS= read -r linha || [ -n "$linha" ]; do
+        numero=$((numero + 1))
+        [[ "$linha" =~ $regex_comentario ]] && continue
+        _conf_decodificar_linha "$linha" "$numero"
+        chave="$_CONF_LINHA_CHAVE"
+        [ -z "${valores[$chave]+definida}" ] \
+            || falhar "Chave duplicada '$chave' na linha $numero de $CONF_ARQUIVO."
+        valores[$chave]="$_CONF_LINHA_VALOR"
+    done < "$CONF_ARQUIVO"
+
+    if [ "$carregar" -eq 1 ]; then
+        for chave in "${!valores[@]}"; do
+            printf -v "$chave" '%s' "${valores[$chave]}"
+        done
     fi
 }
 
+carregar_conf() {
+    [ -L "$CONF_ARQUIVO" ] && falhar "$CONF_ARQUIVO não pode ser um link simbólico."
+    [ -e "$CONF_ARQUIVO" ] || return 0
+    [ -f "$CONF_ARQUIVO" ] || falhar "$CONF_ARQUIVO não é um arquivo regular."
+    _conf_validar_arquivo 1
+}
+
+_conf_codificar_valor() {
+    local valor="$1" caractere saida="" i
+    for ((i = 0; i < ${#valor}; i++)); do
+        caractere="${valor:i:1}"
+        if [ "$caractere" = '\' ] || [ "$caractere" = '"' ] \
+            || [ "$caractere" = '$' ] || [ "$caractere" = '`' ]; then
+            saida+='\'
+        fi
+        saida+="$caractere"
+    done
+    printf '%s' "$saida"
+}
+
+_conf_gravar_atomico() (
+    local chave="$1" codificado="$2" linha numero=0 encontrada=0
+    local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}" temporario=""
+    local regex_comentario='^[[:blank:]]*(#.*)?$'
+
+    trap 'status=$?; [ -z "$temporario" ] || rm -f -- "$temporario"; exit "$status"' EXIT
+    trap 'exit 1' HUP INT TERM
+
+    temporario="$(mktemp -- "$diretorio/.${nome}.tmp.XXXXXX")" || return 1
+    chmod 0600 "$temporario" || return 1
+
+    {
+        if [ -e "$CONF_ARQUIVO" ]; then
+            while IFS= read -r linha || [ -n "$linha" ]; do
+                numero=$((numero + 1))
+                if [[ "$linha" =~ $regex_comentario ]]; then
+                    printf '%s\n' "$linha"
+                    continue
+                fi
+                _conf_decodificar_linha "$linha" "$numero"
+                if [ "$_CONF_LINHA_CHAVE" = "$chave" ]; then
+                    printf '%s="%s"%s\n' "$chave" "$codificado" "$_CONF_LINHA_SUFIXO"
+                    encontrada=1
+                else
+                    printf '%s\n' "$linha"
+                fi
+            done < "$CONF_ARQUIVO"
+        fi
+        [ "$encontrada" -eq 1 ] || printf '%s="%s"\n' "$chave" "$codificado"
+    } > "$temporario" || return 1
+
+    mv -f -- "$temporario" "$CONF_ARQUIVO" || return 1
+    temporario=""
+)
+
 salvar_conf() {
-    # salvar_conf CHAVE VALOR -> cria/atualiza a linha CHAVE="VALOR" no conf
-    local chave="$1" valor="$2"
-    touch "$CONF_ARQUIVO"
-    if grep -q "^${chave}=" "$CONF_ARQUIVO"; then
-        sed -i "s|^${chave}=.*|${chave}=\"${valor}\"|" "$CONF_ARQUIVO"
-    else
-        echo "${chave}=\"${valor}\"" >> "$CONF_ARQUIVO"
+    # salvar_conf CHAVE VALOR -> cria/atualiza uma entrada de dados no conf
+    [ "$#" -eq 2 ] || falhar "Uso: salvar_conf CHAVE VALOR"
+    local chave="$1" valor="$2" codificado
+
+    conf_chave_permitida "$chave" || falhar "Chave de configuração não permitida: '$chave'."
+    if [[ "$valor" =~ [[:cntrl:]] ]]; then
+        falhar "O valor de '$chave' contém newline, CR, NUL ou outro caractere de controle."
     fi
-    # exporta para o processo atual também
+    [ -L "$CONF_ARQUIVO" ] && falhar "$CONF_ARQUIVO não pode ser um link simbólico."
+    if [ -e "$CONF_ARQUIVO" ]; then
+        [ -f "$CONF_ARQUIVO" ] || falhar "$CONF_ARQUIVO não é um arquivo regular."
+        _conf_validar_arquivo 0
+    fi
+
+    codificado="$(_conf_codificar_valor "$valor")"
+    _conf_gravar_atomico "$chave" "$codificado" \
+        || falhar "Falha ao atualizar $CONF_ARQUIVO de forma atômica."
+
+    # Atualiza e exporta a chave no processo atual somente após o rename.
     printf -v "$chave" '%s' "$valor"
-    export "${chave?}"
+    export "$chave"
 }
 
 exigir_conf() {

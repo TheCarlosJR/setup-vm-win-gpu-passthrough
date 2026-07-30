@@ -2,7 +2,8 @@
 # passthrough.conf - configuração central dos scripts
 # ============================================================================
 # Este arquivo é gerado/atualizado por: etapas/02-detectar-config.sh
-# (pode também ser editado à mão; os scripts fazem "source" dele).
+# (pode também ser editado à mão no formato restrito CHAVE="valor"; este
+# arquivo contém apenas dados e nunca é interpretado como shell executável).
 #
 # Cada variável corresponde a um "placeholder" do manual
 # Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
@@ -34,6 +35,7 @@ DM_SERVICE=""
 # --- Discos (Capítulos 5, 11 e 19) ------------------------------------------
 NVME_DEVICE=""                   # ex. de formato: /dev/nvme0n1
 UUID_HD2=""                      # <UUID_HD2> (obtido com blkid)
+HD2_DISCO_PAI=""                 # derivado automaticamente de UUID_HD2
 HD1_BY_ID_PATH=""                # caminho completo /dev/disk/by-id/... do HD1
 DOCS4_MONTAGEM="/mnt/docs4"
 
