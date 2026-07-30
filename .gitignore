@@ -1,0 +1,3 @@
+# Configuração local (contém valores do SEU hardware) e backups gerados
+passthrough.conf
+backups/

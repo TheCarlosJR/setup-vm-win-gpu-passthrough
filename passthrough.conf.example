@@ -1,0 +1,61 @@
+# ============================================================================
+# passthrough.conf - configuração central dos scripts
+# ============================================================================
+# Este arquivo é gerado/atualizado por: etapas/02-detectar-config.sh
+# (pode também ser editado à mão; os scripts fazem "source" dele).
+#
+# Cada variável corresponde a um "placeholder" do manual
+# Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
+# todos os valores de hardware devem vir da detecção feita no SEU sistema.
+#
+# Para usar este modelo manualmente:
+#   cp passthrough.conf.example passthrough.conf
+#   nano passthrough.conf
+# ============================================================================
+
+# --- Identidade -------------------------------------------------------------
+USUARIO_LINUX=""                 # usuário Linux principal (ex.: charles)
+VM_NAME="win11"                  # nome da VM no libvirt (<VM_NAME>)
+
+# --- Bootloader (Capítulo 15): kernelstub (padrão Pop!_OS) ou grub ----------
+BOOTLOADER=""
+
+# --- GPU (Capítulo 16): endereços completos, com domínio 0000: --------------
+GPU_PCI_ID=""                    # <GPU_PCI_ID>            ex. de formato: 0000:0c:00.0
+GPU_AUDIO_PCI_ID=""              # <GPU_AUDIO_PCI_ID>      ex. de formato: 0000:0c:00.1
+GPU_VENDOR_DEVICE_ID=""          # <GPU_VENDOR_DEVICE_ID>  ex. de formato: 10de:2504
+GPU_AUDIO_VENDOR_DEVICE_ID=""    # <GPU_AUDIO_VENDOR_DEVICE_ID>
+IOMMU_GROUP_GPU=""               # preenchido automaticamente após a etapa 30
+
+# --- Serviço gráfico parado/religado pelos hooks (Capítulo 19) --------------
+# gdm3 no Pop!_OS/GNOME; "display-manager" funciona como alias universal.
+DM_SERVICE=""
+
+# --- Discos (Capítulos 5, 11 e 19) ------------------------------------------
+NVME_DEVICE=""                   # ex. de formato: /dev/nvme0n1
+UUID_HD2=""                      # <UUID_HD2> (obtido com blkid)
+HD1_BY_ID_PATH=""                # caminho completo /dev/disk/by-id/... do HD1
+DOCS4_MONTAGEM="/mnt/docs4"
+
+# --- VM (Capítulos 17 e 21) --------------------------------------------------
+QCOW2_PATH="/vm/Windows11.qcow2"
+QCOW2_TAMANHO="250G"
+VM_RAM_MB="16384"                # RAM da VM em MiB
+VM_VCPUS="12"                    # total de vCPUs (VM_CORES x VM_THREADS)
+VM_CORES="6"                     # núcleos físicos dedicados à VM
+VM_THREADS="2"                   # threads por núcleo (SMT)
+CPUS_VM=""                       # ex. de formato: 0,8,1,9,2,10,3,11,4,12,5,13
+CPUS_HOST=""                     # ex. de formato: 6,14,7,15
+HUGEPAGES_1G="16"                # páginas de 1 GiB reservadas (= VM_RAM_MB/1024)
+
+# --- ISOs (Capítulo 17): baixe SEMPRE dos canais oficiais -------------------
+ISO_WINDOWS=""                   # caminho local da ISO do Windows 11
+ISO_VIRTIO=""                    # caminho local da virtio-win.iso
+
+# --- Rede (Capítulos 23 e 24) ------------------------------------------------
+INTERFACE_FISICA=""              # ex. de formato: enp5s0
+VM_IP_FIXO=""                    # IP fixo da VM (reserva DHCP no roteador)
+IP_FIXO_HOST=""                  # IP fixo do host/br0 (reserva DHCP no roteador)
+
+# --- Airlock (Capítulo 24) ----------------------------------------------------
+TRANSFER_USER="vmtransfer"       # conta de sistema dedicada às transferências

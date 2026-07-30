@@ -1,0 +1,8 @@
+# Garante line endings corretos caso esta pasta vire um repositório git.
+# Scripts bash quebram com CRLF; tudo aqui é forçado para LF.
+* text=auto
+*.sh text eol=lf
+*.conf text eol=lf
+*.example text eol=lf
+*.md text eol=lf
+*.ps1 text eol=lf
