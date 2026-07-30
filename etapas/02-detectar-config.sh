@@ -48,11 +48,122 @@ gpu_valores_validos() {
         && [[ "${4:-}" =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{4}$ ]]
 }
 
+_blkid_hd2() {
+    local usar_sudo="$1"
+    shift
+    if [ "$usar_sudo" -eq 1 ]; then
+        sudo blkid "$@"
+    else
+        blkid "$@"
+    fi
+}
+
+resolver_hd2() {
+    local uuid="${1:-}" nvme="${2:-}" usar_sudo="${3:-0}"
+    local dev tipo fstype uuid_confirmado pkname pai tipo_pai
+    local nvme_canonico tipo_nvme nvme_pkname nvme_pai
+
+    _HD2_ERRO=""
+    _HD2_DEV_CANONICO=""
+    _HD2_DISCO_PAI_CANONICO=""
+
+    if ! uuid_basico_valido "$uuid"; then
+        _HD2_ERRO="UUID_HD2 tem formato inválido."
+        return 1
+    fi
+    if ! command -v blkid >/dev/null 2>&1 || ! command -v lsblk >/dev/null 2>&1; then
+        _HD2_ERRO="blkid e lsblk são necessários para validar UUID_HD2."
+        return 1
+    fi
+
+    dev="$(_blkid_hd2 "$usar_sudo" -U "$uuid" 2>/dev/null || true)"
+    if [ -z "$dev" ] || [[ "$dev" == *$'\n'* ]]; then
+        _HD2_ERRO="UUID_HD2=$uuid não está disponível em uma única partição."
+        return 1
+    fi
+    dev="$(readlink -f -- "$dev" 2>/dev/null || true)"
+    if ! dispositivo_bloco_valido "$dev"; then
+        _HD2_ERRO="UUID_HD2=$uuid não identifica uma partição de bloco acessível."
+        return 1
+    fi
+
+    tipo="$(lsblk -dn -o TYPE -- "$dev" 2>/dev/null || true)"
+    if [ "$tipo" != "part" ]; then
+        _HD2_ERRO="UUID_HD2=$uuid deve identificar uma partição, não '$tipo'."
+        return 1
+    fi
+    fstype="$(lsblk -dn -o FSTYPE -- "$dev" 2>/dev/null || true)"
+    if [ "$fstype" != "ntfs" ] && [ "$fstype" != "ntfs3" ]; then
+        _HD2_ERRO="UUID_HD2=$uuid deve identificar uma partição ntfs/ntfs3."
+        return 1
+    fi
+    uuid_confirmado="$(lsblk -dn -o UUID -- "$dev" 2>/dev/null || true)"
+    if [ "$uuid_confirmado" != "$uuid" ]; then
+        _HD2_ERRO="A partição $dev não confirma UUID_HD2=$uuid."
+        return 1
+    fi
+
+    pkname="$(lsblk -dn -o PKNAME -- "$dev" 2>/dev/null || true)"
+    if [ -z "$pkname" ] || [[ "$pkname" == *$'\n'* ]]; then
+        _HD2_ERRO="Não foi possível derivar o disco-pai de $dev."
+        return 1
+    fi
+    [[ "$pkname" == /* ]] && pai="$pkname" || pai="/dev/$pkname"
+    pai="$(readlink -f -- "$pai" 2>/dev/null || true)"
+    if ! dispositivo_bloco_valido "$pai"; then
+        _HD2_ERRO="Disco-pai derivado do HD2 é inválido: $pai"
+        return 1
+    fi
+    tipo_pai="$(lsblk -dn -o TYPE -- "$pai" 2>/dev/null || true)"
+    if [ "$tipo_pai" != "disk" ]; then
+        _HD2_ERRO="O pai canônico de $dev não é um disco físico."
+        return 1
+    fi
+
+    nvme_canonico="$(readlink -f -- "$nvme" 2>/dev/null || true)"
+    if ! dispositivo_bloco_valido "$nvme_canonico"; then
+        _HD2_ERRO="NVME_DEVICE é inválido ou indisponível: $nvme"
+        return 1
+    fi
+    tipo_nvme="$(lsblk -dn -o TYPE -- "$nvme_canonico" 2>/dev/null || true)"
+    case "$tipo_nvme" in
+        disk)
+            nvme_pai="$nvme_canonico"
+            ;;
+        part)
+            nvme_pkname="$(lsblk -dn -o PKNAME -- "$nvme_canonico" 2>/dev/null || true)"
+            [ -n "$nvme_pkname" ] && [[ "$nvme_pkname" != *$'\n'* ]] \
+                || { _HD2_ERRO="Não foi possível derivar o disco físico de NVME_DEVICE."; return 1; }
+            [[ "$nvme_pkname" == /* ]] && nvme_pai="$nvme_pkname" || nvme_pai="/dev/$nvme_pkname"
+            nvme_pai="$(readlink -f -- "$nvme_pai" 2>/dev/null || true)"
+            ;;
+        *)
+            _HD2_ERRO="NVME_DEVICE não resolve para disco ou partição física."
+            return 1
+            ;;
+    esac
+    if ! dispositivo_bloco_valido "$nvme_pai" \
+        || [ "$(lsblk -dn -o TYPE -- "$nvme_pai" 2>/dev/null || true)" != "disk" ]; then
+        _HD2_ERRO="Não foi possível validar o disco físico de NVME_DEVICE."
+        return 1
+    fi
+    if [ "$pai" = "$nvme_pai" ]; then
+        _HD2_ERRO="UUID_HD2=$uuid pertence ao mesmo disco físico de NVME_DEVICE."
+        return 1
+    fi
+
+    _HD2_DEV_CANONICO="$dev"
+    _HD2_DISCO_PAI_CANONICO="$pai"
+}
+
 valores_cpu_validos() {
     local cpus_vm="${1:-}" cpus_host="${2:-}" cores="${3:-}"
-    local threads="${4:-}" vcpus="${5:-}" esperado cpu
+    local threads="${4:-}" vcpus="${5:-}" esperado cpu dono chave
+    local saida primeira=1 cpu_topo core_topo socket_topo online_topo
+    local nucleos_vm_total=0 nucleos_host_total=0
     local -a lista_vm lista_host
-    local -A vistos=()
+    local -A online=() cpu_nucleo=() nucleo_threads=() vistos=()
+    local -A dono_nucleo=() nucleos_vm=() nucleos_host=()
 
     [[ "$cpus_vm" =~ ^[0-9]+(,[0-9]+)*$ ]] || return 1
     [[ "$cpus_host" =~ ^[0-9]+(,[0-9]+)*$ ]] || return 1
@@ -68,24 +179,72 @@ valores_cpu_validos() {
     [ "${#lista_vm[@]}" -eq "$((10#$vcpus))" ] || return 1
     [ "${#lista_host[@]}" -gt 0 ] || return 1
 
+    command -v lscpu >/dev/null 2>&1 || return 1
+    saida="$(LC_ALL=C lscpu -e=CPU,CORE,SOCKET,ONLINE 2>/dev/null)" || return 1
+    while read -r cpu_topo core_topo socket_topo online_topo; do
+        if [ "$primeira" -eq 1 ]; then
+            primeira=0
+            continue
+        fi
+        [ "$online_topo" = "yes" ] || continue
+        [[ "$cpu_topo" =~ ^(0|[1-9][0-9]*)$ ]] \
+            && [[ "$core_topo" =~ ^(0|[1-9][0-9]*)$ ]] \
+            && [[ "$socket_topo" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+        [ -z "${online[$cpu_topo]+presente}" ] || return 1
+        chave="${socket_topo}:${core_topo}"
+        online[$cpu_topo]=1
+        cpu_nucleo[$cpu_topo]="$chave"
+        nucleo_threads[$chave]=$(( ${nucleo_threads[$chave]:-0} + 1 ))
+    done <<< "$saida"
+    [ "$primeira" -eq 0 ] && [ "${#online[@]}" -gt 0 ] || return 1
+
     for cpu in "${lista_vm[@]}" "${lista_host[@]}"; do
         [[ "$cpu" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+        [ -n "${online[$cpu]+presente}" ] || return 1
         [ -z "${vistos[$cpu]+presente}" ] || return 1
         vistos[$cpu]=1
+        chave="${cpu_nucleo[$cpu]}"
+        if [ -z "${dono_nucleo[$chave]+definido}" ]; then
+            if [ -z "${nucleos_vm[$chave]+definido}" ] \
+                && [ "${#vistos[@]}" -le "${#lista_vm[@]}" ]; then
+                dono="vm"
+                nucleos_vm[$chave]=1
+                nucleos_vm_total=$((nucleos_vm_total + 1))
+            else
+                dono="host"
+                nucleos_host[$chave]=1
+                nucleos_host_total=$((nucleos_host_total + 1))
+            fi
+            dono_nucleo[$chave]="$dono"
+        elif [ "${#vistos[@]}" -le "${#lista_vm[@]}" ]; then
+            [ "${dono_nucleo[$chave]}" = "vm" ] || return 1
+        else
+            [ "${dono_nucleo[$chave]}" = "host" ] || return 1
+        fi
+    done
+
+    [ "${#vistos[@]}" -eq "${#online[@]}" ] || return 1
+    [ "$nucleos_vm_total" -eq "$((10#$cores))" ] \
+        && [ "$nucleos_host_total" -ge 1 ] || return 1
+    for chave in "${!nucleos_vm[@]}"; do
+        [ "${nucleo_threads[$chave]}" -eq "$((10#$threads))" ] || return 1
     done
 }
 
 valores_memoria_validos() {
-    local ram="${1:-}" hugepages="${2:-}"
-    inteiro_positivo "$ram" && inteiro_positivo "$hugepages" || return 1
-    [ "${#ram}" -le 9 ] && [ "${#hugepages}" -le 9 ] || return 1
+    local ram="${1:-}" hugepages="${2:-}" total="${3:-}"
+    inteiro_positivo "$ram" && inteiro_positivo "$hugepages" \
+        && inteiro_positivo "$total" || return 1
+    [ "${#ram}" -le 9 ] && [ "${#hugepages}" -le 9 ] \
+        && [ "${#total}" -le 12 ] || return 1
     [ $((10#$ram % 1024)) -eq 0 ] \
-        && [ "$((10#$hugepages))" -eq "$((10#$ram / 1024))" ]
+        && [ "$((10#$hugepages))" -eq "$((10#$ram / 1024))" ] \
+        && [ "$((10#$ram))" -lt "$((10#$total))" ]
 }
 
 verificar() {
     [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
-    local var caminho
+    local var caminho ram_total_mb
     local -a obrigatorias=(
         USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_AUDIO_PCI_ID
         GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID DM_SERVICE NVME_DEVICE
@@ -131,14 +290,28 @@ verificar() {
     [ -z "${QCOW2_TAMANHO:-}" ] || [[ "$QCOW2_TAMANHO" =~ ^[1-9][0-9]*[KMGT]$ ]] \
         || v_falta "QCOW2_TAMANHO tem formato inválido."
 
+    if [ -n "${UUID_HD2:-}" ] && [ -n "${NVME_DEVICE:-}" ] \
+        && uuid_basico_valido "$UUID_HD2"; then
+        if resolver_hd2 "$UUID_HD2" "$NVME_DEVICE" 0; then
+            [ "${HD2_DISCO_PAI:-}" = "$_HD2_DISCO_PAI_CANONICO" ] \
+                || v_falta "HD2_DISCO_PAI não corresponde ao disco-pai canônico de UUID_HD2."
+        else
+            v_falta "$_HD2_ERRO"
+        fi
+    fi
+
     if [ -n "${CPUS_VM:-}${CPUS_HOST:-}${VM_CORES:-}${VM_THREADS:-}${VM_VCPUS:-}" ] \
         && ! valores_cpu_validos "${CPUS_VM:-}" "${CPUS_HOST:-}" \
             "${VM_CORES:-}" "${VM_THREADS:-}" "${VM_VCPUS:-}"; then
-        v_falta "Topologia ou listas de CPU inválidas/inconsistentes."
+        v_falta "Topologia ou listas de CPU inválidas/inconsistentes com as CPUs online."
     fi
-    if [ -n "${VM_RAM_MB:-}${HUGEPAGES_1G:-}" ] \
-        && ! valores_memoria_validos "${VM_RAM_MB:-}" "${HUGEPAGES_1G:-}"; then
-        v_falta "VM_RAM_MB e HUGEPAGES_1G estão inválidos ou inconsistentes."
+
+    ram_total_mb="$(awk '/MemTotal/{printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null || true)"
+    if ! inteiro_positivo "$ram_total_mb"; then
+        v_falta "Não foi possível detectar a RAM total do host."
+    elif [ -n "${VM_RAM_MB:-}${HUGEPAGES_1G:-}" ] \
+        && ! valores_memoria_validos "${VM_RAM_MB:-}" "${HUGEPAGES_1G:-}" "$ram_total_mb"; then
+        v_falta "Reserva de RAM/HugePages inválida, inconsistente ou impossível para a RAM total."
     fi
     v_fim
 }
@@ -149,7 +322,7 @@ REDETECTAR=0
 
 exigir_nao_root
 exigir_sudo
-exigir_comando lspci lsblk blkid ip awk sed
+exigir_comando lspci lsblk blkid lscpu ip awk sed readlink flock stat
 
 # ja_definido VAR: retorna 0 se a variável já tem valor e não estamos redetectando
 ja_definido() {
@@ -157,7 +330,10 @@ ja_definido() {
 }
 
 titulo "Detecção de configuração (grava em $CONF_ARQUIVO)"
-[ -f "$CONF_ARQUIVO" ] || { cp "$PROJETO_DIR/passthrough.conf.example" "$CONF_ARQUIVO"; chmod 0600 "$CONF_ARQUIVO"; info "Conf criado a partir do modelo."; }
+if [ ! -e "$CONF_ARQUIVO" ]; then
+    inicializar_conf "$PROJETO_DIR/passthrough.conf.example"
+    info "Conf criado a partir do modelo."
+fi
 
 # ----------------------------------------------------------------------------
 # 1. Identidade
@@ -259,11 +435,12 @@ else
     confirmar "Confirmar estes dois dispositivos como a GPU do passthrough?" \
         || falhar "Cancelado. Rode novamente e escolha o dispositivo correto."
 
-    # Os quatro valores são validados antes de qualquer um deles ser persistido.
-    salvar_conf GPU_PCI_ID "$GPU_PCI_NOVO"
-    salvar_conf GPU_AUDIO_PCI_ID "$GPU_AUDIO_PCI_NOVO"
-    salvar_conf GPU_VENDOR_DEVICE_ID "$ID_VGA"
-    salvar_conf GPU_AUDIO_VENDOR_DEVICE_ID "$ID_AUDIO"
+    # Os quatro valores são validados antes da única atualização persistente.
+    salvar_conf_multiplos \
+        GPU_PCI_ID "$GPU_PCI_NOVO" \
+        GPU_AUDIO_PCI_ID "$GPU_AUDIO_PCI_NOVO" \
+        GPU_VENDOR_DEVICE_ID "$ID_VGA" \
+        GPU_AUDIO_VENDOR_DEVICE_ID "$ID_AUDIO"
     ok "GPU: $GPU_PCI_ID [$GPU_VENDOR_DEVICE_ID] / áudio $GPU_AUDIO_PCI_ID [$GPU_AUDIO_VENDOR_DEVICE_ID]"
 fi
 
@@ -313,6 +490,7 @@ else
 fi
 
 # 5b. HD2 (NTFS montado em /mnt/docs4) - identificado por UUID
+UUID_HD2_NOVO=0
 if ja_definido UUID_HD2; then
     uuid_basico_valido "$UUID_HD2" || falhar "UUID_HD2 inválido: $UUID_HD2"
     info "UUID_HD2 já definido: $UUID_HD2"
@@ -335,26 +513,26 @@ else
         || falhar "Seleção de HD2 inválida: $ESCOLHA"
     ESCOLHA_IDX=$((10#$ESCOLHA - 1))
     DEV_HD2="${NTFS_DEVS[$ESCOLHA_IDX]}"
-    UUID_ESCOLHIDO="$(sudo blkid -s UUID -o value "$DEV_HD2")"
+    UUID_ESCOLHIDO="$(sudo blkid -s UUID -o value -- "$DEV_HD2" 2>/dev/null || true)"
     uuid_basico_valido "$UUID_ESCOLHIDO" \
-        || falhar "A partição selecionada não retornou um UUID válido."
-    confirmar "Confirmar HD2 = $DEV_HD2 (UUID=$UUID_ESCOLHIDO)?" || falhar "Cancelado."
-    salvar_conf UUID_HD2 "$UUID_ESCOLHIDO"
+        || falhar "A partição selecionada não retornou um UUID válido e disponível."
+    UUID_HD2="$UUID_ESCOLHIDO"
+    UUID_HD2_NOVO=1
 fi
 
-# Sempre deriva o disco-pai do UUID persistido; nunca confia em valor antigo.
-DEV_HD2="$(sudo blkid -U "$UUID_HD2" 2>/dev/null || true)"
-dispositivo_bloco_valido "$DEV_HD2" \
-    || falhar "UUID_HD2=$UUID_HD2 não identifica uma partição de bloco acessível."
-UUID_CONFIRMADO="$(sudo blkid -s UUID -o value "$DEV_HD2")"
-[ "$UUID_CONFIRMADO" = "$UUID_HD2" ] \
-    || falhar "O dispositivo $DEV_HD2 não confirma UUID_HD2=$UUID_HD2."
-PKNAME_HD2="$(lsblk -no PKNAME "$DEV_HD2" 2>/dev/null | head -n1)"
-[ -n "$PKNAME_HD2" ] || falhar "Não foi possível derivar o disco-pai de $DEV_HD2."
-HD2_DISCO_PAI_NOVO="/dev/$PKNAME_HD2"
-dispositivo_bloco_valido "$HD2_DISCO_PAI_NOVO" \
-    || falhar "Disco-pai derivado do HD2 é inválido: $HD2_DISCO_PAI_NOVO"
-salvar_conf HD2_DISCO_PAI "$HD2_DISCO_PAI_NOVO"
+# Resolve e valida antes de persistir, inclusive quando o UUID já existia no conf.
+if ! resolver_hd2 "$UUID_HD2" "$NVME_DEVICE" 1; then
+    falhar "$_HD2_ERRO"
+fi
+DEV_HD2="$_HD2_DEV_CANONICO"
+HD2_DISCO_PAI_NOVO="$_HD2_DISCO_PAI_CANONICO"
+if [ "$UUID_HD2_NOVO" -eq 1 ]; then
+    confirmar "Confirmar HD2 = $DEV_HD2 (UUID=$UUID_HD2; disco=$HD2_DISCO_PAI_NOVO)?" \
+        || falhar "Cancelado."
+fi
+salvar_conf_multiplos \
+    UUID_HD2 "$UUID_HD2" \
+    HD2_DISCO_PAI "$HD2_DISCO_PAI_NOVO"
 
 # 5c. HD1 (disco inteiro da VM) - caminho estável by-id
 HD1_NOVO=0
@@ -413,16 +591,17 @@ else
     lscpu -e
     echo
 
-    # Agrupa CPUs lógicas por núcleo físico
+    # Agrupa CPUs lógicas por núcleo físico, distinguindo sockets.
     declare -A NUCLEO_THREADS=()
-    while read -r CPU CORE ONLINE; do
+    while read -r CPU CORE SOCKET ONLINE; do
         [ "$ONLINE" = "yes" ] || continue
-        [[ "$CPU" =~ ^[0-9]+$ && "$CORE" =~ ^[0-9]+$ ]] \
+        [[ "$CPU" =~ ^[0-9]+$ && "$CORE" =~ ^[0-9]+$ && "$SOCKET" =~ ^[0-9]+$ ]] \
             || falhar "Topologia inválida retornada por lscpu."
-        NUCLEO_THREADS[$CORE]="${NUCLEO_THREADS[$CORE]:+${NUCLEO_THREADS[$CORE]},}$CPU"
-    done < <(lscpu -e=CPU,CORE,ONLINE | tail -n +2)
+        CHAVE_NUCLEO="${SOCKET}:${CORE}"
+        NUCLEO_THREADS[$CHAVE_NUCLEO]="${NUCLEO_THREADS[$CHAVE_NUCLEO]:+${NUCLEO_THREADS[$CHAVE_NUCLEO]},}$CPU"
+    done < <(LC_ALL=C lscpu -e=CPU,CORE,SOCKET,ONLINE | tail -n +2)
 
-    mapfile -t NUCLEOS < <(printf '%s\n' "${!NUCLEO_THREADS[@]}" | sort -n)
+    mapfile -t NUCLEOS < <(printf '%s\n' "${!NUCLEO_THREADS[@]}" | sort -t: -k1,1n -k2,2n)
     TOTAL_NUCLEOS="${#NUCLEOS[@]}"
     [ "$TOTAL_NUCLEOS" -ge 2 ] \
         || falhar "São necessários ao menos 2 núcleos físicos online para reservar um ao host."
@@ -458,11 +637,12 @@ else
     echo "  HOST ($((TOTAL_NUCLEOS-NUC_VM)) núcleos):            $LISTA_HOST"
     confirmar "Confirmar este mapa?" || falhar "Cancelado. Rode novamente e ajuste."
 
-    salvar_conf CPUS_VM "$LISTA_VM"
-    salvar_conf CPUS_HOST "$LISTA_HOST"
-    salvar_conf VM_CORES "$NUC_VM"
-    salvar_conf VM_THREADS "$THREADS_POR_NUCLEO"
-    salvar_conf VM_VCPUS "$VCPUS_TOTAL"
+    salvar_conf_multiplos \
+        CPUS_VM "$LISTA_VM" \
+        CPUS_HOST "$LISTA_HOST" \
+        VM_CORES "$NUC_VM" \
+        VM_THREADS "$THREADS_POR_NUCLEO" \
+        VM_VCPUS "$VCPUS_TOTAL"
 fi
 
 # ----------------------------------------------------------------------------
@@ -485,12 +665,12 @@ RAM_VM=$((10#$RAM_VM))
     || falhar "RAM da VM deve ser menor que a RAM total para deixar memória ao host."
 [ $((RAM_VM % 1024)) -eq 0 ] \
     || falhar "RAM da VM deve ser múltipla de 1024 MiB para HugePages de 1 GiB."
-if ! ja_definido VM_RAM_MB; then
-    salvar_conf VM_RAM_MB "$RAM_VM"
-fi
 HUGEPAGES_CALCULADAS=$((RAM_VM / 1024))
-inteiro_positivo "$HUGEPAGES_CALCULADAS" || falhar "Quantidade de HugePages inválida."
-salvar_conf HUGEPAGES_1G "$HUGEPAGES_CALCULADAS"
+valores_memoria_validos "$RAM_VM" "$HUGEPAGES_CALCULADAS" "$RAM_TOTAL_MB" \
+    || falhar "Reserva de RAM/HugePages inválida ou impossível para a RAM total."
+salvar_conf_multiplos \
+    VM_RAM_MB "$RAM_VM" \
+    HUGEPAGES_1G "$HUGEPAGES_CALCULADAS"
 
 # ----------------------------------------------------------------------------
 # 8. Rede e demais valores

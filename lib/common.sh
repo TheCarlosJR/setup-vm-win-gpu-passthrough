@@ -143,6 +143,24 @@ _conf_decodificar_linha() {
     falhar "Aspas de fechamento ausentes na linha $numero de $CONF_ARQUIVO."
 }
 
+CONF_LOCK_TIMEOUT_SEGUNDOS=10
+
+_conf_validar_metadados() {
+    local dono modo
+
+    [ -L "$CONF_ARQUIVO" ] && falhar "$CONF_ARQUIVO não pode ser um link simbólico."
+    [ -e "$CONF_ARQUIVO" ] || return 0
+    [ -f "$CONF_ARQUIVO" ] || falhar "$CONF_ARQUIVO não é um arquivo regular."
+    read -r dono modo < <(stat -c '%u %a' -- "$CONF_ARQUIVO") \
+        || falhar "Não foi possível consultar dono e permissões de $CONF_ARQUIVO."
+    [ "$dono" = "$(id -u)" ] \
+        || falhar "$CONF_ARQUIVO deve pertencer ao usuário atual."
+    [[ "$modo" =~ ^[0-7]{3,4}$ ]] \
+        || falhar "Não foi possível validar as permissões de $CONF_ARQUIVO."
+    [ $((8#$modo & 8#22)) -eq 0 ] \
+        || falhar "$CONF_ARQUIVO não pode ser gravável por grupo ou outros."
+}
+
 _conf_validar_arquivo() {
     local carregar="${1:-0}" linha chave numero=0 status antes_nul
     local regex_comentario='^[[:blank:]]*(#.*)?$'
@@ -177,9 +195,8 @@ _conf_validar_arquivo() {
 }
 
 carregar_conf() {
-    [ -L "$CONF_ARQUIVO" ] && falhar "$CONF_ARQUIVO não pode ser um link simbólico."
+    _conf_validar_metadados
     [ -e "$CONF_ARQUIVO" ] || return 0
-    [ -f "$CONF_ARQUIVO" ] || falhar "$CONF_ARQUIVO não é um arquivo regular."
     _conf_validar_arquivo 1
 }
 
@@ -196,13 +213,83 @@ _conf_codificar_valor() {
     printf '%s' "$saida"
 }
 
+_conf_lock_fd_valido() {
+    local fd="$1" caminho="$2" processo_pid="$3"
+    local identidade_fd identidade_caminho dono modo links dispositivo inode
+
+    [ ! -L "$caminho" ] && [ -f "$caminho" ] || return 1
+    identidade_fd="$(stat -Lc '%u:%a:%h:%d:%i' -- "/proc/$processo_pid/fd/$fd" 2>/dev/null)" \
+        || return 1
+    identidade_caminho="$(stat -Lc '%u:%a:%h:%d:%i' -- "$caminho" 2>/dev/null)" \
+        || return 1
+    [ "$identidade_fd" = "$identidade_caminho" ] || return 1
+    IFS=':' read -r dono modo links dispositivo inode <<< "$identidade_fd"
+    [ "$dono" = "$(id -u)" ] && [ "$links" -eq 1 ] \
+        && [[ "$modo" =~ ^[0-7]{3,4}$ ]] \
+        && [ $((8#$modo & 8#22)) -eq 0 ]
+}
+
+_conf_com_lock() (
+    local operacao="$1" lock_fd="" processo_pid="$BASHPID"
+    local lock_arquivo="${CONF_ARQUIVO}.lock"
+    shift
+
+    _conf_limpar_lock() {
+        local status="$1"
+        trap - EXIT
+        if [[ "${lock_fd:-}" =~ ^[0-9]+$ ]]; then
+            eval "exec ${lock_fd}>&-"
+        fi
+        exit "$status"
+    }
+    trap '_conf_limpar_lock "$?"' EXIT
+    trap 'exit 1' HUP INT TERM
+
+    command -v flock >/dev/null 2>&1 \
+        || { erro "Comando 'flock' não encontrado; não é seguro atualizar $CONF_ARQUIVO."; return 1; }
+    [[ "$CONF_LOCK_TIMEOUT_SEGUNDOS" =~ ^[1-9][0-9]*$ ]] \
+        || { erro "Timeout interno inválido para o lock de configuração."; return 1; }
+    [ ! -L "$lock_arquivo" ] \
+        || { erro "$lock_arquivo não pode ser um link simbólico."; return 1; }
+
+    umask 077
+    exec {lock_fd}<>"$lock_arquivo" \
+        || { erro "Não foi possível abrir o lock dedicado $lock_arquivo."; return 1; }
+    _conf_lock_fd_valido "$lock_fd" "$lock_arquivo" "$processo_pid" \
+        || { erro "O arquivo de lock $lock_arquivo não é seguro."; return 1; }
+    chmod 0600 -- "/proc/$processo_pid/fd/$lock_fd" \
+        || { erro "Não foi possível proteger $lock_arquivo."; return 1; }
+
+    if ! flock -w "$CONF_LOCK_TIMEOUT_SEGUNDOS" "$lock_fd"; then
+        erro "Tempo esgotado após ${CONF_LOCK_TIMEOUT_SEGUNDOS}s aguardando o lock de $CONF_ARQUIVO."
+        return 1
+    fi
+    _conf_lock_fd_valido "$lock_fd" "$lock_arquivo" "$processo_pid" \
+        || { erro "O arquivo de lock $lock_arquivo mudou durante a espera."; return 1; }
+
+    "$operacao" "$@"
+)
+
 _conf_gravar_atomico() (
-    local chave="$1" codificado="$2" linha numero=0 encontrada=0
-    local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}" temporario=""
+    local linha chave codificado numero=0 temporario=""
+    local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}"
     local regex_comentario='^[[:blank:]]*(#.*)?$'
+    local -a ordem=()
+    local -A novos=() encontrados=()
 
     trap 'status=$?; [ -z "$temporario" ] || rm -f -- "$temporario"; exit "$status"' EXIT
     trap 'exit 1' HUP INT TERM
+
+    while [ "$#" -gt 0 ]; do
+        chave="$1"; codificado="$2"; shift 2
+        ordem+=("$chave")
+        novos[$chave]="$codificado"
+    done
+
+    _conf_validar_metadados
+    if [ -e "$CONF_ARQUIVO" ]; then
+        _conf_validar_arquivo 0
+    fi
 
     temporario="$(mktemp -- "$diretorio/.${nome}.tmp.XXXXXX")" || return 1
     chmod 0600 "$temporario" || return 1
@@ -216,43 +303,92 @@ _conf_gravar_atomico() (
                     continue
                 fi
                 _conf_decodificar_linha "$linha" "$numero"
-                if [ "$_CONF_LINHA_CHAVE" = "$chave" ]; then
-                    printf '%s="%s"%s\n' "$chave" "$codificado" "$_CONF_LINHA_SUFIXO"
-                    encontrada=1
+                chave="$_CONF_LINHA_CHAVE"
+                if [ -n "${novos[$chave]+definida}" ]; then
+                    printf '%s="%s"%s\n' "$chave" "${novos[$chave]}" "$_CONF_LINHA_SUFIXO"
+                    encontrados[$chave]=1
                 else
                     printf '%s\n' "$linha"
                 fi
             done < "$CONF_ARQUIVO"
         fi
-        [ "$encontrada" -eq 1 ] || printf '%s="%s"\n' "$chave" "$codificado"
+        for chave in "${ordem[@]}"; do
+            [ -n "${encontrados[$chave]+definida}" ] \
+                || printf '%s="%s"\n' "$chave" "${novos[$chave]}"
+        done
     } > "$temporario" || return 1
 
     mv -f -- "$temporario" "$CONF_ARQUIVO" || return 1
     temporario=""
 )
 
-salvar_conf() {
-    # salvar_conf CHAVE VALOR -> cria/atualiza uma entrada de dados no conf
-    [ "$#" -eq 2 ] || falhar "Uso: salvar_conf CHAVE VALOR"
-    local chave="$1" valor="$2" codificado
+_conf_inicializar_atomico() (
+    local modelo="$1" temporario="" conf_destino="$CONF_ARQUIVO"
+    local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}"
 
-    conf_chave_permitida "$chave" || falhar "Chave de configuração não permitida: '$chave'."
-    if [[ "$valor" =~ [[:cntrl:]] ]]; then
-        falhar "O valor de '$chave' contém newline, CR, NUL ou outro caractere de controle."
-    fi
-    [ -L "$CONF_ARQUIVO" ] && falhar "$CONF_ARQUIVO não pode ser um link simbólico."
+    trap 'status=$?; [ -z "$temporario" ] || rm -f -- "$temporario"; exit "$status"' EXIT
+    trap 'exit 1' HUP INT TERM
+
+    _conf_validar_metadados
     if [ -e "$CONF_ARQUIVO" ]; then
-        [ -f "$CONF_ARQUIVO" ] || falhar "$CONF_ARQUIVO não é um arquivo regular."
         _conf_validar_arquivo 0
+        return 0
     fi
+    [ ! -L "$modelo" ] && [ -f "$modelo" ] && [ -r "$modelo" ] \
+        || falhar "Modelo de configuração inválido ou ilegível: $modelo"
 
-    codificado="$(_conf_codificar_valor "$valor")"
-    _conf_gravar_atomico "$chave" "$codificado" \
+    temporario="$(mktemp -- "$diretorio/.${nome}.tmp.XXXXXX")" || return 1
+    cp -- "$modelo" "$temporario" || return 1
+    chmod 0600 "$temporario" || return 1
+    CONF_ARQUIVO="$temporario"
+    _conf_validar_arquivo 0
+    CONF_ARQUIVO="$conf_destino"
+    mv -f -- "$temporario" "$CONF_ARQUIVO" || return 1
+    temporario=""
+)
+
+inicializar_conf() {
+    [ "$#" -eq 1 ] || falhar "Uso: inicializar_conf MODELO"
+    _conf_com_lock _conf_inicializar_atomico "$1" \
+        || falhar "Falha ao inicializar $CONF_ARQUIVO de forma segura."
+}
+
+salvar_conf_multiplos() {
+    # salvar_conf_multiplos CHAVE VALOR [CHAVE VALOR ...]
+    [ "$#" -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] \
+        || falhar "Uso: salvar_conf_multiplos CHAVE VALOR [CHAVE VALOR ...]"
+    local chave valor i
+    local -a codificados=() originais=()
+    local -A vistos=()
+
+    while [ "$#" -gt 0 ]; do
+        chave="$1"; valor="$2"; shift 2
+        conf_chave_permitida "$chave" \
+            || falhar "Chave de configuração não permitida: '$chave'."
+        [ -z "${vistos[$chave]+definida}" ] \
+            || falhar "Chave repetida na atualização múltipla: '$chave'."
+        if [[ "$valor" =~ [[:cntrl:]] ]]; then
+            falhar "O valor de '$chave' contém newline, CR, NUL ou outro caractere de controle."
+        fi
+        vistos[$chave]=1
+        originais+=("$chave" "$valor")
+        codificados+=("$chave" "$(_conf_codificar_valor "$valor")")
+    done
+
+    _conf_com_lock _conf_gravar_atomico "${codificados[@]}" \
         || falhar "Falha ao atualizar $CONF_ARQUIVO de forma atômica."
 
-    # Atualiza e exporta a chave no processo atual somente após o rename.
-    printf -v "$chave" '%s' "$valor"
-    export "$chave"
+    for ((i = 0; i < ${#originais[@]}; i += 2)); do
+        chave="${originais[$i]}"; valor="${originais[$((i + 1))]}"
+        printf -v "$chave" '%s' "$valor"
+        export "$chave"
+    done
+}
+
+salvar_conf() {
+    # salvar_conf CHAVE VALOR -> compatibilidade para atualização individual
+    [ "$#" -eq 2 ] || falhar "Uso: salvar_conf CHAVE VALOR"
+    salvar_conf_multiplos "$@"
 }
 
 exigir_conf() {
