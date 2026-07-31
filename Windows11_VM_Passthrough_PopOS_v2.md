@@ -423,7 +423,7 @@ mkdir -p ~/inventario-hardware
   echo "== BIOS =="; sudo dmidecode -t bios
   echo "== PCI =="; lspci -nnk
   echo "== BLOCK DEVICES =="; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
-  echo "== IOMMU/DMAR (pré-configuração) =="; sudo dmesg | grep -i -e DMAR -e IOMMU
+  echo "== IOMMU/DMAR (pré-configuração) =="; dmesg | grep -i -e DMAR -e IOMMU
 } | tee ~/inventario-hardware/inventario-$(date +%Y%m%d).txt
 ```
 
