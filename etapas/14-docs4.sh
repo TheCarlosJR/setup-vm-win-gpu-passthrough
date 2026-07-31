@@ -37,20 +37,34 @@ FSTAB_CANDIDATO=""
 FSTAB_BACKUP=""
 FSTAB_STAGE=""
 FSTAB_INSTALADO=0
+FSTAB_RENAME_INTENCAO=0
+FSTAB_RESTORE_INTENCAO=0
+FSTAB_CONFLITO_CANDIDATO=""
 FSTAB_LOCK_PID=""
 FSTAB_LOCK_LEITURA=""
 FSTAB_LOCK_ESCRITA=""
 TRANSACAO_CONCLUIDA=0
 ROLLBACK_EM_CURSO=0
+ROLLBACK_FALHOU=0
 TESTE_VALIDO=""
 TESTE_INVALIDO=""
+RSYNC_DIAGNOSTICO=""
+RSYNC_STATUS_REAL=0
 
+BACKUPS_ENCONTRADOS=()
 declare -a DESTINOS=()
 declare -a BIND_ATIVO_INICIAL=()
-declare -a MOUNTS_CRIADOS=()
-declare -a MOUNTS_CRIADOS_TIPO=()
+declare -a MOUNT_INTENCOES_ALVOS=()
+declare -a MOUNT_INTENCOES_TIPOS=()
+declare -a MOUNT_INTENCOES_IDS=()
+MOUNT_INTENCAO_INDICE=-1
 declare -a MIGRACAO_ORIGENS=()
 declare -a MIGRACAO_BACKUPS=()
+declare -a MIGRACAO_IDENTIDADES=()
+declare -a ORFAO_ORIGENS=()
+declare -a ORFAO_BACKUPS=()
+declare -a ORFAO_IDENTIDADES=()
+declare -a BACKUPS_RETIDOS=()
 declare -a FSTAB_IDS=()
 declare -a FSTAB_FONTES=()
 declare -a FSTAB_ALVOS=()
@@ -130,6 +144,45 @@ executar_blkid() {
     fi
 }
 
+enumerar_uuid_hd2_sem_cache() {
+    local usar_sudo="$1" saida status linha canonico
+    local -a dispositivos=()
+
+    HD2_PARTICAO=""
+    if saida="$(executar_blkid "$usar_sudo" -c /dev/null \
+        -t "UUID=$UUID_HD2" -o device 2>/dev/null)"; then
+        status=0
+    else
+        status=$?
+        if [ "$status" -eq 2 ]; then
+            saida=""
+        else
+            IDENTIDADE_DIAGNOSTICO="Falha ao enumerar UUID_HD2=$UUID_HD2 sem cache (status blkid $status)."
+            return "$status"
+        fi
+    fi
+
+    while IFS= read -r linha; do
+        [ -n "$linha" ] || continue
+        [[ "$linha" == /dev/* ]] && [[ "$linha" != *[[:cntrl:]]* ]] || {
+            IDENTIDADE_DIAGNOSTICO="blkid retornou um dispositivo inválido para UUID_HD2: $linha"
+            return 1
+        }
+        canonico="$(readlink -f -- "$linha" 2>/dev/null || true)"
+        dispositivo_bloco_valido "$canonico" || {
+            IDENTIDADE_DIAGNOSTICO="UUID_HD2 retornou um dispositivo de bloco indisponível: $linha"
+            return 1
+        }
+        dispositivos+=("$canonico")
+    done <<< "$saida"
+
+    [ "${#dispositivos[@]}" -eq 1 ] || {
+        IDENTIDADE_DIAGNOSTICO="UUID_HD2=$UUID_HD2 deve resolver sem cache para exatamente um dispositivo; encontrados: ${#dispositivos[@]}."
+        return 1
+    }
+    HD2_PARTICAO="${dispositivos[0]}"
+}
+
 resolver_identidades() {
     local usar_sudo="$1" raiz origem nvme_canonico nvme_fisico
     local hd2 hd2_tipo hd2_fstype hd2_uuid hd2_pai_config
@@ -146,7 +199,7 @@ resolver_identidades() {
         return 1
     }
 
-    origem="$(findmnt -nro SOURCE --target / 2>/dev/null)" || {
+    origem="$(findmnt -nro SOURCE --no-encode --target / 2>/dev/null)" || {
         IDENTIDADE_DIAGNOSTICO="Não foi possível identificar o dispositivo que contém /."
         return 1
     }
@@ -179,16 +232,8 @@ resolver_identidades() {
         return 1
     }
 
-    if [ -e "/dev/disk/by-uuid/$UUID_HD2" ] || [ -L "/dev/disk/by-uuid/$UUID_HD2" ]; then
-        hd2="$(readlink -f -- "/dev/disk/by-uuid/$UUID_HD2" 2>/dev/null || true)"
-    else
-        hd2="$(executar_blkid "$usar_sudo" -U "$UUID_HD2" 2>/dev/null || true)"
-        hd2="$(readlink -f -- "$hd2" 2>/dev/null || true)"
-    fi
-    dispositivo_bloco_valido "$hd2" || {
-        IDENTIDADE_DIAGNOSTICO="UUID_HD2=$UUID_HD2 não identifica uma partição de bloco acessível."
-        return 1
-    }
+    enumerar_uuid_hd2_sem_cache "$usar_sudo" || return 1
+    hd2="$HD2_PARTICAO"
     hd2_tipo="$(lsblk -dnro TYPE -- "$hd2" 2>/dev/null || true)"
     [ "$hd2_tipo" = "part" ] || {
         IDENTIDADE_DIAGNOSTICO="UUID_HD2 deve identificar uma partição; tipo encontrado: ${hd2_tipo:-desconhecido}."
@@ -367,6 +412,12 @@ resolver_dir_usuario() {
         XDG_DIAGNOSTICO="XDG_$chave contém symlink, '..' ou caminho não canônico: $resolvido"
         return 1
     }
+    if [ "$resolvido" = "$DOCS4" ] \
+        || [[ "$resolvido" == "$DOCS4/"* ]] \
+        || [[ "$DOCS4" == "$resolvido/"* ]]; then
+        XDG_DIAGNOSTICO="XDG_$chave não pode ser igual, ancestral ou descendente de $DOCS4: $resolvido"
+        return 1
+    fi
     validar_componentes_sem_symlink "$resolvido" || {
         XDG_DIAGNOSTICO="XDG_$chave contém symlink ou componente que não é diretório: $resolvido"
         return 1
@@ -401,13 +452,14 @@ resolver_todos_destinos() {
 obter_mount_exato() {
     local alvo="$1"
 
-    MOUNT_SOURCE="$(findmnt -rn --raw -M "$alvo" -o SOURCE 2>/dev/null)" || return 1
-    MOUNT_TARGET="$(findmnt -rn --raw -M "$alvo" -o TARGET 2>/dev/null)" || return 1
-    MOUNT_FSTYPE="$(findmnt -rn --raw -M "$alvo" -o FSTYPE 2>/dev/null)" || return 1
-    MOUNT_UUID="$(findmnt -rn --raw -M "$alvo" -o UUID 2>/dev/null)" || return 1
-    MOUNT_OPTIONS="$(findmnt -rn --raw -M "$alvo" -o OPTIONS 2>/dev/null)" || return 1
+    MOUNT_SOURCE="$(findmnt -rn --no-encode -M "$alvo" -o SOURCE 2>/dev/null)" || return 1
+    MOUNT_TARGET="$(findmnt -rn --no-encode -M "$alvo" -o TARGET 2>/dev/null)" || return 1
+    MOUNT_FSTYPE="$(findmnt -rn --no-encode -M "$alvo" -o FSTYPE 2>/dev/null)" || return 1
+    MOUNT_UUID="$(findmnt -rn --no-encode -M "$alvo" -o UUID 2>/dev/null)" || return 1
+    MOUNT_OPTIONS="$(findmnt -rn --no-encode -M "$alvo" -o OPTIONS 2>/dev/null)" || return 1
+    MOUNT_FSROOT="$(findmnt -rn --no-encode -M "$alvo" -o FSROOT 2>/dev/null)" || return 1
     [ -n "$MOUNT_SOURCE" ] && [ "$MOUNT_TARGET" = "$alvo" ] \
-        && [[ "$MOUNT_SOURCE$MOUNT_TARGET$MOUNT_FSTYPE$MOUNT_UUID$MOUNT_OPTIONS" != *$'\n'* ]]
+        && [[ "$MOUNT_SOURCE$MOUNT_TARGET$MOUNT_FSTYPE$MOUNT_UUID$MOUNT_OPTIONS$MOUNT_FSROOT" != *$'\n'* ]]
 }
 
 validar_opcoes_runtime_rw() {
@@ -422,10 +474,14 @@ validar_base_montada() {
         MOUNT_DIAGNOSTICO="$DOCS4 não é um mountpoint exato."
         return 1
     }
-    origem="${MOUNT_SOURCE%%\[*}"
-    origem="$(readlink -f -- "$origem" 2>/dev/null || true)"
+    [[ "$MOUNT_SOURCE" != *"["* ]] && [[ "$MOUNT_SOURCE" != *"]"* ]] \
+        && [ "$MOUNT_FSROOT" = "/" ] || {
+        MOUNT_DIAGNOSTICO="$DOCS4 deve montar a raiz / da partição, sem root/subpath em SOURCE; encontrados SOURCE=${MOUNT_SOURCE:-desconhecido}, FSROOT=${MOUNT_FSROOT:-desconhecido}."
+        return 1
+    }
+    origem="$(readlink -f -- "$MOUNT_SOURCE" 2>/dev/null || true)"
     [ "$origem" = "$HD2_PARTICAO" ] && [ "$MOUNT_UUID" = "$UUID_HD2" ] || {
-        MOUNT_DIAGNOSTICO="$DOCS4 aponta para ${MOUNT_SOURCE:-origem desconhecida} (UUID=${MOUNT_UUID:-desconhecido}); esperados $HD2_PARTICAO e UUID=$UUID_HD2."
+        MOUNT_DIAGNOSTICO="$DOCS4 aponta para ${MOUNT_SOURCE:-origem desconhecida} (UUID=${MOUNT_UUID:-desconhecido}); esperados a raiz de $HD2_PARTICAO e UUID=$UUID_HD2."
         return 1
     }
     [ "$MOUNT_FSTYPE" = "fuseblk" ] || {
@@ -444,7 +500,7 @@ validar_base_montada() {
 }
 
 validar_bind_ativo() {
-    local fonte="$1" alvo="$2" origem identidade_fonte identidade_alvo
+    local fonte="$1" alvo="$2" identidade_fonte identidade_alvo
 
     MOUNT_DIAGNOSTICO=""
     [ ! -L "$fonte" ] && [ -d "$fonte" ] \
@@ -456,10 +512,7 @@ validar_bind_ativo() {
         MOUNT_DIAGNOSTICO="$alvo não é um mountpoint exato."
         return 1
     }
-    origem="${MOUNT_SOURCE%%\[*}"
-    origem="$(readlink -f -- "$origem" 2>/dev/null || true)"
-    [ "$origem" = "$HD2_PARTICAO" ] && [ "$MOUNT_UUID" = "$UUID_HD2" ] \
-        && [ "$MOUNT_FSTYPE" = "fuseblk" ] || {
+    [ "$MOUNT_UUID" = "$UUID_HD2" ] && [ "$MOUNT_FSTYPE" = "fuseblk" ] || {
         MOUNT_DIAGNOSTICO="$alvo não está no filesystem/UUID esperado de $HD2_PARTICAO."
         return 1
     }
@@ -479,7 +532,7 @@ validar_sem_mounts_abaixo() {
     local caminho="$1" permitir_exato="$2" saida alvo
 
     MOUNT_DIAGNOSTICO=""
-    saida="$(findmnt -rn --raw -o TARGET 2>/dev/null)" || {
+    saida="$(findmnt -rn --no-encode -o TARGET 2>/dev/null)" || {
         MOUNT_DIAGNOSTICO="Não foi possível listar mounts ao validar $caminho."
         return 1
     }
@@ -497,6 +550,29 @@ validar_sem_mounts_abaixo() {
             return 1
         fi
     done <<< "$saida"
+}
+
+validar_destino_fora_hd2() {
+    local caminho="$1" source uuid
+
+    source="$(findmnt -rn --no-encode --target "$caminho" -o SOURCE 2>/dev/null)" || {
+        XDG_DIAGNOSTICO="Não foi possível identificar o filesystem físico de $caminho."
+        return 1
+    }
+    uuid="$(findmnt -rn --no-encode --target "$caminho" -o UUID 2>/dev/null)" || {
+        XDG_DIAGNOSTICO="Não foi possível identificar o UUID do filesystem de $caminho."
+        return 1
+    }
+    [[ "$source$uuid" != *$'\n'* ]] || {
+        XDG_DIAGNOSTICO="Filesystem ambíguo ao validar destino XDG: $caminho"
+        return 1
+    }
+    if [ "$uuid" = "$UUID_HD2" ] \
+        || [ "$source" = "$HD2_PARTICAO" ] \
+        || [[ "$source" == "$HD2_PARTICAO["* ]]; then
+        XDG_DIAGNOSTICO="Destino XDG está fisicamente dentro do HD2 e foi recusado: $caminho (SOURCE=$source, UUID=${uuid:-desconhecido})."
+        return 1
+    fi
 }
 
 validar_underlay_docs4() {
@@ -523,9 +599,28 @@ validar_underlay_docs4() {
     }
 }
 
-registrar_mount_criado() {
-    MOUNTS_CRIADOS+=("$1")
-    MOUNTS_CRIADOS_TIPO+=("$2")
+registrar_intencao_mount() {
+    local alvo="$1" tipo="$2" i
+
+    for i in "${!MOUNT_INTENCOES_ALVOS[@]}"; do
+        [ "${MOUNT_INTENCOES_ALVOS[$i]}" != "$alvo" ] || {
+            erro "Intenção de mount duplicada recusada: $alvo"
+            return 1
+        }
+    done
+    MOUNT_INTENCOES_ALVOS+=("$alvo")
+    MOUNT_INTENCOES_TIPOS+=("$tipo")
+    MOUNT_INTENCOES_IDS+=("")
+    MOUNT_INTENCAO_INDICE=$((${#MOUNT_INTENCOES_ALVOS[@]} - 1))
+}
+
+registrar_mount_efetivo() {
+    local indice="$1" alvo="$2" mount_id
+    [[ "$indice" =~ ^[0-9]+$ ]] && [ "$indice" -lt "${#MOUNT_INTENCOES_ALVOS[@]}" ] \
+        && [ "${MOUNT_INTENCOES_ALVOS[$indice]}" = "$alvo" ] || return 1
+    mount_id="$(findmnt -rn --no-encode -M "$alvo" -o ID 2>/dev/null)" || return 1
+    [[ "$mount_id" =~ ^[0-9]+$ ]] || return 1
+    MOUNT_INTENCOES_IDS[$indice]="$mount_id"
 }
 
 montar_ou_validar_base() {
@@ -541,14 +636,14 @@ montar_ou_validar_base() {
     fi
 
     validar_underlay_docs4 || falhar "$MOUNT_DIAGNOSTICO"
+    registrar_intencao_mount "$DOCS4" base \
+        || falhar "Não foi possível registrar intenção única de mount para $DOCS4."
     info "Montando temporariamente a partição validada $HD2_PARTICAO em $DOCS4..."
     if ! sudo mount -t ntfs-3g -o "$opcoes" -- "$HD2_PARTICAO" "$DOCS4"; then
-        if validar_base_montada; then
-            registrar_mount_criado "$DOCS4" base
-        fi
         falhar "FALHA FATAL: não foi possível montar o HD2 validado; migração não iniciada."
     fi
-    registrar_mount_criado "$DOCS4" base
+    registrar_mount_efetivo "$MOUNT_INTENCAO_INDICE" "$DOCS4" \
+        || falhar "Montagem criada, mas seu ID não pôde ser registrado; rollback automático não fará umount ambíguo."
     validar_base_montada \
         || falhar "FALHA FATAL: montagem recém-criada não corresponde ao HD2/opções esperados: $MOUNT_DIAGNOSTICO"
     validar_sem_mounts_abaixo "$DOCS4" 1 || falhar "$MOUNT_DIAGNOSTICO"
@@ -624,6 +719,7 @@ preparar_destinos_xdg() {
             BIND_ATIVO_INICIAL[$i]=1
         else
             validar_sem_mounts_abaixo "$destino" 0 || falhar "$MOUNT_DIAGNOSTICO"
+            validar_destino_fora_hd2 "$destino" || falhar "$XDG_DIAGNOSTICO"
             BIND_ATIVO_INICIAL[$i]=0
         fi
     done
@@ -635,20 +731,68 @@ diretorio_vazio() {
     [ -z "$primeiro" ]
 }
 
+rsync_filtrar_diferencas_conteudo() {
+    local saida="$1" linha item
+
+    RSYNC_DIFERENCAS=""
+    while IFS= read -r linha; do
+        [ -n "$linha" ] || continue
+        item="${linha%% *}"
+        if [ "${item:0:1}" != "." ]; then
+            RSYNC_DIFERENCAS+="${RSYNC_DIFERENCAS:+$'\n'}$linha"
+        fi
+    done <<< "$saida"
+}
+
 rsync_copiar_e_comparar() {
-    local origem="$1" alvo="$2" pendencias
+    local origem="$1" alvo="$2" saida status
     local -a opcoes=(-a --checksum --one-file-system --no-owner --no-group
                      --no-perms --omit-dir-times)
 
-    como_usuario rsync "${opcoes[@]}" -- "$origem/" "$alvo/" \
-        || return 1
-    pendencias="$(como_usuario rsync "${opcoes[@]}" --dry-run \
-        --itemize-changes -- "$origem/" "$alvo/")" || return 1
-    [ -z "$pendencias" ] || {
-        erro "Comparação por checksum ainda encontrou diferenças em $origem:"
-        printf '%s\n' "$pendencias" >&2
+    RSYNC_DIAGNOSTICO=""
+    RSYNC_STATUS_REAL=0
+
+    if saida="$(como_usuario rsync "${opcoes[@]}" --dry-run --existing \
+        --itemize-changes --out-format='%i %n%L' -- "$origem/" "$alvo/")"; then
+        :
+    else
+        status=$?
+        RSYNC_STATUS_REAL="$status"
+        RSYNC_DIAGNOSTICO="Falha no rsync de pré-validação de $origem (status $status)."
+        return "$status"
+    fi
+    rsync_filtrar_diferencas_conteudo "$saida"
+    if [ -n "$RSYNC_DIFERENCAS" ]; then
+        RSYNC_DIAGNOSTICO="Conflito com conteúdo preexistente divergente no HD2 detectado por checksum; origem e destino foram preservados:"
+        printf '%s\n' "$RSYNC_DIFERENCAS" >&2
         return 1
-    }
+    fi
+
+    if como_usuario rsync "${opcoes[@]}" --ignore-existing -- \
+        "$origem/" "$alvo/"; then
+        :
+    else
+        status=$?
+        RSYNC_STATUS_REAL="$status"
+        RSYNC_DIAGNOSTICO="Falha ao copiar somente itens ausentes de $origem (status rsync $status)."
+        return "$status"
+    fi
+
+    if saida="$(como_usuario rsync "${opcoes[@]}" --dry-run \
+        --itemize-changes --out-format='%i %n%L' -- "$origem/" "$alvo/")"; then
+        :
+    else
+        status=$?
+        RSYNC_STATUS_REAL="$status"
+        RSYNC_DIAGNOSTICO="Falha na comparação final por checksum de $origem (status rsync $status)."
+        return "$status"
+    fi
+    rsync_filtrar_diferencas_conteudo "$saida"
+    if [ -n "$RSYNC_DIFERENCAS" ]; then
+        RSYNC_DIAGNOSTICO="Comparação final por checksum encontrou conteúdo ausente/divergente; nenhum item preexistente no HD2 foi sobrescrito:"
+        printf '%s\n' "$RSYNC_DIFERENCAS" >&2
+        return 1
+    fi
 }
 
 gerar_backup_unico() {
@@ -663,8 +807,132 @@ gerar_backup_unico() {
     BACKUP_UNICO="$candidato"
 }
 
+registrar_intencao_migracao() {
+    local origem="$1" backup="$2" identidade="$3" i
+
+    for i in "${!MIGRACAO_ORIGENS[@]}"; do
+        [ "${MIGRACAO_ORIGENS[$i]}" != "$origem" ] \
+            && [ "${MIGRACAO_BACKUPS[$i]}" != "$backup" ] || {
+            erro "Intenção de rename de migração duplicada recusada: $origem -> $backup"
+            return 1
+        }
+    done
+    MIGRACAO_ORIGENS+=("$origem")
+    MIGRACAO_BACKUPS+=("$backup")
+    MIGRACAO_IDENTIDADES+=("$identidade")
+}
+
+registrar_intencao_orfao() {
+    local backup="$1" origem="$2" identidade="$3" i
+
+    for i in "${!ORFAO_ORIGENS[@]}"; do
+        [ "${ORFAO_ORIGENS[$i]}" != "$origem" ] \
+            && [ "${ORFAO_BACKUPS[$i]}" != "$backup" ] || {
+            erro "Intenção de reconciliação duplicada recusada: $backup -> $origem"
+            return 1
+        }
+    done
+    ORFAO_BACKUPS+=("$backup")
+    ORFAO_ORIGENS+=("$origem")
+    ORFAO_IDENTIDADES+=("$identidade")
+}
+
+listar_backups_migracao() {
+    local origem="$1" nullglob_ativo=0
+
+    if shopt -q nullglob; then
+        nullglob_ativo=1
+    fi
+    shopt -s nullglob
+    BACKUPS_ENCONTRADOS=("$origem".docs4-backup-*)
+    if [ "$nullglob_ativo" -eq 0 ]; then
+        shopt -u nullglob
+    fi
+}
+
+concluir_reconciliacao_orfa_indice() {
+    local i="$1" origem backup esperado identidade_origem identidade_backup
+
+    origem="${ORFAO_ORIGENS[$i]}"
+    backup="${ORFAO_BACKUPS[$i]}"
+    esperado="${ORFAO_IDENTIDADES[$i]}"
+    identidade_origem="$(stat -c '%d:%i' -- "$origem" 2>/dev/null || true)"
+    identidade_backup="$(stat -c '%d:%i' -- "$backup" 2>/dev/null || true)"
+
+    if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+        [ "$identidade_origem" = "$esperado" ] || {
+            erro "Reconciliação órfã está em estado desconhecido: $backup -> $origem"
+            return 1
+        }
+        return 0
+    fi
+    [ -d "$backup" ] && [ ! -L "$backup" ] \
+        && [ "$identidade_backup" = "$esperado" ] || {
+        erro "Backup órfão mudou de identidade e foi preservado: $backup"
+        return 1
+    }
+    if obter_mount_exato "$origem"; then
+        erro "Mount ativo impede reconciliar backup órfão: $backup -> $origem"
+        return 1
+    fi
+    if [ -e "$origem" ] || [ -L "$origem" ]; then
+        [ -d "$origem" ] && [ ! -L "$origem" ] && diretorio_vazio "$origem" || {
+            erro "Origem e backup órfão contêm estado; ambos foram preservados: $origem e $backup"
+            return 1
+        }
+        como_usuario rmdir -- "$origem" || return 1
+    fi
+    como_usuario mv -T --no-clobber -- "$backup" "$origem" || return 1
+    [ ! -e "$backup" ] && [ ! -L "$backup" ] \
+        && [ "$(stat -c '%d:%i' -- "$origem" 2>/dev/null || true)" = "$esperado" ] || {
+        erro "Rename de reconciliação não terminou no estado esperado: $backup -> $origem"
+        return 1
+    }
+}
+
+reconciliar_backups_orfaos() {
+    local i origem backup identidade dispositivo_backup dispositivo_pai
+
+    for i in "${!DESTINOS[@]}"; do
+        origem="${DESTINOS[$i]}"
+        listar_backups_migracao "$origem"
+        [ "${#BACKUPS_ENCONTRADOS[@]}" -gt 0 ] || continue
+
+        if [ "${BIND_ATIVO_INICIAL[$i]}" -eq 1 ]; then
+            for backup in "${BACKUPS_ENCONTRADOS[@]}"; do
+                [ -d "$backup" ] && [ ! -L "$backup" ] \
+                    || falhar "Backup de migração retido tem tipo inseguro: $backup"
+                BACKUPS_RETIDOS+=("$backup")
+                aviso "Backup original retido detectado na reexecução: $backup"
+            done
+            continue
+        fi
+
+        [ "${#BACKUPS_ENCONTRADOS[@]}" -eq 1 ] || {
+            falhar "Múltiplos backups órfãos para $origem; todos foram preservados para reconciliação manual."
+        }
+        backup="${BACKUPS_ENCONTRADOS[0]}"
+        [ -d "$backup" ] && [ ! -L "$backup" ] \
+            || falhar "Backup órfão tem tipo inseguro e foi preservado: $backup"
+        diretorio_vazio "$origem" || {
+            falhar "Backup órfão e origem não vazia detectados; ambos foram preservados: $backup e $origem"
+        }
+        dispositivo_backup="$(stat -c '%d' -- "$backup" 2>/dev/null || true)"
+        dispositivo_pai="$(stat -c '%d' -- "${origem%/*}" 2>/dev/null || true)"
+        [ -n "$dispositivo_backup" ] && [ "$dispositivo_backup" = "$dispositivo_pai" ] \
+            || falhar "Backup órfão não está no filesystem esperado da origem: $backup"
+        identidade="$(stat -c '%d:%i' -- "$backup" 2>/dev/null || true)"
+        [ -n "$identidade" ] || falhar "Não foi possível identificar backup órfão: $backup"
+        registrar_intencao_orfao "$backup" "$origem" "$identidade" \
+            || falhar "Não foi possível registrar reconciliação única de $backup."
+        concluir_reconciliacao_orfa_indice "$((${#ORFAO_ORIGENS[@]} - 1))" \
+            || falhar "Falha ao reconciliar backup órfão; estados preservados: $backup e $origem"
+        aviso "Backup órfão reconciliado como origem antes de repetir a migração: $origem"
+    done
+}
+
 migrar_diretorios() {
-    local i origem alvo backup dispositivo_origem dispositivo_pai modo
+    local i origem alvo backup dispositivo_origem dispositivo_pai modo identidade status
 
     titulo "Migração recuperável antes de persistir os binds"
     for i in "${!DESTINOS[@]}"; do
@@ -686,21 +954,29 @@ migrar_diretorios() {
         [ -n "$dispositivo_origem" ] && [ "$dispositivo_origem" = "$dispositivo_pai" ] \
             || falhar "A origem $origem não está no mesmo filesystem do diretório pai; migração recusada."
 
-        info "Copiando com checksum e sem atravessar filesystems: $origem/ -> $alvo/"
-        rsync_copiar_e_comparar "$origem" "$alvo" \
-            || falhar "Falha no rsync/comparação por checksum de $origem; originais não foram removidos."
+        info "Copiando apenas ausentes após comparar preexistentes por checksum: $origem/ -> $alvo/"
+        if rsync_copiar_e_comparar "$origem" "$alvo"; then
+            :
+        else
+            status=$?
+            erro "${RSYNC_DIAGNOSTICO:-Falha no rsync/comparação de $origem}; originais e destino foram preservados."
+            exit "$status"
+        fi
 
         gerar_backup_unico "$origem"
         backup="$BACKUP_UNICO"
         modo="$(stat -c '%a' -- "$origem" 2>/dev/null || true)"
+        identidade="$(stat -c '%d:%i' -- "$origem" 2>/dev/null || true)"
+        [ -n "$identidade" ] || falhar "Não foi possível identificar $origem antes do rename."
+        registrar_intencao_migracao "$origem" "$backup" "$identidade" \
+            || falhar "Não foi possível registrar intenção única de rename: $origem -> $backup"
         como_usuario mv -T --no-clobber -- "$origem" "$backup" \
             || falhar "Não foi possível preservar $origem no backup adjacente $backup."
         [ ! -e "$origem" ] && [ ! -L "$origem" ] \
-            && [ -d "$backup" ] && [ ! -L "$backup" ] || {
-            falhar "Colisão ao reservar o backup único $backup; a origem foi preservada e a migração foi interrompida."
+            && [ -d "$backup" ] && [ ! -L "$backup" ] \
+            && [ "$(stat -c '%d:%i' -- "$backup" 2>/dev/null || true)" = "$identidade" ] || {
+            falhar "Colisão ou mudança de identidade ao reservar $backup; os estados foram preservados."
         }
-        MIGRACAO_ORIGENS+=("$origem")
-        MIGRACAO_BACKUPS+=("$backup")
         [ "$(stat -c '%d' -- "$backup" 2>/dev/null || true)" = "$dispositivo_pai" ] \
             || falhar "Backup $backup não permaneceu no mesmo filesystem da origem."
         como_usuario mkdir -- "$origem" \
@@ -711,8 +987,13 @@ migrar_diretorios() {
             || falhar "Mountpoint recriado com UID/GID incorretos: $origem"
 
         # Fecha a janela entre a primeira comparação e o rename atômico.
-        rsync_copiar_e_comparar "$backup" "$alvo" \
-            || falhar "Falha ao comparar o backup preservado $backup com $alvo."
+        if rsync_copiar_e_comparar "$backup" "$alvo"; then
+            :
+        else
+            status=$?
+            erro "${RSYNC_DIAGNOSTICO:-Falha ao comparar $backup com $alvo}; backup e destino foram preservados."
+            exit "$status"
+        fi
         ok "Originais preservados no mesmo filesystem: $backup"
     done
 }
@@ -841,8 +1122,17 @@ remover_blocos_gerenciados() {
     done < "$entrada"
 }
 
+canonicalizar_target_fstab() {
+    local alvo="$1" canonico
+
+    [[ "$alvo" == /* ]] && [[ "$alvo" != *[[:cntrl:]]* ]] || return 1
+    canonico="$(readlink -m -- "$alvo" 2>/dev/null || true)"
+    [ -n "$canonico" ] && [[ "$canonico" != *$'\n'* ]] || return 1
+    FSTAB_TARGET_CANONICO="$canonico"
+}
+
 detectar_colisoes_targets() {
-    local arquivo="$1" linha status alvo esperado i numero=0
+    local arquivo="$1" linha status alvo alvo_canonico esperado esperado_canonico i numero=0
 
     while IFS= read -r linha || [ -n "$linha" ]; do
         numero=$((numero + 1))
@@ -861,10 +1151,23 @@ detectar_colisoes_targets() {
             return 1
         }
         alvo="$FSTAB_CAMPO_DECODIFICADO"
+        if [[ "$alvo" != /* ]]; then
+            continue
+        fi
+        canonicalizar_target_fstab "$alvo" || {
+            FSTAB_DIAGNOSTICO="Target não pôde ser canonicalizado na linha $numero do fstab atual: $alvo"
+            return 1
+        }
+        alvo_canonico="$FSTAB_TARGET_CANONICO"
         for i in "${!FSTAB_ALVOS[@]}"; do
             esperado="${FSTAB_ALVOS[$i]}"
-            if [ "$alvo" = "$esperado" ]; then
-                FSTAB_DIAGNOSTICO="Colisão por target no fstab: $esperado já possui entrada não gerenciada (linha $numero)."
+            canonicalizar_target_fstab "$esperado" || {
+                FSTAB_DIAGNOSTICO="Target esperado não pôde ser canonicalizado: $esperado"
+                return 1
+            }
+            esperado_canonico="$FSTAB_TARGET_CANONICO"
+            if [ "$alvo_canonico" = "$esperado_canonico" ]; then
+                FSTAB_DIAGNOSTICO="Colisão por target canônico no fstab: $alvo representa $esperado e já possui entrada não gerenciada (linha $numero)."
                 return 1
             fi
         done
@@ -978,7 +1281,7 @@ validar_metadados_fstab() {
 }
 
 preparar_lock_fstab() {
-    local metadados estado
+    local metadados estado coproc_pid leitura_fd escrita_fd
 
     sudo test ! -L "$FSTAB_LOCK_ARQUIVO" \
         || falhar "$FSTAB_LOCK_ARQUIVO não pode ser symlink."
@@ -991,15 +1294,29 @@ preparar_lock_fstab() {
     [ "$metadados" = "0:0:600:1" ] \
         || falhar "Lock inseguro em $FSTAB_LOCK_ARQUIVO (esperado root:root 0600, link único)."
 
+    # Impede que um sinal deixe um coprocess parcialmente publicado sem canal
+    # de liberação. O trap normal é restaurado assim que PID e FDs são globais.
+    trap '' HUP INT TERM
     coproc FSTAB_FLOCK {
         sudo flock -x -w 30 "$FSTAB_LOCK_ARQUIVO" \
             bash -c 'printf "%s\n" BLOQUEADO; IFS= read -r comando; [ "$comando" = LIBERAR ]'
     }
-    FSTAB_LOCK_PID="$FSTAB_FLOCK_PID"
-    exec {FSTAB_LOCK_LEITURA}<&"${FSTAB_FLOCK[0]}"
-    exec {FSTAB_LOCK_ESCRITA}>&"${FSTAB_FLOCK[1]}"
+    coproc_pid="$FSTAB_FLOCK_PID"
+    if ! exec {leitura_fd}<&"${FSTAB_FLOCK[0]}" \
+        || ! exec {escrita_fd}>&"${FSTAB_FLOCK[1]}"; then
+        printf '%s\n' LIBERAR >&"${FSTAB_FLOCK[1]}" 2>/dev/null || true
+        [[ "${leitura_fd:-}" =~ ^[0-9]+$ ]] && exec {leitura_fd}<&-
+        wait "$coproc_pid" 2>/dev/null || true
+        trap 'exit 1' HUP INT TERM
+        falhar "Não foi possível inicializar os canais do flock global."
+    fi
+    FSTAB_LOCK_LEITURA="$leitura_fd"
+    FSTAB_LOCK_ESCRITA="$escrita_fd"
+    FSTAB_LOCK_PID="$coproc_pid"
+    trap 'exit 1' HUP INT TERM
+
     if ! IFS= read -r estado <&"$FSTAB_LOCK_LEITURA"; then
-        wait "$FSTAB_LOCK_PID" 2>/dev/null || true
+        liberar_lock_fstab 2>/dev/null || true
         falhar "Tempo esgotado ou falha ao adquirir o flock global de $FSTAB."
     fi
     [ "$estado" = "BLOQUEADO" ] || falhar "Resposta inesperada ao adquirir o lock do fstab."
@@ -1080,108 +1397,223 @@ instalar_fstab_atomico() {
         FSTAB_DIAGNOSTICO="$FSTAB mudou antes do rename atômico; candidato não instalado."
         return 1
     }
-    sudo mv -fT -- "$FSTAB_STAGE" "$FSTAB" || {
-        FSTAB_DIAGNOSTICO="Falha na instalação atômica de $FSTAB."
+    [ "$FSTAB_RENAME_INTENCAO" -eq 0 ] || {
+        FSTAB_DIAGNOSTICO="Intenção duplicada de rename do fstab recusada."
         return 1
     }
+    FSTAB_RENAME_INTENCAO=1
+    if ! sudo mv -fT -- "$FSTAB_STAGE" "$FSTAB"; then
+        if sudo cmp -s -- "$FSTAB_CANDIDATO" "$FSTAB"; then
+            FSTAB_INSTALADO=1
+            FSTAB_STAGE=""
+        fi
+        FSTAB_DIAGNOSTICO="Falha na instalação atômica de $FSTAB."
+        return 1
+    fi
     FSTAB_STAGE=""
     FSTAB_INSTALADO=1
+}
+
+preservar_candidato_fstab_conflito() {
+    local modo
+
+    [ -n "$FSTAB_CANDIDATO" ] && [ -f "$FSTAB_CANDIDATO" ] || return 1
+    modo="$(stat -c '%a' -- "$FSTAB_BACKUP" 2>/dev/null || true)"
+    [[ "$modo" =~ ^[0-7]{3,4}$ ]] || modo=0644
+    FSTAB_CONFLITO_CANDIDATO="$(sudo mktemp -- \
+        "${FSTAB}.candidato-docs4-conflito-$(date +%Y%m%d-%H%M%S).XXXXXX")" || return 1
+    if ! sudo install -o root -g root -m "$modo" -- \
+        "$FSTAB_CANDIDATO" "$FSTAB_CONFLITO_CANDIDATO" \
+        || ! sudo cmp -s -- "$FSTAB_CANDIDATO" "$FSTAB_CONFLITO_CANDIDATO"; then
+        sudo rm -f -- "$FSTAB_CONFLITO_CANDIDATO" 2>/dev/null || true
+        FSTAB_CONFLITO_CANDIDATO=""
+        return 1
+    fi
 }
 
 restaurar_fstab_original() {
     local stage_restauro
 
-    [ "$FSTAB_INSTALADO" -eq 1 ] || return 0
+    if [ "$FSTAB_INSTALADO" -ne 1 ]; then
+        [ "$FSTAB_RENAME_INTENCAO" -eq 1 ] || return 0
+        if [ -n "$FSTAB_CANDIDATO" ] && [ -f "$FSTAB_CANDIDATO" ] \
+            && sudo cmp -s -- "$FSTAB_CANDIDATO" "$FSTAB"; then
+            FSTAB_INSTALADO=1
+        elif [ -n "$FSTAB_ORIGINAL_TMP" ] && [ -f "$FSTAB_ORIGINAL_TMP" ] \
+            && sudo cmp -s -- "$FSTAB_ORIGINAL_TMP" "$FSTAB"; then
+            return 0
+        else
+            preservar_candidato_fstab_conflito || true
+            erro "Estado do rename do fstab é divergente; atual em $FSTAB, original em ${FSTAB_BACKUP:-indisponível} e candidato em ${FSTAB_CONFLITO_CANDIDATO:-${FSTAB_CANDIDATO:-indisponível}} foram preservados."
+            return 1
+        fi
+    fi
     [ -n "$FSTAB_BACKUP" ] && sudo test -f "$FSTAB_BACKUP" \
         || { erro "Backup do fstab indisponível; restauração automática impossível."; return 1; }
+    [ -n "$FSTAB_CANDIDATO" ] && [ -f "$FSTAB_CANDIDATO" ] || {
+        erro "Candidato desta execução indisponível; $FSTAB atual e $FSTAB_BACKUP foram preservados."
+        return 1
+    }
+    if ! sudo cmp -s -- "$FSTAB_CANDIDATO" "$FSTAB"; then
+        preservar_candidato_fstab_conflito || true
+        erro "Rollback CAS recusado: $FSTAB não é mais exatamente o candidato desta execução. Atual preservado em $FSTAB; original em $FSTAB_BACKUP; candidato em ${FSTAB_CONFLITO_CANDIDATO:-$FSTAB_CANDIDATO}."
+        return 1
+    fi
+
     stage_restauro="$(sudo mktemp -- "${FSTAB%/*}/.fstab.restore.XXXXXX")" || return 1
     if ! sudo cp --preserve=all -- "$FSTAB_BACKUP" "$stage_restauro" \
-        || ! sudo cmp -s -- "$FSTAB_BACKUP" "$stage_restauro" \
-        || ! sudo mv -fT -- "$stage_restauro" "$FSTAB"; then
+        || ! sudo cmp -s -- "$FSTAB_BACKUP" "$stage_restauro"; then
         sudo rm -f -- "$stage_restauro" 2>/dev/null || true
+        erro "Falha ao preparar restauração atômica de $FSTAB a partir de $FSTAB_BACKUP."
+        return 1
+    fi
+    if ! sudo cmp -s -- "$FSTAB_CANDIDATO" "$FSTAB"; then
+        sudo rm -f -- "$stage_restauro" 2>/dev/null || true
+        preservar_candidato_fstab_conflito || true
+        erro "Rollback CAS recusado antes do swap: $FSTAB mudou; atual, original ($FSTAB_BACKUP) e candidato (${FSTAB_CONFLITO_CANDIDATO:-$FSTAB_CANDIDATO}) foram preservados."
+        return 1
+    fi
+    if [ "$FSTAB_RESTORE_INTENCAO" -eq 0 ]; then
+        FSTAB_RESTORE_INTENCAO=1
+    fi
+    if ! sudo mv -fT -- "$stage_restauro" "$FSTAB"; then
+        sudo rm -f -- "$stage_restauro" 2>/dev/null || true
+        if sudo cmp -s -- "$FSTAB_BACKUP" "$FSTAB"; then
+            FSTAB_INSTALADO=0
+            return 0
+        fi
         erro "Falha ao restaurar atomicamente $FSTAB a partir de $FSTAB_BACKUP."
         return 1
     fi
     FSTAB_INSTALADO=0
-    aviso "$FSTAB original restaurado após falha."
+    aviso "$FSTAB original restaurado por compare-and-swap após falha."
 }
 
 desmontar_mounts_criados() {
-    local i caminho tipo indice
+    local i caminho tipo indice retorno=0 esperado_id atual_id
 
-    for ((i = ${#MOUNTS_CRIADOS[@]} - 1; i >= 0; i--)); do
-        caminho="${MOUNTS_CRIADOS[$i]}"
-        tipo="${MOUNTS_CRIADOS_TIPO[$i]}"
+    for ((i = ${#MOUNT_INTENCOES_ALVOS[@]} - 1; i >= 0; i--)); do
+        caminho="${MOUNT_INTENCOES_ALVOS[$i]}"
+        tipo="${MOUNT_INTENCOES_TIPOS[$i]}"
+        esperado_id="${MOUNT_INTENCOES_IDS[$i]:-}"
+        [ -n "$esperado_id" ] || continue
+        atual_id="$(findmnt -rn --no-encode -M "$caminho" -o ID 2>/dev/null || true)"
+        if [ "$atual_id" != "$esperado_id" ]; then
+            [ -z "$atual_id" ] \
+                || aviso "Não desmontado por segurança: mount ID de $caminho mudou ($esperado_id -> $atual_id)."
+            continue
+        fi
         obter_mount_exato "$caminho" || continue
         if [ "$tipo" = "base" ]; then
             if ! validar_base_montada; then
                 aviso "Não desmontado por segurança: mount em $caminho mudou de identidade."
+                retorno=1
                 continue
             fi
         else
             indice="${tipo#bind:}"
             if ! validar_bind_ativo "$DOCS4/${HD2_DIRS[$indice]}" "$caminho"; then
                 aviso "Não desmontado por segurança: bind em $caminho mudou de identidade."
+                retorno=1
                 continue
             fi
         fi
-        sudo umount -- "$caminho" \
-            || aviso "Falha ao desmontar mount criado nesta execução: $caminho"
+        if ! sudo umount -- "$caminho"; then
+            aviso "Falha ao desmontar mount intentado nesta execução: $caminho"
+            retorno=1
+        elif obter_mount_exato "$caminho"; then
+            aviso "Mount ainda está ativo após umount: $caminho"
+            retorno=1
+        fi
     done
+    return "$retorno"
 }
 
 restaurar_migracoes() {
-    local i origem backup
+    local i origem backup esperado identidade_origem identidade_backup retorno=0
 
     for ((i = ${#MIGRACAO_ORIGENS[@]} - 1; i >= 0; i--)); do
         origem="${MIGRACAO_ORIGENS[$i]}"
         backup="${MIGRACAO_BACKUPS[$i]}"
+        esperado="${MIGRACAO_IDENTIDADES[$i]}"
         if obter_mount_exato "$origem"; then
             aviso "Não foi possível restaurar $backup: $origem continua montado."
+            retorno=1
             continue
         fi
-        [ -d "$backup" ] && [ ! -L "$backup" ] || {
-            aviso "Backup original não encontrado para restauração: $backup"
+        identidade_origem="$(stat -c '%d:%i' -- "$origem" 2>/dev/null || true)"
+        identidade_backup="$(stat -c '%d:%i' -- "$backup" 2>/dev/null || true)"
+        if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+            if [ "$identidade_origem" = "$esperado" ]; then
+                continue
+            fi
+            aviso "Rename $origem -> $backup não está em estado restaurado nem recuperável."
+            retorno=1
+            continue
+        fi
+        [ -d "$backup" ] && [ ! -L "$backup" ] \
+            && [ "$identidade_backup" = "$esperado" ] || {
+            aviso "Backup mudou de identidade; nenhum estado foi alterado: $backup"
+            retorno=1
             continue
         }
-        if [ -e "$origem" ]; then
+        if [ -e "$origem" ] || [ -L "$origem" ]; then
             if [ -d "$origem" ] && [ ! -L "$origem" ] && diretorio_vazio "$origem"; then
                 como_usuario rmdir -- "$origem" || {
                     aviso "Não foi possível liberar $origem para restaurar $backup."
+                    retorno=1
                     continue
                 }
             else
                 aviso "Dados novos em $origem impediram restaurar $backup; ambos foram preservados."
+                retorno=1
                 continue
             fi
         fi
         if como_usuario mv -T --no-clobber -- "$backup" "$origem" \
             && [ ! -e "$backup" ] && [ ! -L "$backup" ] \
-            && [ -d "$origem" ] && [ ! -L "$origem" ]; then
+            && [ "$(stat -c '%d:%i' -- "$origem" 2>/dev/null || true)" = "$esperado" ]; then
             aviso "Originais restaurados em $origem após falha."
         else
             aviso "Restaure manualmente $backup para $origem; nenhuma colisão foi sobrescrita."
+            retorno=1
         fi
     done
+    return "$retorno"
+}
+
+concluir_reconciliacoes_orfas() {
+    local i retorno=0
+
+    for ((i = ${#ORFAO_ORIGENS[@]} - 1; i >= 0; i--)); do
+        concluir_reconciliacao_orfa_indice "$i" || retorno=1
+    done
+    return "$retorno"
 }
 
 encerrar_transacao() {
-    local status=$?
+    local status=$? rollback_status=0
     trap - EXIT HUP INT TERM
     set +e
+    set +u
 
     if [ "$status" -ne 0 ] && [ "$TRANSACAO_CONCLUIDA" -eq 0 ] \
         && [ "$ROLLBACK_EM_CURSO" -eq 0 ]; then
         ROLLBACK_EM_CURSO=1
-        erro "A etapa falhou; iniciando rollback conservador."
-        desmontar_mounts_criados
-        restaurar_fstab_original
-        restaurar_migracoes
+        erro "A etapa falhou; iniciando rollback conservador sob o lock global."
+        desmontar_mounts_criados || rollback_status=1
+        restaurar_fstab_original || rollback_status=1
+        restaurar_migracoes || rollback_status=1
+        concluir_reconciliacoes_orfas || rollback_status=1
+        if [ "$rollback_status" -ne 0 ]; then
+            ROLLBACK_FALHOU=1
+            erro "Rollback incompleto: estados divergentes foram preservados e exigem revisão manual."
+        fi
     fi
-    if [ -n "$TESTE_VALIDO" ] && [ -e "$TESTE_VALIDO" ]; then
+    if [ -n "$TESTE_VALIDO" ] && { [ -e "$TESTE_VALIDO" ] || [ -L "$TESTE_VALIDO" ]; }; then
         como_usuario rm -f -- "$TESTE_VALIDO" 2>/dev/null || true
     fi
-    if [ -n "$TESTE_INVALIDO" ] && [ -e "$TESTE_INVALIDO" ]; then
+    if [ -n "$TESTE_INVALIDO" ] && { [ -e "$TESTE_INVALIDO" ] || [ -L "$TESTE_INVALIDO" ]; }; then
         como_usuario rm -f -- "$TESTE_INVALIDO" 2>/dev/null || true
     fi
     if [ -n "$FSTAB_STAGE" ]; then
@@ -1207,13 +1639,13 @@ ativar_e_validar_binds() {
         fi
         diretorio_vazio "$destino" \
             || falhar "Novos dados apareceram em $destino após a migração; bind recusado e dados preservados para revisão."
+        registrar_intencao_mount "$destino" "bind:$i" \
+            || falhar "Não foi possível registrar intenção única de mount para $destino."
         if ! sudo mount -- "$destino"; then
-            if validar_bind_ativo "$fonte" "$destino"; then
-                registrar_mount_criado "$destino" "bind:$i"
-            fi
             falhar "Falha ao ativar o bind final $fonte -> $destino."
         fi
-        registrar_mount_criado "$destino" "bind:$i"
+        registrar_mount_efetivo "$MOUNT_INTENCAO_INDICE" "$destino" \
+            || falhar "Bind criado, mas seu ID não pôde ser registrado; rollback automático não fará umount ambíguo."
         validar_bind_ativo "$fonte" "$destino" \
             || falhar "Bind final não corresponde a source/target/opções esperados: $MOUNT_DIAGNOSTICO"
         validar_sem_mounts_abaixo "$destino" 1 || falhar "$MOUNT_DIAGNOSTICO"
@@ -1311,30 +1743,32 @@ chmod 0700 -- "$TMP_DIR"
 trap encerrar_transacao EXIT
 trap 'exit 1' HUP INT TERM
 
+# O lock global cobre toda mutação compartilhada: mounts, cópias, renames,
+# publicação do fstab e eventual rollback.
+preparar_lock_fstab
 montar_ou_validar_base
 testar_montagem_antes_migracao
 preparar_diretorios_hd2
 preparar_destinos_xdg
+reconciliar_backups_orfaos
 migrar_diretorios
 
-# A persistência só começa depois da migração e permanece serializada até que
-# todos os mounts finais tenham sido validados ou revertidos.
-preparar_lock_fstab
 construir_candidato_fstab || falhar "$FSTAB_DIAGNOSTICO"
 instalar_fstab_atomico || falhar "$FSTAB_DIAGNOSTICO"
 ativar_e_validar_binds
 validar_base_montada || falhar "Montagem base divergiu após ativar binds: $MOUNT_DIAGNOSTICO"
 validar_fstab_exato "$FSTAB" || falhar "$FSTAB_DIAGNOSTICO"
 
-liberar_lock_fstab || aviso "O lock do fstab foi liberado com status inesperado."
 TRANSACAO_CONCLUIDA=1
+liberar_lock_fstab || aviso "O lock global da transação foi liberado com status inesperado."
 
 echo
 ok "Docs4 concluído com montagem e cinco binds exatos."
 info "Backup exclusivo do fstab: $FSTAB_BACKUP"
-if [ "${#MIGRACAO_BACKUPS[@]}" -gt 0 ]; then
+BACKUPS_A_EXIBIR=("${MIGRACAO_BACKUPS[@]}" "${BACKUPS_RETIDOS[@]}")
+if [ "${#BACKUPS_A_EXIBIR[@]}" -gt 0 ]; then
     aviso "Os dados originais NÃO foram apagados. Backups no mesmo filesystem:"
-    printf '  - %s\n' "${MIGRACAO_BACKUPS[@]}"
+    printf '  - %s\n' "${BACKUPS_A_EXIBIR[@]}"
     aviso "Valide seus dados e remova esses diretórios manualmente somente quando estiver seguro."
 else
     info "Nenhum diretório original não vazio precisou ser movido para backup nesta execução."

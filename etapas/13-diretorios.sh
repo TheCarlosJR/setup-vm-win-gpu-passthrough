@@ -15,6 +15,8 @@ VM_ESTADO=""
 VM_DIAGNOSTICO=""
 DOCS4_ESTADO=""
 DOCS4_DIAGNOSTICO=""
+DOCS4_DISPOSITIVO=""
+BLKID_COM_SUDO=0
 
 validar_docs4_normativo() {
     if [ "${DOCS4_MONTAGEM:-$DOCS4}" != "$DOCS4" ]; then
@@ -34,35 +36,77 @@ obter_mount_docs4() {
     DOCS4_MOUNT_FSTYPE=""
     DOCS4_MOUNT_UUID=""
     DOCS4_MOUNT_OPTIONS=""
+    DOCS4_MOUNT_FSROOT=""
 
-    DOCS4_MOUNT_SOURCE="$(findmnt -rn -M "$DOCS4" -o SOURCE 2>/dev/null)" || return 1
-    DOCS4_MOUNT_TARGET="$(findmnt -rn -M "$DOCS4" -o TARGET 2>/dev/null)" || return 1
-    DOCS4_MOUNT_FSTYPE="$(findmnt -rn -M "$DOCS4" -o FSTYPE 2>/dev/null)" || return 1
-    DOCS4_MOUNT_UUID="$(findmnt -rn -M "$DOCS4" -o UUID 2>/dev/null)" || return 1
-    DOCS4_MOUNT_OPTIONS="$(findmnt -rn -M "$DOCS4" -o OPTIONS 2>/dev/null)" || return 1
+    DOCS4_MOUNT_SOURCE="$(findmnt -rn --no-encode -M "$DOCS4" -o SOURCE 2>/dev/null)" || return 1
+    DOCS4_MOUNT_TARGET="$(findmnt -rn --no-encode -M "$DOCS4" -o TARGET 2>/dev/null)" || return 1
+    DOCS4_MOUNT_FSTYPE="$(findmnt -rn --no-encode -M "$DOCS4" -o FSTYPE 2>/dev/null)" || return 1
+    DOCS4_MOUNT_UUID="$(findmnt -rn --no-encode -M "$DOCS4" -o UUID 2>/dev/null)" || return 1
+    DOCS4_MOUNT_OPTIONS="$(findmnt -rn --no-encode -M "$DOCS4" -o OPTIONS 2>/dev/null)" || return 1
+    DOCS4_MOUNT_FSROOT="$(findmnt -rn --no-encode -M "$DOCS4" -o FSROOT 2>/dev/null)" || return 1
     [ -n "$DOCS4_MOUNT_SOURCE" ] && [ "$DOCS4_MOUNT_TARGET" = "$DOCS4" ] \
-        && [[ "$DOCS4_MOUNT_SOURCE$DOCS4_MOUNT_TARGET$DOCS4_MOUNT_FSTYPE$DOCS4_MOUNT_UUID$DOCS4_MOUNT_OPTIONS" != *$'\n'* ]]
+        && [[ "$DOCS4_MOUNT_SOURCE$DOCS4_MOUNT_TARGET$DOCS4_MOUNT_FSTYPE$DOCS4_MOUNT_UUID$DOCS4_MOUNT_OPTIONS$DOCS4_MOUNT_FSROOT" != *$'\n'* ]]
+}
+
+resolver_uuid_hd2_sem_cache() {
+    local saida linha canonico
+    local -a dispositivos=()
+
+    DOCS4_DISPOSITIVO=""
+    if [ "$BLKID_COM_SUDO" -eq 1 ]; then
+        if saida="$(sudo blkid -c /dev/null -t "UUID=$UUID_HD2" -o device 2>/dev/null)"; then
+            :
+        else
+            DOCS4_DIAGNOSTICO="Não foi possível enumerar UUID_HD2=$UUID_HD2 sem cache."
+            return 1
+        fi
+    elif saida="$(blkid -c /dev/null -t "UUID=$UUID_HD2" -o device 2>/dev/null)"; then
+        :
+    else
+        DOCS4_DIAGNOSTICO="Não foi possível enumerar UUID_HD2=$UUID_HD2 sem cache."
+        return 1
+    fi
+
+    while IFS= read -r linha; do
+        [ -n "$linha" ] || continue
+        [[ "$linha" == /dev/* ]] && [[ "$linha" != *[[:cntrl:]]* ]] || {
+            DOCS4_DIAGNOSTICO="blkid retornou um dispositivo inválido para UUID_HD2: $linha"
+            return 1
+        }
+        canonico="$(readlink -f -- "$linha" 2>/dev/null || true)"
+        [ -n "$canonico" ] && [ -b "$canonico" ] || {
+            DOCS4_DIAGNOSTICO="UUID_HD2 retornou um dispositivo de bloco indisponível: $linha"
+            return 1
+        }
+        dispositivos+=("$canonico")
+    done <<< "$saida"
+
+    [ "${#dispositivos[@]}" -eq 1 ] || {
+        DOCS4_DIAGNOSTICO="UUID_HD2=$UUID_HD2 deve resolver sem cache para exatamente um dispositivo; encontrados: ${#dispositivos[@]}."
+        return 1
+    }
+    DOCS4_DISPOSITIVO="${dispositivos[0]}"
 }
 
 validar_mount_docs4_esperado() {
-    local esperado origem
+    local origem
 
     [ -n "${UUID_HD2:-}" ] && [[ "$UUID_HD2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
         DOCS4_DIAGNOSTICO="$DOCS4 está montado, mas UUID_HD2 está ausente ou inválido."
         return 1
     }
-    if [ -e "/dev/disk/by-uuid/$UUID_HD2" ] || [ -L "/dev/disk/by-uuid/$UUID_HD2" ]; then
-        esperado="$(readlink -f -- "/dev/disk/by-uuid/$UUID_HD2" 2>/dev/null || true)"
-    else
-        esperado="$(blkid -U "$UUID_HD2" 2>/dev/null || true)"
-        esperado="$(readlink -f -- "$esperado" 2>/dev/null || true)"
-    fi
-    origem="${DOCS4_MOUNT_SOURCE%%\[*}"
-    origem="$(readlink -f -- "$origem" 2>/dev/null || true)"
+    resolver_uuid_hd2_sem_cache || return 1
+    [[ "$DOCS4_MOUNT_SOURCE" != *"["* ]] \
+        && [[ "$DOCS4_MOUNT_SOURCE" != *"]"* ]] \
+        && [ "$DOCS4_MOUNT_FSROOT" = "/" ] || {
+        DOCS4_DIAGNOSTICO="$DOCS4 deve montar a raiz / da partição, sem root/subpath em SOURCE; encontrados SOURCE=${DOCS4_MOUNT_SOURCE:-desconhecido}, FSROOT=${DOCS4_MOUNT_FSROOT:-desconhecido}."
+        return 1
+    }
+    origem="$(readlink -f -- "$DOCS4_MOUNT_SOURCE" 2>/dev/null || true)"
 
-    [ -n "$esperado" ] && [ -b "$esperado" ] && [ "$origem" = "$esperado" ] \
+    [ "$origem" = "$DOCS4_DISPOSITIVO" ] \
         && [ "$DOCS4_MOUNT_UUID" = "$UUID_HD2" ] || {
-        DOCS4_DIAGNOSTICO="$DOCS4 é um mountpoint inesperado: origem ${DOCS4_MOUNT_SOURCE:-desconhecida}, UUID ${DOCS4_MOUNT_UUID:-desconhecido}; esperada UUID=$UUID_HD2."
+        DOCS4_DIAGNOSTICO="$DOCS4 é um mountpoint inesperado: origem ${DOCS4_MOUNT_SOURCE:-desconhecida}, UUID ${DOCS4_MOUNT_UUID:-desconhecido}; esperada raiz de UUID=$UUID_HD2 em $DOCS4_DISPOSITIVO."
         return 1
     }
     [ "$DOCS4_MOUNT_FSTYPE" = "fuseblk" ] || {
@@ -79,7 +123,7 @@ validar_mount_docs4_esperado() {
 validar_sem_mounts_aninhados_docs4() {
     local permitir_raiz="$1" saida alvo
 
-    saida="$(findmnt -rn --raw -o TARGET 2>/dev/null)" || {
+    saida="$(findmnt -rn --no-encode -o TARGET 2>/dev/null)" || {
         DOCS4_DIAGNOSTICO="Não foi possível inspecionar mounts sob $DOCS4."
         return 1
     }
@@ -213,6 +257,7 @@ verificar() {
 
 exigir_nao_root
 exigir_sudo
+BLKID_COM_SUDO=1
 exigir_comando findmnt mountpoint stat find blkid readlink
 validar_docs4_normativo || falhar "$DOCS4_DIAGNOSTICO"
 
