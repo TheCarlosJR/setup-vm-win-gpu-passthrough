@@ -640,9 +640,22 @@ consultar_vm_definida() {
 }
 
 obter_xml_vm() {
+    local modo="${1:-inativo}"
+    local -a opcoes=()
     VM_XML=""
-    if ! VM_XML="$(virsh_privilegiado dumpxml --inactive "$VM_NAME" 2>/dev/null)"; then
-        VM_DIAGNOSTICO="VM '$VM_NAME' existe, mas não foi possível obter seu XML inativo."
+    case "$modo" in
+        inativo)
+            opcoes=(--inactive)
+            ;;
+        ativo)
+            ;;
+        *)
+            VM_DIAGNOSTICO="Modo interno inválido ao obter XML da VM: '$modo'."
+            return 1
+            ;;
+    esac
+    if ! VM_XML="$(virsh_privilegiado dumpxml "${opcoes[@]}" "$VM_NAME" 2>/dev/null)"; then
+        VM_DIAGNOSTICO="VM '$VM_NAME' existe, mas não foi possível obter seu XML $modo."
         return 1
     fi
 }
@@ -757,42 +770,64 @@ if cpu is None or cpu.get("mode") != "host-passthrough":
     erros.append("CPU host-passthrough ausente")
 
 disks = root.findall("./devices/disk")
-def source_file(disk):
-    source = disk.find("source")
-    return None if source is None else source.get("file")
+data_disks = [d for d in disks if d.get("device") == "disk"]
+cdroms = [d for d in disks if d.get("device") == "cdrom"]
+outros = [d for d in disks if d.get("device") not in ("disk", "cdrom")]
+armazenamento_alternativo = (
+    root.findall("./devices/filesystem")
+    + root.findall("./devices/hostdev")
+    + root.findall("./devices/redirdev")
+)
 
-def unique_disk(path, device, label):
-    encontrados = [d for d in disks if d.get("device") == device and source_file(d) == path]
-    if len(encontrados) != 1:
-        erros.append(f"{label} deve ser referenciado exatamente uma vez por {path}")
-        return None
-    return encontrados[0]
+if len(data_disks) != 1:
+    erros.append(f"deve existir exatamente um disco de dados durante a instalação (encontrados {len(data_disks)})")
+if len(cdroms) != 2:
+    erros.append(f"devem existir exatamente dois CD-ROMs durante a instalação (encontrados {len(cdroms)})")
+if outros or len(disks) != 3:
+    erros.append("o conjunto de armazenamento da instalação deve conter somente o QCOW2 e as duas ISOs")
+if armazenamento_alternativo:
+    erros.append("hostdev, filesystem e redirecionamento USB são proibidos durante a instalação")
 
-sistema = unique_disk(qcow2, "disk", "disco do sistema")
-if sistema is not None:
-    driver = sistema.find("driver")
-    target = sistema.find("target")
-    if driver is None or driver.get("name") != "qemu" or driver.get("type") != "qcow2" or driver.get("cache") != "none":
-        erros.append("driver do QCOW2 deve ser qemu/qcow2 com cache=none")
-    if target is None or target.get("bus") != "virtio":
-        erros.append("disco do sistema não usa barramento virtio")
+def fonte_arquivo_exata(disk, path, label):
+    sources = disk.findall("source")
+    if len(sources) != 1:
+        erros.append(f"{label} deve possuir exatamente uma source")
+        return False
+    source = sources[0]
+    alternativos = [attr for attr in ("dev", "name", "volume", "protocol") if source.get(attr)]
+    if source.get("file") != path or alternativos:
+        erros.append(f"{label} deve usar somente source file={path}")
+        return False
+    return True
+
+if len(data_disks) == 1:
+    sistema = data_disks[0]
+    if sistema.get("type") != "file":
+        erros.append("disco do sistema deve ser file/device=disk")
+    fonte_arquivo_exata(sistema, qcow2, "disco do sistema")
+    drivers = sistema.findall("driver")
+    targets = sistema.findall("target")
+    if len(drivers) != 1 or drivers[0].get("name") != "qemu" or drivers[0].get("type") != "qcow2" or drivers[0].get("cache") != "none":
+        erros.append("driver do QCOW2 deve ser único e usar qemu/qcow2 com cache=none")
+    if len(targets) != 1 or targets[0].get("bus") != "virtio":
+        erros.append("disco do sistema deve possuir um único target no barramento virtio")
 
 for path, label in ((iso_windows, "ISO do Windows"), (iso_virtio, "ISO VirtIO")):
-    cdrom = unique_disk(path, "cdrom", label)
-    if cdrom is None:
+    encontrados = [d for d in cdroms if len(d.findall("source")) == 1 and d.find("source").get("file") == path]
+    if len(encontrados) != 1:
+        erros.append(f"{label} deve ser referenciada exatamente uma vez por {path}")
         continue
-    driver = cdrom.find("driver")
-    target = cdrom.find("target")
-    if driver is None or driver.get("name") != "qemu" or driver.get("type") != "raw":
-        erros.append(f"{label} não usa driver qemu/raw")
-    if target is None or target.get("bus") != "sata":
-        erros.append(f"{label} não usa barramento sata")
-    if cdrom.find("readonly") is None:
-        erros.append(f"{label} não está marcada somente leitura")
-
-cdrom_files = [source_file(d) for d in disks if d.get("device") == "cdrom" and source_file(d) is not None]
-if sorted(cdrom_files) != sorted([iso_windows, iso_virtio]):
-    erros.append("CD-ROMs de arquivo não correspondem exatamente às duas ISOs configuradas")
+    cdrom = encontrados[0]
+    if cdrom.get("type") != "file" or not fonte_arquivo_exata(cdrom, path, label):
+        erros.append(f"{label} deve ser file/device=cdrom")
+    drivers = cdrom.findall("driver")
+    targets = cdrom.findall("target")
+    if len(drivers) != 1 or drivers[0].get("name") != "qemu" or drivers[0].get("type") != "raw":
+        erros.append(f"{label} deve possuir um único driver qemu/raw")
+    if len(targets) != 1 or targets[0].get("bus") != "sata":
+        erros.append(f"{label} deve possuir um único target no barramento sata")
+    if len(cdrom.findall("readonly")) != 1:
+        erros.append(f"{label} deve possuir exatamente uma marca readonly")
 
 interfaces = root.findall("./devices/interface")
 if len(interfaces) != 1:
@@ -824,6 +859,117 @@ if erros:
         return 1
     fi
 }
+
+consultar_estado_vm_definida() {
+    virsh_privilegiado domstate "$VM_NAME" 2>/dev/null
+}
+
+validar_vm_definida() {
+    local estado
+    obter_xml_vm inativo || return 1
+    validar_xml_vm || return 1
+    if ! estado="$(consultar_estado_vm_definida)"; then
+        VM_DIAGNOSTICO="Não foi possível consultar o estado da VM '$VM_NAME'."
+        return 1
+    fi
+    case "$estado" in
+        "shut off")
+            return 0
+            ;;
+        running|paused)
+            obter_xml_vm ativo || return 1
+            validar_xml_vm || return 1
+            ;;
+        *)
+            VM_DIAGNOSTICO="Estado '$estado' não permite validar com segurança a topologia de instalação de '$VM_NAME'."
+            return 1
+            ;;
+    esac
+}
+
+falhar_inicio_vm() {
+    local motivo="$1" estado="" rollback=""
+    if ! estado="$(consultar_estado_vm_definida)" || [ "$estado" != "shut off" ]; then
+        if virsh_privilegiado destroy "$VM_NAME" >/dev/null 2>&1; then
+            rollback=" A VM foi interrompida e permaneceu definida para diagnóstico."
+        else
+            rollback=" ATENÇÃO: não foi possível confirmar a interrupção da VM; desligue-a imediatamente."
+        fi
+    fi
+    VM_DIAGNOSTICO="$motivo$rollback"
+    return 1
+}
+
+iniciar_vm_definida_validada() {
+    local estado diagnostico
+    validar_vm_definida || return 1
+    estado="$(consultar_estado_vm_definida)" \
+        || { VM_DIAGNOSTICO="Não foi possível confirmar o estado pré-start de '$VM_NAME'."; return 1; }
+    [ "$estado" = "shut off" ] \
+        || { VM_DIAGNOSTICO="A VM deve estar exatamente 'shut off' antes do start controlado; encontrado '$estado'."; return 1; }
+
+    if ! virsh_privilegiado start "$VM_NAME" --paused >/dev/null; then
+        falhar_inicio_vm "Não foi possível iniciar '$VM_NAME' pausada."
+        return 1
+    fi
+    if ! estado="$(consultar_estado_vm_definida)" || [ "$estado" != "paused" ]; then
+        falhar_inicio_vm "A VM não confirmou o estado 'paused' após o start seguro; encontrado '${estado:-indisponível}'."
+        return 1
+    fi
+    if ! validar_vm_definida; then
+        diagnostico="$VM_DIAGNOSTICO"
+        falhar_inicio_vm "A topologia ativa divergiu antes do primeiro ciclo de CPU: $diagnostico"
+        return 1
+    fi
+    if ! virsh_privilegiado resume "$VM_NAME" >/dev/null; then
+        falhar_inicio_vm "A topologia foi validada, mas não foi possível retomar '$VM_NAME'."
+        return 1
+    fi
+    if ! estado="$(consultar_estado_vm_definida)" || [ "$estado" != "running" ]; then
+        falhar_inicio_vm "A VM não confirmou o estado 'running' após resume; encontrado '${estado:-indisponível}'."
+        return 1
+    fi
+    if ! validar_vm_definida; then
+        diagnostico="$VM_DIAGNOSTICO"
+        falhar_inicio_vm "A topologia ativa mudou imediatamente após resume: $diagnostico"
+        return 1
+    fi
+}
+
+definir_vm_sem_iniciar() (
+    local temporario=""
+    umask 077
+    limpar_xml_temporario() {
+        [ -z "$temporario" ] || rm -f -- "$temporario" "$temporario.sanitized" >/dev/null 2>&1 || true
+    }
+    trap 'status=$?; trap - EXIT; limpar_xml_temporario; exit "$status"' EXIT
+    trap 'exit 1' HUP INT TERM
+
+    temporario="$(mktemp -- /tmp/vm-definition.XXXXXXXX.xml)" \
+        || { erro "Não foi possível reservar o XML temporário da VM."; exit 1; }
+    virt_install_privilegiado "$@" --print-xml > "$temporario" \
+        || { erro "virt-install não conseguiu gerar o XML candidato sem iniciar a VM."; exit 1; }
+    python3 -c '
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+tree = ET.parse(path)
+root = tree.getroot()
+devices = root.find("./devices")
+if devices is None:
+    raise SystemExit(2)
+for redirdev in list(devices.findall("redirdev")):
+    devices.remove(redirdev)
+sanizado = path + ".sanitized"
+tree.write(sanizado, encoding="utf-8", xml_declaration=True)
+os.replace(sanizado, path)
+' "$temporario" \
+        || { erro "virt-install gerou um XML inválido ou não foi possível remover o redirecionamento USB."; exit 1; }
+    virsh_privilegiado define "$temporario" >/dev/null \
+        || { erro "libvirt recusou a definição candidata da VM."; exit 1; }
+)
 
 verificar() {
     local comandos_ok=1 parametros_ok=0 isos_ok=0 consulta_status
@@ -895,9 +1041,9 @@ verificar() {
         v_fim
     fi
     if consultar_vm_definida; then
-        if obter_xml_vm && [ "$parametros_ok" -eq 1 ] && [ "$isos_ok" -eq 1 ] \
-            && validar_xml_vm; then
-            v_ok "VM '$VM_NAME' referencia os recursos exatos e usa Q35, UEFI, TPM2 e drivers esperados."
+        if [ "$parametros_ok" -eq 1 ] && [ "$isos_ok" -eq 1 ] \
+            && validar_vm_definida; then
+            v_ok "VM '$VM_NAME' referencia somente os recursos de instalação exatos nos XMLs ativo/inativo e usa Q35, UEFI, TPM2 e drivers esperados."
         else
             v_falta "${VM_DIAGNOSTICO:-Não foi possível validar integralmente o XML da VM.}"
         fi
@@ -941,8 +1087,7 @@ if consultar_vm_definida; then
     iso_legivel_pelo_qemu "$ISO_VIRTIO" \
         || falhar "A VM existente referencia uma ISO VirtIO inacessível para libvirt-qemu: $ISO_VIRTIO"
     validar_qcow2_existente || falhar "$QCOW2_DIAGNOSTICO"
-    obter_xml_vm || falhar "$VM_DIAGNOSTICO"
-    validar_xml_vm || falhar "$VM_DIAGNOSTICO"
+    validar_vm_definida || falhar "$VM_DIAGNOSTICO"
     titulo "2/5 AppArmor"
     instalar_regra_apparmor || falhar "AppArmor não foi aplicado; a VM existente não será alterada."
     ok "VM '$VM_NAME' já existe e está conforme; reexecução concluída sem redefini-la."
@@ -1003,7 +1148,7 @@ if command -v osinfo-query >/dev/null 2>&1 && osinfo-query os 2>/dev/null | grep
 fi
 info "os-variant: $OSV"
 
-virt_install_privilegiado \
+definir_vm_sem_iniciar \
     --name "$VM_NAME" \
     --metadata title="Windows 11 (GPU passthrough)" \
     --memory "$VM_RAM_MB" \
@@ -1023,13 +1168,13 @@ virt_install_privilegiado \
     --noautoconsole
 
 if ! consultar_vm_definida; then
-    falhar "virt-install terminou, mas a VM '$VM_NAME' não pôde ser confirmada: $VM_DIAGNOSTICO"
+    falhar "A definição terminou, mas a VM '$VM_NAME' não pôde ser confirmada: $VM_DIAGNOSTICO"
 fi
-obter_xml_vm || falhar "$VM_DIAGNOSTICO"
-validar_xml_vm || falhar "$VM_DIAGNOSTICO"
+validar_vm_definida || falhar "A VM foi definida sem iniciar, mas seu XML foi recusado: $VM_DIAGNOSTICO"
+iniciar_vm_definida_validada || falhar "$VM_DIAGNOSTICO"
 
 echo
-ok "VM criada, validada e instalação iniciada em segundo plano."
+ok "VM definida, validada ainda pausada e instalação iniciada somente após a topologia ativa ser aprovada."
 $VIRSH list --all
 
 info "Conferência do XML (loader OVMF, nvram, qcow2, q35):"
