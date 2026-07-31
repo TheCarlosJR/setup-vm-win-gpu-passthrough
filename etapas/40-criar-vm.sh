@@ -52,6 +52,10 @@ virsh_privilegiado() {
     executar_sudo env LC_ALL=C virsh --connect qemu:///system "$@"
 }
 
+virt_install_privilegiado() {
+    executar_sudo env LC_ALL=C virt-install --connect qemu:///system "$@"
+}
+
 caminho_absoluto_normalizado() {
     local caminho="${1:-}"
     [[ "$caminho" == /* ]] || return 1
@@ -173,35 +177,51 @@ validar_pai_qcow2() {
 }
 
 consultar_estado_qcow2() {
-    local status
+    local resultado status
     QCOW2_ESTADO=""
     validar_pai_qcow2 || { QCOW2_ESTADO="inacessivel"; return 1; }
 
-    if executar_como_qemu test -L -- "$QCOW2_PATH"; then
-        QCOW2_ESTADO="link"
-        QCOW2_DIAGNOSTICO="QCOW2_PATH já existe como link simbólico: $QCOW2_PATH"
+    if resultado="$(executar_como_qemu python3 -c '
+import os
+import stat
+import sys
+
+try:
+    metadados = os.lstat(sys.argv[1])
+except FileNotFoundError:
+    print("ausente")
+except OSError as exc:
+    detalhe = exc.strerror or exc.__class__.__name__
+    print(f"errno={exc.errno}: {detalhe}", file=sys.stderr)
+    raise SystemExit(1)
+else:
+    print("link" if stat.S_ISLNK(metadados.st_mode) else "existente")
+' "$QCOW2_PATH" 2>&1)"; then
+        case "$resultado" in
+            ausente)
+                QCOW2_ESTADO="ausente"
+                QCOW2_DIAGNOSTICO="QCOW2 ausente: $QCOW2_PATH"
+                ;;
+            link)
+                QCOW2_ESTADO="link"
+                QCOW2_DIAGNOSTICO="QCOW2_PATH já existe como link simbólico: $QCOW2_PATH"
+                ;;
+            existente)
+                QCOW2_ESTADO="existente"
+                ;;
+            *)
+                QCOW2_ESTADO="inacessivel"
+                QCOW2_DIAGNOSTICO="Resposta inesperada ao consultar o QCOW2 como libvirt-qemu: ${resultado:-vazia}."
+                return 1
+                ;;
+        esac
         return 0
     else
         status=$?
-        if [ "$status" -ne 1 ]; then
-            QCOW2_ESTADO="inacessivel"
-            QCOW2_DIAGNOSTICO="Não foi possível consultar se o QCOW2 é link simbólico (status $status)."
-            return 1
-        fi
+        QCOW2_ESTADO="inacessivel"
+        QCOW2_DIAGNOSTICO="Não foi possível consultar o QCOW2 como libvirt-qemu (${resultado:-status $status})."
+        return 1
     fi
-    if executar_como_qemu test -e -- "$QCOW2_PATH"; then
-        QCOW2_ESTADO="existente"
-        return 0
-    else
-        status=$?
-        if [ "$status" -ne 1 ]; then
-            QCOW2_ESTADO="inacessivel"
-            QCOW2_DIAGNOSTICO="Não foi possível consultar o QCOW2 como libvirt-qemu (status $status)."
-            return 1
-        fi
-    fi
-    QCOW2_ESTADO="ausente"
-    QCOW2_DIAGNOSTICO="QCOW2 ausente: $QCOW2_PATH"
 }
 
 validar_qcow2_existente() {
@@ -302,7 +322,7 @@ criar_qcow2_atomico() (
 
     executar_como_qemu qemu-img create -f qcow2 "$temporario" "$QCOW2_TAMANHO" \
         || { erro "qemu-img não conseguiu criar o QCOW2 temporário."; return 1; }
-    if ! executar_como_qemu ln -- "$temporario" "$QCOW2_PATH"; then
+    if ! executar_como_qemu ln -T -- "$temporario" "$QCOW2_PATH"; then
         erro "QCOW2_PATH apareceu durante a criação; o conteúdo existente foi preservado."
         return 1
     fi
@@ -486,16 +506,67 @@ regra_apparmor_presente() {
 }
 
 instalar_regra_apparmor() (
-    local diretorio nome novo="" backup="" original=0 status backup_preservado=""
+    local diretorio nome novo="" backup="" original=0 status
+    local publicado=0 reload_confirmado=0
     diretorio="${APPARMOR_LOCAL%/*}"
     nome="${APPARMOR_LOCAL##*/}"
 
-    limpar_apparmor_temporarios() {
-        [ -z "$novo" ] || executar_sudo rm -f -- "$novo" >/dev/null 2>&1 || true
-        [ -z "$backup" ] || executar_sudo rm -f -- "$backup" >/dev/null 2>&1 || true
+    restaurar_apparmor_publicado() {
+        local reload_status=0
+
+        [ "$publicado" -eq 1 ] && [ "$reload_confirmado" -eq 0 ] || return 0
+        if [ "$original" -eq 1 ]; then
+            if [ -z "$backup" ]; then
+                erro "Não há backup disponível para restaurar $APPARMOR_LOCAL."
+                return 1
+            fi
+            if executar_sudo mv -fT -- "$backup" "$APPARMOR_LOCAL"; then
+                backup=""
+                publicado=0
+            else
+                erro "Falha ao restaurar $APPARMOR_LOCAL; backup preservado em $backup."
+                return 1
+            fi
+        elif executar_sudo rm -f -- "$APPARMOR_LOCAL"; then
+            publicado=0
+        else
+            erro "Falha ao remover a regra AppArmor publicada sem arquivo anterior."
+            return 1
+        fi
+
+        if executar_sudo systemctl reload apparmor; then
+            info "Arquivo e política AppArmor anteriores restaurados."
+        else
+            erro "Arquivo anterior restaurado, mas o reload da política restaurada falhou."
+            reload_status=1
+        fi
+        return "$reload_status"
     }
-    trap 'status=$?; trap - EXIT; limpar_apparmor_temporarios; exit "$status"' EXIT
-    trap 'exit 1' HUP INT TERM
+
+    finalizar_apparmor() {
+        local saida="$1" restauracao_status=0
+        trap - EXIT
+        trap '' HUP INT TERM
+
+        restaurar_apparmor_publicado || restauracao_status=$?
+        [ -z "$novo" ] || executar_sudo rm -f -- "$novo" >/dev/null 2>&1 || true
+        if [ -n "$backup" ]; then
+            if [ "$publicado" -eq 1 ] && [ "$reload_confirmado" -eq 0 ]; then
+                aviso "Backup AppArmor preservado após falha de restauração: $backup"
+            else
+                executar_sudo rm -f -- "$backup" >/dev/null 2>&1 || true
+            fi
+        fi
+        if [ "$saida" -eq 0 ] && [ "$restauracao_status" -ne 0 ]; then
+            saida="$restauracao_status"
+        fi
+        exit "$saida"
+    }
+
+    trap 'status=$?; finalizar_apparmor "$status"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     executar_sudo mkdir -p -- "$diretorio" \
         || { erro "Não foi possível preparar o diretório local do AppArmor."; return 1; }
@@ -526,39 +597,29 @@ instalar_regra_apparmor() (
         || { erro "Não foi possível definir root:root na regra AppArmor temporária."; return 1; }
     executar_sudo chmod 0644 -- "$novo" \
         || { erro "Não foi possível proteger a regra AppArmor temporária."; return 1; }
-    executar_sudo mv -fT -- "$novo" "$APPARMOR_LOCAL" \
-        || { erro "Não foi possível instalar atomicamente a regra AppArmor."; return 1; }
+    publicado=1
+    if ! executar_sudo mv -fT -- "$novo" "$APPARMOR_LOCAL"; then
+        publicado=0
+        erro "Não foi possível instalar atomicamente a regra AppArmor."
+        return 1
+    fi
     novo=""
 
     if executar_sudo systemctl reload apparmor; then
+        reload_confirmado=1
         if [ -n "$backup" ]; then
-            executar_sudo rm -f -- "$backup" \
-                || aviso "Regra ativa, mas o backup temporário não pôde ser removido: $backup"
+            if executar_sudo rm -f -- "$backup"; then
+                backup=""
+            else
+                aviso "Regra ativa, mas o backup temporário foi preservado: $backup"
+                backup=""
+            fi
         fi
-        backup=""
         ok "Regra '$REGRA_APPARMOR' instalada atomicamente e AppArmor recarregado."
         return 0
     fi
 
-    erro "Reload do AppArmor falhou; restaurando o arquivo anterior."
-    if [ "$original" -eq 1 ]; then
-        if executar_sudo mv -fT -- "$backup" "$APPARMOR_LOCAL"; then
-            backup=""
-        else
-            backup_preservado="$backup"
-            backup=""
-            erro "Falha ao restaurar $APPARMOR_LOCAL; backup preservado em $backup_preservado."
-            return 1
-        fi
-    else
-        executar_sudo rm -f -- "$APPARMOR_LOCAL" \
-            || { erro "Falha ao remover a regra nova após erro de reload."; return 1; }
-    fi
-    if ! executar_sudo systemctl reload apparmor; then
-        erro "Arquivo anterior restaurado, mas o reload da política restaurada também falhou."
-    else
-        info "Arquivo e política AppArmor anteriores restaurados."
-    fi
+    erro "Reload do AppArmor falhou; o arquivo anterior será restaurado."
     return 1
 )
 
@@ -592,8 +653,16 @@ validar_xml_vm() {
 import sys
 import xml.etree.ElementTree as ET
 
-qcow2, iso_windows, iso_virtio = sys.argv[1:4]
+qcow2, iso_windows, iso_virtio, vm_ram_mb, vm_vcpus = sys.argv[1:6]
 erros = []
+try:
+    memoria_esperada = int(vm_ram_mb) * 1024 * 1024
+    vcpus_esperadas = int(vm_vcpus)
+    if memoria_esperada <= 0 or vcpus_esperadas <= 0:
+        raise ValueError
+except ValueError:
+    print("VM_RAM_MB e VM_VCPUS devem ser inteiros positivos")
+    raise SystemExit(1)
 try:
     root = ET.fromstring(sys.stdin.read())
 except Exception as exc:
@@ -604,7 +673,8 @@ os_node = root.find("./os")
 type_node = root.find("./os/type")
 machine = "" if type_node is None else type_node.get("machine", "")
 if machine not in ("q35", "pc-q35") and not machine.startswith("pc-q35-"):
-    erros.append(f"chipset não é Q35 ({machine or 'ausente'})")
+    machine_label = machine or "ausente"
+    erros.append(f"chipset não é Q35 ({machine_label})")
 loader = None if os_node is None else os_node.find("loader")
 firmware = "" if os_node is None else os_node.get("firmware", "")
 loader_pflash = loader is not None and loader.get("type") == "pflash"
@@ -612,6 +682,68 @@ if firmware != "efi" and not loader_pflash:
     erros.append("firmware UEFI/pflash ausente")
 if loader is not None and loader.get("type") != "pflash":
     erros.append("loader UEFI não usa pflash")
+
+nvrams = [] if os_node is None else os_node.findall("nvram")
+def nvram_tem_destino(nvram):
+    if (nvram.text or "").strip():
+        return True
+    source = nvram.find("source")
+    return source is not None and any(source.get(attr) for attr in ("file", "dev", "name", "volume"))
+
+if len(nvrams) != 1 or not nvram_tem_destino(nvrams[0]):
+    erros.append("NVRAM UEFI deve possuir exatamente um destino persistente")
+
+fatores_memoria = {
+    "b": 1,
+    "bytes": 1,
+    "KB": 1000,
+    "k": 1024,
+    "KiB": 1024,
+    "MB": 1000 ** 2,
+    "M": 1024 ** 2,
+    "MiB": 1024 ** 2,
+    "GB": 1000 ** 3,
+    "G": 1024 ** 3,
+    "GiB": 1024 ** 3,
+    "TB": 1000 ** 4,
+    "T": 1024 ** 4,
+    "TiB": 1024 ** 4,
+}
+def memoria_em_bytes(node):
+    valor = int((node.text or "").strip())
+    unidade = node.get("unit", "KiB")
+    if valor < 0 or unidade not in fatores_memoria:
+        raise ValueError
+    return valor * fatores_memoria[unidade]
+
+def validar_memoria(nodes, label, obrigatoria):
+    if len(nodes) != 1:
+        if obrigatoria or nodes:
+            erros.append(f"{label} deve aparecer exatamente uma vez")
+        return
+    try:
+        valor = memoria_em_bytes(nodes[0])
+    except (TypeError, ValueError):
+        erros.append(f"{label} possui valor ou unidade inválida")
+        return
+    if valor != memoria_esperada:
+        erros.append(f"{label} diverge de VM_RAM_MB ({vm_ram_mb} MiB)")
+
+validar_memoria(root.findall("./memory"), "memória da VM", True)
+validar_memoria(root.findall("./currentMemory"), "memória atual da VM", False)
+
+vcpus = root.findall("./vcpu")
+if len(vcpus) != 1:
+    erros.append("vcpu deve aparecer exatamente uma vez")
+else:
+    try:
+        limite_vcpus = int((vcpus[0].text or "").strip())
+        atuais_vcpus = int(vcpus[0].get("current", str(limite_vcpus)))
+    except ValueError:
+        erros.append("vcpu possui valor inválido")
+    else:
+        if limite_vcpus != vcpus_esperadas or atuais_vcpus != vcpus_esperadas:
+            erros.append(f"vcpu diverge de VM_VCPUS ({vm_vcpus})")
 
 tpms = root.findall("./devices/tpm")
 if not any(t.get("model") == "tpm-crb" and
@@ -663,14 +795,28 @@ if sorted(cdrom_files) != sorted([iso_windows, iso_virtio]):
     erros.append("CD-ROMs de arquivo não correspondem exatamente às duas ISOs configuradas")
 
 interfaces = root.findall("./devices/interface")
-if not any((model := interface.find("model")) is not None and model.get("type") == "virtio"
-           for interface in interfaces):
-    erros.append("interface de rede com modelo virtio ausente")
+if len(interfaces) != 1:
+    erros.append(f"deve existir exatamente uma interface de rede (encontradas {len(interfaces)})")
+else:
+    interface = interfaces[0]
+    models = interface.findall("model")
+    if len(models) != 1 or models[0].get("type") != "virtio":
+        erros.append("a única interface de rede deve usar modelo virtio")
+    sources = interface.findall("source")
+    if len(sources) != 1:
+        erros.append("a única interface de rede deve possuir exatamente uma source")
+    else:
+        source = sources[0]
+        tipo = interface.get("type")
+        rede_default = tipo == "network" and source.get("network") == "default" and source.get("bridge") is None
+        bridge_br0 = tipo == "bridge" and source.get("bridge") == "br0" and source.get("network") is None
+        if not (rede_default or bridge_br0):
+            erros.append("source da interface deve ser network=default ou bridge=br0")
 
 if erros:
     print("; ".join(erros))
     raise SystemExit(1)
-' "$QCOW2_PATH" "$ISO_WINDOWS" "$ISO_VIRTIO" 2>&1)"; then
+' "$QCOW2_PATH" "$ISO_WINDOWS" "$ISO_VIRTIO" "${VM_RAM_MB:-}" "${VM_VCPUS:-}" 2>&1)"; then
         return 0
     else
         status=$?
@@ -857,8 +1003,7 @@ if command -v osinfo-query >/dev/null 2>&1 && osinfo-query os 2>/dev/null | grep
 fi
 info "os-variant: $OSV"
 
-virt-install \
-    --connect qemu:///system \
+virt_install_privilegiado \
     --name "$VM_NAME" \
     --metadata title="Windows 11 (GPU passthrough)" \
     --memory "$VM_RAM_MB" \
