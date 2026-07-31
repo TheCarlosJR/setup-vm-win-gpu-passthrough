@@ -3,8 +3,8 @@
 # etapas/41-instalacao-windows.sh - Capítulo 18: Instalação do Windows 11
 # ============================================================================
 # A instalação é interativa (console gráfico). Este script imprime o passo a
-# passo exato do manual, abre o console se desejado e verifica ao final a
-# comunicação com o qemu-guest-agent.
+# passo exato do manual, abre o console se desejado e usa a comunicação com o
+# qemu-guest-agent apenas como indicador de acessibilidade do guest.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -17,17 +17,41 @@ verificar() {
         v_fim
     fi
     if $VIRSH qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' >/dev/null 2>&1; then
-        v_ok "qemu-guest-agent respondendo (Windows instalado com guest tools)."
+        v_ok "qemu-guest-agent acessível."
+        info "A resposta é apenas um indicador de acesso; não comprova a instalação completa do Windows."
     else
-        v_falta "guest-agent sem resposta (Windows/guest-tools pendentes ou VM desligada)."
+        v_falta "guest-agent sem resposta (guest tools pendentes, VM desligada ou guest inacessível)."
     fi
     v_fim
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+consultar_estado_vm() {
+    LC_ALL=C $VIRSH domstate "$1" 2>/dev/null
+}
+
+oferecer_console() {
+    if confirmar "Abrir o console gráfico agora?"; then
+        exigir_comando virt-manager
+        nohup virt-manager --connect qemu:///system --show-domain-console "$VM_NAME" >/dev/null 2>&1 &
+    fi
+}
+
 exigir_conf VM_NAME
+vm_existe "$VM_NAME" || falhar "VM '$VM_NAME' não existe. Execute a etapa 40 antes."
+if ! ESTADO_VM="$(consultar_estado_vm "$VM_NAME")"; then
+    falhar "Não foi possível consultar o estado da VM '$VM_NAME'."
+fi
+case "$ESTADO_VM" in
+    "shut off"|running)
+        ;;
+    *)
+        falhar "Estado não suportado para instalação interativa: '$ESTADO_VM'. Deixe a VM running ou shut off."
+        ;;
+esac
+
 titulo "Capítulo 18: Instalação do Windows 11 (interativa)"
-info "Estado atual da VM: $($VIRSH domstate "$VM_NAME" 2>/dev/null || echo 'inexistente')"
+info "Estado atual da VM: $ESTADO_VM"
 
 cat <<'GUIA'
 PASSO A PASSO (dentro do console gráfico da VM):
@@ -63,16 +87,30 @@ em branco) é feito no Gerenciamento de Disco do Windows: GPT + NTFS.
 Se o HD1 JÁ TEM dados: NÃO formate; ele aparece pronto com letra de unidade.
 GUIA
 
-if vm_existe "$VM_NAME" && ! vm_desligada "$VM_NAME"; then
-    if confirmar "Abrir o console gráfico agora?"; then
-        nohup virt-manager --connect qemu:///system --show-domain-console "$VM_NAME" >/dev/null 2>&1 &
-    fi
-fi
+case "$ESTADO_VM" in
+    "shut off")
+        if confirmar "A VM está desligada. Iniciar agora?"; then
+            $VIRSH start "$VM_NAME" || falhar "Não foi possível iniciar a VM '$VM_NAME'."
+            if ! ESTADO_VM="$(consultar_estado_vm "$VM_NAME")"; then
+                falhar "A VM foi iniciada, mas seu novo estado não pôde ser consultado."
+            fi
+            [ "$ESTADO_VM" = "running" ] \
+                || falhar "Após o start, a VM entrou no estado inesperado '$ESTADO_VM'."
+            oferecer_console
+        else
+            info "VM mantida desligada; inicie-a quando estiver pronto para instalar."
+        fi
+        ;;
+    running)
+        oferecer_console
+        ;;
+esac
 
 echo
 titulo "Verificação (quando o Windows + guest tools estiverem instalados)"
 if $VIRSH qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' >/dev/null 2>&1; then
-    ok "guest-agent OK: {\"return\":{}}"
+    ok "qemu-guest-agent acessível: {\"return\":{}}"
+    aviso "Este ping confirma acessibilidade do agente, não a instalação completa do Windows."
     info "Dentro do Windows, confirme também: Get-Disk  e  Get-Service QEMU-GA"
 else
     info "guest-agent ainda sem resposta. Normal antes de instalar o virtio-win-guest-tools."
