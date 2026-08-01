@@ -26,10 +26,17 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
-AIRLOCK_NTFS="$DOCS4/airlock"
-AIRLOCK_BASE="/srv/airlock"
-AIRLOCK_BIND="/srv/airlock/files"
+# Pasta de TRÂNSITO: configurável (etapa 02). Padrão: dentro do HD2.
+AIRLOCK_TRANSITO="${AIRLOCK_DIR:-$DOCS4/airlock}"
+AIRLOCK_BIND="${AIRLOCK_BIND:-/srv/airlock/files}"
+AIRLOCK_BASE="$(dirname "$AIRLOCK_BIND")"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/10-airlock.conf"
+
+# A visão só depende do docs4 quando a pasta de trânsito mora nele
+DEPENDE_DOCS4=0
+case "$AIRLOCK_TRANSITO" in
+    "$DOCS4"/*) DEPENDE_DOCS4=1 ;;
+esac
 
 verificar() {
     [ -n "${TRANSFER_USER:-}" ] || { v_falta "TRANSFER_USER não definido."; v_fim; }
@@ -86,6 +93,20 @@ fi
 
 titulo "Capítulo 24: Airlock (usuário: $TRANSFER_USER, VM: $VM_NAME)"
 
+# Caminhos configuráveis: impedir combinação que criaria montagem sobre si mesma
+case "$AIRLOCK_TRANSITO" in
+    /*) : ;;
+    *)  falhar "AIRLOCK_DIR precisa ser um caminho absoluto (está: '$AIRLOCK_TRANSITO')." ;;
+esac
+if [ "$AIRLOCK_TRANSITO" = "$AIRLOCK_BIND" ] \
+   || [[ "$AIRLOCK_BIND" == "$AIRLOCK_TRANSITO"/* ]] \
+   || [[ "$AIRLOCK_TRANSITO" == "$AIRLOCK_BIND"/* ]]; then
+    erro "Pasta de trânsito: $AIRLOCK_TRANSITO"
+    erro "Visão do SFTP:     $AIRLOCK_BIND"
+    falhar "Os dois caminhos não podem coincidir nem conter um ao outro (montagem sobre si mesma)."
+fi
+info "Trânsito: $AIRLOCK_TRANSITO  ->  visão exposta: $AIRLOCK_BIND"
+
 # ----------------------------------------------------------------------------
 # 1. Grupo e usuário dedicados
 # ----------------------------------------------------------------------------
@@ -102,27 +123,36 @@ ok "Conta de sistema sem shell, sem home real e sem senha (raio de alcance míni
 # 2. Pastas
 # ----------------------------------------------------------------------------
 titulo "2/7 Pastas"
-mountpoint -q "$DOCS4" || falhar "HD2 não está montado em $DOCS4; resolva antes (etapa 14 / Capítulo 11)."
-sudo mkdir -p "$AIRLOCK_NTFS"
+if [ "$DEPENDE_DOCS4" -eq 1 ]; then
+    mountpoint -q "$DOCS4" \
+        || falhar "A pasta de trânsito está em $DOCS4, que não está montado (etapa 14 / Capítulo 11)."
+else
+    aviso "Pasta de trânsito fora do HD2: $AIRLOCK_TRANSITO"
+    aviso "Ela vai consumir espaço do disco onde está; mantenha-a como zona de passagem."
+fi
+sudo mkdir -p "$AIRLOCK_TRANSITO"
 sudo mkdir -p "$AIRLOCK_BIND"
 sudo chown root:root "$AIRLOCK_BASE"
 sudo chmod 755 "$AIRLOCK_BASE"
-ok "Trânsito no HD2: $AIRLOCK_NTFS | Base do chroot (root:root 755): $AIRLOCK_BASE"
+ok "Trânsito: $AIRLOCK_TRANSITO | Base do chroot (root:root 755): $AIRLOCK_BASE"
 
 # ----------------------------------------------------------------------------
 # 3. Visão de serviço (bindfs)
 # ----------------------------------------------------------------------------
 titulo "3/7 Visão de serviço (bindfs)"
 dpkg -s bindfs >/dev/null 2>&1 || { sudo apt update; sudo apt install -y bindfs; }
+OPCOES_BINDFS="force-user=$TRANSFER_USER,force-group=airlock-transfer,perms=0770,chmod-ignore,chown-ignore,allow_other,noexec,nosuid,nodev,nofail"
+[ "$DEPENDE_DOCS4" -eq 1 ] && OPCOES_BINDFS="${OPCOES_BINDFS},x-systemd.requires=$(sed 's/ /\\040/g' <<< "$DOCS4")"
 fstab_backup
 fstab_definir_linha airlock-bindfs \
-    "$AIRLOCK_NTFS  $AIRLOCK_BIND  fuse.bindfs  force-user=$TRANSFER_USER,force-group=airlock-transfer,perms=0770,chmod-ignore,chown-ignore,allow_other,noexec,nosuid,nodev,nofail,x-systemd.requires=$DOCS4  0  0"
+    "$(sed 's/ /\\040/g' <<< "$AIRLOCK_TRANSITO")  $(sed 's/ /\\040/g' <<< "$AIRLOCK_BIND")  fuse.bindfs  $OPCOES_BINDFS  0  0"
 sudo mount -a
 mountpoint -q "$AIRLOCK_BIND" || falhar "Visão bindfs não montou; confira a linha no fstab."
 sudo -u "$TRANSFER_USER" touch "$AIRLOCK_BIND/.teste-escrita"
-[ -e "$AIRLOCK_NTFS/.teste-escrita" ] || falhar "Arquivo criado na visão não apareceu no HD2."
+[ -e "$AIRLOCK_TRANSITO/.teste-escrita" ] \
+    || falhar "Arquivo criado na visão não apareceu em $AIRLOCK_TRANSITO."
 sudo -u "$TRANSFER_USER" rm "$AIRLOCK_BIND/.teste-escrita"
-ok "Ponta a ponta confirmado: escrita do $TRANSFER_USER na visão chega ao HD2."
+ok "Ponta a ponta confirmado: escrita do $TRANSFER_USER na visão chega a $AIRLOCK_TRANSITO."
 
 # ----------------------------------------------------------------------------
 # 4. Servidor SSH endurecido
@@ -146,7 +176,7 @@ PermitRootLogin no
 
 # Confinamento do usuario de transferencia do airlock
 Match User @TRANSFER_USER@
-    ChrootDirectory /srv/airlock
+    ChrootDirectory @AIRLOCK_BASE@
     ForceCommand internal-sftp -u 0007
     AuthorizedKeysFile /etc/ssh/authorized_keys/%u
     PubkeyAuthentication yes
@@ -155,7 +185,10 @@ Match User @TRANSFER_USER@
     X11Forwarding no
     PermitTunnel no
 SSHDCONF
-sudo sed -i "s|@TRANSFER_USER@|$TRANSFER_USER|g" "$SSHD_DROPIN"
+sudo sed -i \
+    -e "s|@TRANSFER_USER@|$TRANSFER_USER|g" \
+    -e "s|@AIRLOCK_BASE@|$AIRLOCK_BASE|g" \
+    "$SSHD_DROPIN"
 
 if ! sudo sshd -t; then
     sudo rm -f "$SSHD_DROPIN"
@@ -218,21 +251,24 @@ sudo tee "$HOOK_DIR/00-airlock.sh" >/dev/null <<'HOOKAIR'
 # Projetado para NUNCA impedir o inicio da VM: qualquer falha aqui apenas
 # registra um aviso no journal (via logger) e o script termina com sucesso.
 
-AIRLOCK_NTFS="@AIRLOCK_NTFS@"
+AIRLOCK_TRANSITO="@AIRLOCK_TRANSITO@"
 AIRLOCK_BIND="@AIRLOCK_BIND@"
+DOCS4="@DOCS4@"
+DEPENDE_DOCS4="@DEPENDE_DOCS4@"
 
-# 1) O HD2 precisa estar montado; sem ele, criar a pasta poluiria o ponto
-#    de montagem vazio no NVMe, e nao o HD2 real (alerta do Capitulo 11).
-if ! mountpoint -q "@DOCS4@"; then
-    logger -t hook-qemu "AVISO: @DOCS4@ nao montado; airlock indisponivel nesta sessao da VM."
+# 1) Se a pasta de transito mora no HD2, ele precisa estar montado; sem isso,
+#    criar a pasta poluiria o ponto de montagem vazio no disco do sistema em
+#    vez do HD2 real (alerta do Capitulo 11).
+if [ "$DEPENDE_DOCS4" = "1" ] && ! mountpoint -q "$DOCS4"; then
+    logger -t hook-qemu "AVISO: $DOCS4 nao montado; airlock indisponivel nesta sessao da VM."
     exit 0
 fi
 
 # 2) Cria a pasta de transito, se ausente (idempotente).
 #    Sem chown/chmod: em NTFS (ntfs-3g), dono e permissoes vem das opcoes
 #    de montagem do fstab (Capitulo 11) e nao podem ser alterados por pasta.
-if [ ! -d "$AIRLOCK_NTFS" ]; then
-    mkdir -p "$AIRLOCK_NTFS" && logger -t hook-qemu "pasta airlock criada em $AIRLOCK_NTFS"
+if [ ! -d "$AIRLOCK_TRANSITO" ]; then
+    mkdir -p "$AIRLOCK_TRANSITO" && logger -t hook-qemu "pasta airlock criada em $AIRLOCK_TRANSITO"
 fi
 
 # 3) Garante a visao de servico (bindfs) montada, usando a entrada do fstab.
@@ -247,9 +283,10 @@ fi
 exit 0
 HOOKAIR
 sudo sed -i \
-    -e "s|@AIRLOCK_NTFS@|$AIRLOCK_NTFS|g" \
+    -e "s|@AIRLOCK_TRANSITO@|$AIRLOCK_TRANSITO|g" \
     -e "s|@AIRLOCK_BIND@|$AIRLOCK_BIND|g" \
     -e "s|@DOCS4@|$DOCS4|g" \
+    -e "s|@DEPENDE_DOCS4@|$DEPENDE_DOCS4|g" \
     "$HOOK_DIR/00-airlock.sh"
 sudo chmod +x "$HOOK_DIR/00-airlock.sh"
 sudo chown root:root "$HOOK_DIR/00-airlock.sh"
@@ -259,12 +296,14 @@ ok "Hook instalado: $HOOK_DIR/00-airlock.sh (roda ANTES do 01-gpu-para-vfio.sh).
 echo
 titulo "Como testar (as 7 verificações do Capítulo 24)"
 IP_FIXO_HOST_DISPLAY="${IP_FIXO_HOST:-<IP_FIXO_HOST>}"
+SUBDIR="$(basename "$AIRLOCK_BIND")"
 cat <<TESTES
 1. Visão:        mount | grep airlock  (tipo fuse.bindfs) - teste de escrita já feito acima.
 2. sshd:         sudo sshd -t (sem saída) e systemctl status ssh.
 3. Transferência:na VM, WinSCP (SFTP, host $IP_FIXO_HOST_DISPLAY, usuário $TRANSFER_USER,
-                 chave %USERPROFILE%\\.ssh\\airlock) -> a sessão abre em /files.
-4. Confinamento: no WinSCP, subir para / mostra APENAS files/.
+                 chave %USERPROFILE%\\.ssh\\airlock) -> a sessão abre em /$SUBDIR.
+                 O que você envia aparece em $AIRLOCK_TRANSITO (e vice-versa).
+4. Confinamento: no WinSCP, subir para / mostra APENAS $SUBDIR/.
 5. Autenticação: ssh sem chave -> "Permission denied (publickey)" imediato.
 6. Firewall:     de OUTRO dispositivo da LAN a porta 22 deve dar TIMEOUT;
                  da VM, conecta. (Teste negativo importante!)
