@@ -2,11 +2,17 @@
 
 ## Manual Técnico de Implantação, Configuração e Operação
 
-**Ambiente de referência:** AMD Ryzen 7 5700X · NVIDIA RTX 3060 · 32 GB DDR4 3200 MHz · ASUS TUF Gaming B550-Plus WiFi II · Pop!_OS (host) · Windows 11 (convidado, KVM/QEMU/Libvirt, VFIO GPU Passthrough de GPU única)
+**Objetivo:**
 
-**Versão do documento:** 2.0
-**Histórico de revisões:** a versão 2.0 incorpora integralmente o errata de segurança do compartilhamento de arquivos host↔VM: novo Capítulo 24 (Compartilhamento Seguro de Arquivos — Airlock), renumeração dos antigos Capítulos 24 a 28 para 25 a 29, correção de referências internas quebradas, endurecimento de SSH e firewall, e notas adicionais (permissões em NTFS, Windows Defender, Inicialização Rápida do Windows, ACS override).
-**Escopo:** Documentação permanente de ambiente. Este documento foi escrito para permitir que qualquer administrador reproduza, audite e mantenha exatamente a configuração aqui descrita.
+Documentação permanente de ambiente. Este documento foi escrito para permitir que qualquer administrador reproduza, audite e mantenha exatamente a configuração aqui descrita.
+
+**Ambiente de referência:**
+- Pop!_OS (host)
+- Windows 11 (convidado, KVM/QEMU/Libvirt, VFIO GPU Passthrough de GPU única)
+- AMD Ryzen 7 5700X
+- NVIDIA RTX 3060
+- RAM 32 GB DDR4 3200 MHz
+- Placa mãe - ASUS TUF Gaming B550-Plus WiFi II
 
 ---
 

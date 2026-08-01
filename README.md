@@ -1,20 +1,24 @@
 # Windows 11 VM com GPU Passthrough no Pop!_OS: scripts de instalação
 
-Scripts de instalação e configuração gerados a partir do manual
-**Windows11_VM_Passthrough_PopOS_v2.md** (29 capítulos). Cada etapa automatiza
-os comandos de um capítulo, com os mesmos cuidados do manual: backups datados
-antes de editar arquivos críticos, confirmação explícita nos passos
-destrutivos, idempotência (reexecutar não duplica nada) e verificação com
-critérios objetivos.
+Scripts de instalação e configuração da VM Windows 11 com GPU em passthrough
+(KVM/QEMU/libvirt + VFIO). Cada etapa é idempotente, faz backup datado antes de
+editar arquivo crítico, pede confirmação explícita nos passos destrutivos e traz
+um modo `--verificar` com critério objetivo de sucesso.
+
+### Documentação
+
+| Documento | Quando usar |
+|---|---|
+| **[Guia-QEMU-Passthrough.md](Guia-QEMU-Passthrough.md)** | leitura principal: o caminho completo, direto, focado em instalar e configurar o QEMU |
+| **Windows11_VM_Passthrough_PopOS_v2.md** | referência de consulta (29 capítulos): explicação longa, "como desfazer" e troubleshooting detalhado por assunto |
 
 **Ambiente de referência:** AMD Ryzen 7 5700X, NVIDIA RTX 3060 (GPU única),
 32 GB DDR4, ASUS TUF Gaming B550-Plus WiFi II, Pop!_OS (host), Windows 11
-(convidado, KVM/QEMU/libvirt, VFIO single-GPU passthrough).
+(convidado, KVM/QEMU/libvirt, VFIO single-GPU passthrough). Os scripts detectam
+o hardware real: nenhum valor é chumbado.
 
 > AVISO: estes scripts alteram fstab, parâmetros de kernel, rede, firewall e
-> a definição da VM. Eles foram desenhados para o hardware e o desenho do
-> manual acima. Leia o capítulo correspondente antes de cada etapa; em caso de
-> dúvida, o manual é a autoridade.
+> a definição da VM. Leia a seção correspondente do guia antes de cada etapa.
 
 ---
 
@@ -23,6 +27,7 @@ critérios objetivos.
 ```
 popos-win11-passthrough/
 ├── README.md                    este arquivo
+├── Guia-QEMU-Passthrough.md     guia enxuto (leitura principal)
 ├── passthrough.conf.example     modelo do arquivo de configuração central
 ├── passthrough.conf             (gerado pela etapa 02; valores do SEU hardware)
 ├── menu.sh                      orquestrador com status ao vivo das etapas
@@ -82,11 +87,20 @@ converter para CRLF, corrija com `sed -i 's/\r$//' arquivo.sh` (ou dos2unix).
 
 1. **BIOS configurada** antes de tudo (etapa 01 mostra o checklist: SVM,
    IOMMU, Above 4G, Re-Size BAR, CSM off, Secure Boot "Other OS").
-2. **Pop!_OS instalado** no NVMe (Capítulo 6 do manual; instalação gráfica).
-   Recomendação do manual: HD1 e HD2 desconectados durante a instalação.
+2. **Pop!_OS já instalado** em modo UEFI, com o driver NVIDIA proprietário
+   funcionando (`nvidia-smi` responde). Ver "Sistema esperado" no
+   [guia](Guia-QEMU-Passthrough.md).
 3. **ISOs baixadas dos canais oficiais**: Windows 11 (microsoft.com) e
    virtio-win.iso (projeto oficial virtio-win). Nunca de espelhos.
 4. **Reserva de IP fixo no roteador** (necessária só a partir da etapa 60).
+
+### Senha do sudo
+
+O `menu.sh` pede a senha do sudo **uma vez**, no início, e mantém a sessão
+renovada em segundo plano enquanto estiver aberto (as etapas filhas herdam
+essa autorização). A senha nunca é gravada em arquivo: o que é renovado é o
+ticket do próprio `sudo`. Etapas rodadas fora do menu pedem a senha na
+primeira necessidade e se comportam do mesmo jeito.
 
 ### 3. Rodar pelo menu (recomendado)
 
@@ -111,9 +125,9 @@ bash menu.sh --status                     # checklist completo sem menu
 
 | # | Etapa | Observação |
 |---|-------|-----------|
-| 1 | `00-inventario` | somente leitura; guarde o arquivo gerado fora do NVMe |
+| 1 | `00-inventario` | somente leitura (pede sudo: `dmidecode` e `dmesg` exigem); guarde o arquivo gerado fora do disco do sistema |
 | 2 | `01-verificar-bios` | manual + verificação; refaça até tudo passar |
-| 3 | `02-detectar-config` | detecta GPU/discos/CPU/bootloader e grava o `passthrough.conf`; confirme cada valor |
+| 3 | `02-detectar-config` | detecta GPU/discos/CPU/RAM/bootloader e grava o `passthrough.conf`; confirme cada valor |
 | 4 | `10-atualizar-sistema` | **reboot** ao final |
 | 5 | `11-driver-nvidia` | **reboot** se instalar; valida `nvidia-smi` |
 | 6 | `12-pacotes-base` | inclui xmlstarlet (edição segura de XML) |
@@ -124,7 +138,7 @@ bash menu.sh --status                     # checklist completo sem menu
 | 11 | `30-iommu-vfio` | fase A aplica parâmetros, **reboot**, rodar de novo para a fase B validar e registrar o grupo IOMMU |
 | 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM completa via virt-install; abra o console e pressione uma tecla no "Press any key..." |
 | 13 | `41-instalacao-windows` | manual (driver `viostor\w11\amd64` na tela de discos; guest-tools ao final) |
-| 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU e HD1 no XML; teste o ciclo ligar/desligar |
+| 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
 | 15 | `51-usb-passthrough` | opcional |
 | 16 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
 | 17 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
@@ -138,6 +152,25 @@ Todos os valores do seu hardware moram em `passthrough.conf` (gerado pela
 etapa 02, editável à mão). Nenhum script contém valor chumbado; se faltar
 algo, a etapa aborta apontando para a 02. Para refazer uma detecção:
 `bash etapas/02-detectar-config.sh --redetectar`.
+
+O que é configurável sem editar script: nome e RAM/CPU da VM, caminho e tamanho
+do QCOW2, ponto de montagem do HD2 (`DOCS4_MONTAGEM`), pasta de trânsito do
+airlock (`AIRLOCK_DIR`), visão exposta pelo SFTP (`AIRLOCK_BIND`), destino dos
+backups (`BACKUPS_VM_DIR`), usuário de transferência e interface de rede.
+
+#### Travas de segurança da etapa 02
+
+Escolhas que poderiam inutilizar o host são impedidas na origem, não avisadas
+depois:
+
+| Recurso | Trava |
+|---|---|
+| GPU | com uma única GPU, explica que o desktop Linux sai do ar durante a VM e exige confirmação; com duas ou mais, obriga a escolher qual vai para a VM |
+| CPU | teto de núcleos: o host sempre fica com 1 (2 quando há 6+ núcleos) |
+| RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB); valor sempre múltiplo de 1 GiB por causa das HugePages |
+| Disco da VM | o disco da **raiz do Linux** e o disco do HD2 nem aparecem na lista; disco com partição montada é recusado; **"nenhum" é opção válida** (a VM fica só com o QCOW2) |
+| Áudio HDMI | se a placa não expõe a função, segue somente com vídeo em vez de abortar |
+| Entradas numéricas | valor fora da faixa ou não numérico é reperguntado, nunca derruba o script |
 
 ### 6. Operação do dia a dia
 
