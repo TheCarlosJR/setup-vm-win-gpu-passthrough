@@ -10,7 +10,7 @@ um modo `--verificar` com critério objetivo de sucesso.
 | Documento | Quando usar |
 |---|---|
 | **[Guia-QEMU-Passthrough.md](Guia-QEMU-Passthrough.md)** | leitura principal: o caminho completo, direto, focado em instalar e configurar o QEMU |
-| **Windows11_VM_Passthrough_PopOS_v2.md** | referência de consulta (29 capítulos): explicação longa, "como desfazer" e troubleshooting detalhado por assunto |
+| **[Velho_Windows11_VM_Passthrough_PopOS_v2.md](Velho_Windows11_VM_Passthrough_PopOS_v2.md)** | manual legado de referência (29 capítulos): explicação longa, reversão e troubleshooting detalhado |
 
 **Ambiente de referência:** AMD Ryzen 7 5700X, NVIDIA RTX 3060 (GPU única),
 32 GB DDR4, ASUS TUF Gaming B550-Plus WiFi II, Pop!_OS (host), Windows 11
@@ -36,7 +36,7 @@ popos-win11-passthrough/
 ├── etapas/                      uma etapa = um capítulo do manual
 │   ├── 00-inventario.sh             Cap. 3   inventário de hardware
 │   ├── 01-verificar-bios.sh         Cap. 12  checklist BIOS + verificação
-│   ├── 02-detectar-config.sh        detecta placeholders e grava o conf
+│   ├── 02-detectar-config.sh        detecta hardware/uplink e escolhe bridge/NAT
 │   ├── 10-atualizar-sistema.sh      Cap. 7   update + fwupd          <reboot>
 │   ├── 11-driver-nvidia.sh          Cap. 8   driver NVIDIA no host   <reboot>
 │   ├── 12-pacotes-base.sh           Cap. 9   utilitários (+xmlstarlet)
@@ -45,14 +45,14 @@ popos-win11-passthrough/
 │   ├── 20-virtualizacao.sh          Cap. 13  KVM/QEMU/libvirt/OVMF/swtpm
 │   ├── 21-usuario-grupos.sh         Cap. 14  grupos + permissões     <logout>
 │   ├── 30-iommu-vfio.sh             Caps. 15/16  IOMMU + VFIO        <reboot>
-│   ├── 40-criar-vm.sh               Cap. 17  VM via virt-install
+│   ├── 40-criar-vm.sh               Cap. 17  VM + NAT default temporária
 │   ├── 41-instalacao-windows.sh     Cap. 18  guia da instalação (manual)
 │   ├── 50-hooks-gpu-hd1.sh          Cap. 19  hooks dinâmicos + HD1
 │   ├── 51-usb-passthrough.sh        Cap. 20  USB (opcional)
 │   ├── 52-cpu-pinning-hugepages.sh  Cap. 21  pinning + HugePages     <reboot>
 │   ├── 53-cpu-isolation.sh          Cap. 22  isolcpus                <reboot>
-│   ├── 60-rede-bridge.sh            Cap. 23  bridge br0 + IP fixo
-│   ├── 61-airlock.sh                Cap. 24  SFTP seguro (airlock)
+│   ├── 60-rede-bridge.sh            Cap. 23  rede final: bridge Ethernet ou NAT
+│   ├── 61-airlock.sh                Cap. 24  SFTP seguro em br0/bridge libvirt
 │   └── 70-trim-discard.sh           Cap. 25  TRIM/discard
 ├── util/                        operação contínua e emergência
 │   ├── listar-grupos-iommu.sh       Cap. 16
@@ -92,7 +92,10 @@ converter para CRLF, corrija com `sed -i 's/\r$//' arquivo.sh` (ou dos2unix).
    [guia](Guia-QEMU-Passthrough.md).
 3. **ISOs baixadas dos canais oficiais**: Windows 11 (microsoft.com) e
    virtio-win.iso (projeto oficial virtio-win). Nunca de espelhos.
-4. **Reserva de IP fixo no roteador** (necessária só a partir da etapa 60).
+4. **Conectividade física disponível**: Ethernet permite `bridge` ou `nat`;
+   Wi-Fi station usa obrigatoriamente `nat`. Bridge Wi-Fi normalmente exige
+   4addr/WDS dos dois lados e não é suportada. Reserva no roteador só existe no
+   modo bridge; no NAT a etapa 60 cria a reserva DHCP libvirt automaticamente.
 
 ### Senha do sudo
 
@@ -127,7 +130,7 @@ bash menu.sh --status                     # checklist completo sem menu
 |---|-------|-----------|
 | 1 | `00-inventario` | somente leitura (pede sudo: `dmidecode` e `dmesg` exigem); guarde o arquivo gerado fora do disco do sistema |
 | 2 | `01-verificar-bios` | manual + verificação; refaça até tudo passar |
-| 3 | `02-detectar-config` | detecta GPU/discos/CPU/RAM/bootloader e grava o `passthrough.conf`; confirme cada valor |
+| 3 | `02-detectar-config` | detecta GPU/discos/CPU/RAM/bootloader; enumera interfaces físicas, exige escolher o uplink e grava `REDE_MODO` (`bridge`/`nat`) |
 | 4 | `10-atualizar-sistema` | **reboot** ao final |
 | 5 | `11-driver-nvidia` | **reboot** se instalar; valida `nvidia-smi` |
 | 6 | `12-pacotes-base` | inclui xmlstarlet (edição segura de XML) |
@@ -136,14 +139,14 @@ bash menu.sh --status                     # checklist completo sem menu
 | 9 | `20-virtualizacao` | pilha completa + `kvm-ok` |
 | 10 | `21-usuario-grupos` | **logout/login** obrigatório ao final |
 | 11 | `30-iommu-vfio` | fase A aplica parâmetros, **reboot**, rodar de novo para a fase B validar e registrar o grupo IOMMU |
-| 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM completa via virt-install; abra o console e pressione uma tecla no "Press any key..." |
+| 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
 | 13 | `41-instalacao-windows` | manual (driver `viostor\w11\amd64` na tela de discos; guest-tools ao final) |
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
 | 15 | `51-usb-passthrough` | opcional |
 | 16 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
 | 17 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
-| 18 | `60-rede-bridge` | `netplan try` reversível; depois reserve os IPs no roteador e informe ao script |
-| 19 | `61-airlock` | SFTP chroot + ufw; a chave é gerada NA VM (`windows/Gerar-Chave-Airlock.ps1`) e instalada com `--instalar-chave` |
+| 18 | `60-rede-bridge` | aplica o modo escolhido: bridge somente em Ethernet (`netplan try` + reservas no roteador) ou NAT dedicado Ethernet/Wi-Fi (sem Netplan, reserva libvirt automática) |
+| 19 | `61-airlock` | depende da 60; SFTP chroot + ufw na `REDE_BRIDGE` ou `REDE_BRIDGE_LIBVIRT`; chave gerada NA VM e instalada com `--instalar-chave` |
 | 20 | `70-trim-discard` | discard=unmap + pasta de backups |
 
 ### 5. Configuração central
@@ -156,7 +159,53 @@ algo, a etapa aborta apontando para a 02. Para refazer uma detecção:
 O que é configurável sem editar script: nome e RAM/CPU da VM, caminho e tamanho
 do QCOW2, ponto de montagem do HD2 (`DOCS4_MONTAGEM`), pasta de trânsito do
 airlock (`AIRLOCK_DIR`), visão exposta pelo SFTP (`AIRLOCK_BIND`), destino dos
-backups (`BACKUPS_VM_DIR`), usuário de transferência e interface de rede.
+backups (`BACKUPS_VM_DIR`), usuário de transferência, uplink físico e modo de
+rede. Os campos principais são `REDE_MODO`, `INTERFACE_FISICA`, `REDE_BRIDGE`,
+`REDE_LIBVIRT`, `REDE_BRIDGE_LIBVIRT`, `REDE_NAT_CIDR` e `VM_NIC_MAC`.
+`VM_IP_FIXO` é a reserva da VM nos dois modos; `IP_FIXO_HOST` é o endereço que a
+VM usa para chegar ao host (IP LAN da bridge ou gateway virtual no NAT).
+
+A etapa 02 sempre mostra **todas** as interfaces físicas elegíveis e destaca o
+dispositivo retornado por `ip -4 route get 1.1.1.1` (consulta local: nenhum
+pacote é enviado). No NAT, `INTERFACE_FISICA` precisa ser exatamente esse uplink
+IPv4 efetivo: a etapa 02 avisa uma divergência, e a etapa 60 aborta antes de
+qualquer mutação — inclusive do `passthrough.conf` — até o adaptador escolhido
+virar a rota padrão ou o outro ser desconectado/ter sua métrica ajustada. Ao
+trocar o uplink mantendo bridge, a etapa 02 limpa os IPs reservados da LAN
+anterior.
+
+A bridge usa exclusivamente `/etc/netplan/90-vm-passthrough-bridge.yaml`, sem
+impor `renderer` e sem substituir os demais YAMLs; portanto Wi-Fi e interfaces
+não relacionadas permanecem como estavam. Se o arquivo dedicado já existir,
+ele recebe backup datado. Antes da primeira escrita, a etapa arma rollback: uma
+falha em `netplan generate`, `try`, `apply` ou em qualquer passo posterior
+restaura/remove o dedicado, reaplica o Netplan anterior e restaura o XML da VM.
+
+O NAT **não altera o uplink nem lê/modifica Netplan**. Ele cria uma bridge
+virtual, uma instância `dnsmasq` para DHCP/DNS e regras de encaminhamento/NAT no
+host por meio de uma rede libvirt dedicada. A etapa só atualiza uma
+`REDE_LIBVIRT` com o marcador deste projeto; uma homônima sem marcador nunca é
+alterada. Antes da primeira mutação, captura XML, existência/persistência,
+estados ativo/autostart da rede, XML da VM e `passthrough.conf`. Rede, troca da
+fonte da NIC e persistência formam uma transação única: qualquer falha ou sinal
+restaura todos esses estados; uma criação parcial é destruída e removida. A
+sub-rede `/24` também é recusada diante de qualquer rota sobreposta, exceto as
+rotas `proto kernel` exatas da própria sub-rede gerenciada.
+
+Na migração NAT → bridge, a etapa inspeciona o XML inativo de **todas** as outras
+VMs definidas, ligadas ou desligadas, procurando `source network` ou `source
+bridge`. Se houver consumidores, lista-os e recusa antes de tocar Netplan. Sem
+consumidores, desabilita o autostart, para a rede gerenciada e, no sucesso,
+mantém sua definição inativa; o rollback restaura o estado anterior. Uma rede
+homônima sem marcador é apenas avisada e preservada. Na direção bridge → NAT,
+remova ou restaure o arquivo dedicado e rode `sudo netplan apply` antes da etapa
+60; o NAT não desfaz Netplan e recusa uplink ainda escravizado a uma bridge.
+
+`VM_NIC_MAC` identifica a NIC sem depender de posição. Em configurações antigas,
+a etapa conta todas as `/domain/devices/interface`: só escolhe automaticamente
+se houver uma; com várias, apresenta todas e apenas marca `network=default` como
+**RECOMENDADA**. Os IPs precisam estar efetivos e coerentes, e `--verificar`
+repete inclusive a trava do uplink NAT.
 
 #### Travas de segurança da etapa 02
 
@@ -170,6 +219,7 @@ depois:
 | RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB); valor sempre múltiplo de 1 GiB por causa das HugePages |
 | Disco da VM | o disco da **raiz do Linux** e o disco do HD2 nem aparecem na lista; disco com partição montada é recusado; **"nenhum" é opção válida** (a VM fica só com o QCOW2) |
 | Áudio HDMI | se a placa não expõe a função, segue somente com vídeo em vez de abortar |
+| Rede | sempre enumera todas as interfaces físicas, destaca a rota IPv4 efetiva obtida por `ip route get`, rejeita bridge Wi-Fi e avisa NAT em outro uplink; trocar o uplink da bridge limpa os IPs da LAN anterior |
 | Entradas numéricas | valor fora da faixa ou não numérico é reperguntado, nunca derruba o script |
 
 ### 6. Operação do dia a dia
@@ -234,7 +284,8 @@ Verificações chave por fase (as mesmas do manual):
 | Pinning | `virsh --connect qemu:///system vcpuinfo win11` (VM ligada) | afinidade restrita aos núcleos pinados |
 | HugePages | `grep Huge /proc/meminfo` | `HugePages_Total` = reservado, `Hugepagesize` 1 GiB |
 | Isolation | `cat /sys/devices/system/cpu/isolated` | exatamente as CPUs da VM |
-| Bridge | `ip addr show br0` e `ipconfig` na VM | ambos com IP da sub-rede da casa |
+| Rede (bridge) | `bash etapas/60-rede-bridge.sh --verificar`, `ip addr show br0` | uplink Ethernet em `br0`, NIC pelo MAC em `source bridge`, host/VM na LAN |
+| Rede (NAT) | `bash etapas/60-rede-bridge.sh --verificar`, `virsh --connect qemu:///system net-info passthrough-nat` | rede dedicada ativa/autostart, uplink igual à rota IPv4 efetiva, reserva DHCP e NIC em `source network` |
 
 ### C. Teste funcional do passthrough (o teste que importa)
 
@@ -257,9 +308,12 @@ Verificações chave por fase (as mesmas do manual):
    aparece em `/mnt/docs4/airlock` (e vice-versa).
 4. Confinamento: no WinSCP, subir para `/` mostra somente `files/`.
 5. Autenticação: `ssh vmtransfer@<IP_FIXO_HOST>` sem chave responde
-   `Permission denied (publickey)` na hora (senha nem é oferecida).
-6. Firewall (teste negativo): de OUTRO dispositivo da LAN, a porta 22 dá
-   timeout; da VM, conecta.
+   `Permission denied (publickey)`; em bridge esse destino é o IP LAN do host,
+   em NAT é o gateway da bridge virtual libvirt.
+6. Firewall: `sudo ufw show added` deve conter **exatamente uma** regra com o
+   comentário `SFTP airlock - somente VM Windows`, e ela deve corresponder
+   exatamente à interface do modo, `VM_IP_FIXO`, porta 22 e TCP. Regra marcada
+   residual ou não parseável reprova a etapa e seu `--verificar`.
 7. Hook: com a VM desligada, `sudo umount /srv/airlock/files`, ligar a VM e
    conferir a remontagem em `journalctl -t hook-qemu -b`.
 
@@ -280,9 +334,17 @@ manual traz o "Como desfazer" completo por capítulo. Regras gerais:
   marcadas com `# vm-passthrough:<id>`), depois `sudo mount -a`.
 - Parâmetros de kernel: `sudo kernelstub -d "<parâmetros>"` (ou restaurar
   `/etc/default/grub.bak-<data>` + `sudo update-grub`).
-- XML da VM: `virsh define backups/<vm>-<data>.xml` (backup criado antes de
-  toda alteração).
-- Netplan: restaurar `<arquivo>.yaml.bak-<data>` + `sudo netplan apply`.
+- XML da VM: `virsh --connect qemu:///system define backups/<vm>-<data>.xml`
+  (backup criado antes de toda alteração).
+- Rede bridge: a própria transação restaura falhas. Para reversão manual,
+  restaure/remova `/etc/netplan/90-vm-passthrough-bridge.yaml`, rode `sudo
+  netplan generate && sudo netplan apply`, restaure o XML com `virsh --connect
+  qemu:///system define backups/<vm>-<data>.xml` e ajuste a regra UFW.
+- Rede NAT: Netplan não foi tocado. Restaure o XML da VM e, após confirmar que
+  nenhuma VM consome o backend, use `virsh --connect qemu:///system net-destroy
+  <REDE_LIBVIRT>` e `virsh --connect qemu:///system net-undefine
+  <REDE_LIBVIRT>`. A rede `default` continua separada e pode ser reativada com
+  `virsh --connect qemu:///system net-start default`.
 - Emergências (sem vídeo, boot quebrado, fstab malformado): Capítulo 29 do
   manual; `util/recuperar-gpu.sh` cobre o cenário 1.
 

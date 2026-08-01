@@ -57,9 +57,16 @@ Tabela de placeholders usados ao longo do documento:
 | `<VM_NAME>` | Nome da máquina virtual no libvirt (ex.: `win11`) | Definido pelo administrador — Capítulo 17 |
 | `<VERSAO_KERNEL>` | Versão do kernel em execução | `uname -r` |
 | `<USB_MOUSE_VENDOR_ID>` / `<USB_MOUSE_PRODUCT_ID>` | IDs do mouse/teclado para passthrough USB dedicado (opcional) | `lsusb` — Capítulo 20 |
-| `<INTERFACE_FISICA>` | Nome da interface Ethernet física do host (ex.: `enp5s0`) | `ip link show` — Capítulo 23 |
-| `<VM_IP_FIXO>` | Endereço IP fixo da VM na rede local, reservado no roteador | Reserva DHCP — Capítulos 23 e 24 |
-| `<IP_FIXO_HOST>` | Endereço IP fixo do host (interface `br0`) na rede local | Reserva DHCP — Capítulos 23 e 24 |
+| `<REDE_MODO>` | Backend final da VM: `bridge` ou `nat` | Seleção guiada — Capítulo 23 |
+| `<REDE_LIBVIRT>` | Nome da rede NAT dedicada (padrão `passthrough-nat`) | `passthrough.conf` / Capítulo 23 |
+| `<REDE_BRIDGE_LIBVIRT>` | Bridge virtual do NAT (padrão `virbr-vmnat`) | `passthrough.conf` / Capítulo 23 |
+| `<REDE_NAT_CIDR>` | Sub-rede privada `/24` sem colisões | Selecionada/validada pela etapa 60 |
+| `<INTERFACE_AIRLOCK>` | `REDE_BRIDGE` em bridge ou `REDE_BRIDGE_LIBVIRT` em NAT | Derivada de `<REDE_MODO>` — Capítulo 24 |
+| `<INICIO_DHCP>` / `<FIM_DHCP>` | Faixa dinâmica derivada da sub-rede NAT | Gerada pela etapa 60 |
+| `<INTERFACE_FISICA>` | Uplink físico escolhido, Ethernet ou Wi-Fi (ex.: `enp5s0`, `wlp4s0`) | Enumeração por `/sys/class/net/*/device` — Capítulo 23 |
+| `<VM_NIC_MAC>` | MAC persistido da NIC VirtIO; identifica a NIC sem depender da posição no XML | Etapa 40 / migração na etapa 60 — Capítulo 23 |
+| `<VM_IP_FIXO>` | IP estável da VM: reserva no roteador (bridge) ou no DHCP libvirt (NAT) | Capítulos 23 e 24 |
+| `<IP_FIXO_HOST>` | Endereço do host visto pela VM: IP LAN de `br0` ou gateway da bridge NAT | Capítulos 23 e 24 |
 | `<TRANSFER_USER>` | Usuário de sistema dedicado às transferências do airlock (ex.: `vmtransfer`) | Definido pelo administrador — Capítulo 24 |
 
 > **📝 NOTA:** Nunca copie e cole um comando contendo um placeholder sem antes substituí-lo pelo valor real do seu equipamento. Comandos com placeholders não substituídos falham propositalmente (o texto entre `<>` não é um caminho, UUID ou ID válido em nenhum sistema), como proteção contra execução acidental de um comando incompleto.
@@ -100,7 +107,7 @@ Tabela de placeholders usados ao longo do documento:
 20. Áudio HDMI e USB Passthrough
 21. CPU Pinning, NUMA e HugePages
 22. CPU Isolation e MSI Interrupts
-23. Rede em Bridge
+23. Rede da VM: Bridge Ethernet ou NAT Libvirt
 24. Compartilhamento Seguro de Arquivos (Airlock)
 25. TRIM, Snapshots e Backup
 26. Atualizações e Manutenção Contínua
@@ -293,7 +300,7 @@ Como HD2 nunca é compartilhado automaticamente com a VM, a transferência de ar
 │                 ├── HD1 (disco físico D:, passthrough)             │
 │                 ├── RTX 3060 (VFIO-PCI, passthrough completo)      │
 │                 ├── Áudio HDMI da GPU (VFIO-PCI, mesma IOMMU)      │
-│                 └── Rede (bridge, VirtIO-net)                      │
+│                 └── Rede (VirtIO-net: bridge Ethernet ou NAT libvirt)       │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -504,10 +511,11 @@ A ordem dos capítulos deste documento não é arbitrária. Ela segue uma sequê
                                                 do controle permanente do Linux
 11. VM criada e Windows instalado (Cap. 17, 18)
 12. Passthrough dinâmico ativado  (Cap. 19, 20)
-13. Ajustes de desempenho         (Cap. 21, 22, 23)
-14. Compartilhamento seguro       (Cap. 24) ── depende do IP fixo da VM,
-                                                definido na rede em bridge
-15. Operação contínua             (Cap. 25 em diante)
+13. Ajustes de desempenho         (Cap. 21, 22)
+14. Rede final da VM             (Cap. 23) ── bridge Ethernet ou NAT Ethernet/Wi-Fi
+15. Compartilhamento seguro      (Cap. 24) ── depende do IP estável criado
+                                                pelo backend selecionado
+16. Operação contínua            (Cap. 25 em diante)
 ```
 
 > **💡 DICA:** Configurar a BIOS (Capítulo 12) antes de instalar o Pop!_OS evita ter que reiniciar em UEFI com CSM/Secure Boot incompatíveis já com o sistema instalado, o que por vezes exige reparo de bootloader.
@@ -2234,7 +2242,7 @@ Na tela de "Customizar configuração antes de instalar", ajuste os seguintes it
 
 **Segundo CD-ROM (drivers VirtIO):** adicione um segundo dispositivo de armazenamento tipo CD-ROM, apontando para a ISO `virtio-win.iso`, necessária durante a instalação do Windows para carregar o driver de disco VirtIO (Capítulo 18).
 
-**Rede (NIC):** na aba de rede, altere o "Modelo de dispositivo" para **virtio** (em vez do padrão emulado e2000/rtl8139), pelo mesmo motivo de desempenho do disco. A configuração de rede em bridge (em vez de NAT padrão) é tratada em detalhe no Capítulo 23; nesta etapa inicial, o modo NAT padrão do libvirt (`rede virtual 'default'`) é suficiente para a instalação do Windows e ativação da licença.
+**Rede (NIC):** na aba de rede, altere o "Modelo de dispositivo" para **virtio** (em vez do padrão emulado e2000/rtl8139), pelo mesmo motivo de desempenho do disco. Nesta etapa inicial use a rede NAT `default` do libvirt em qualquer escolha: ela é um bootstrap seguro para instalar/ativar o Windows. O Capítulo 23 preserva o MAC dessa NIC e troca apenas sua fonte, identificando-a pelo `VM_NIC_MAC`: Ethernet pode terminar em bridge ou NAT dedicado; Wi-Fi termina obrigatoriamente no NAT dedicado.
 
 **TPM:**
 - "Adicionar Hardware" → "TPM" → **Tipo: Emulado**, **Versão do modelo: 2.0**. Isso instrui o libvirt a orquestrar automaticamente uma instância `swtpm` dedicada a esta VM (um processo `swtpm` separado por VM, com seu estado armazenado em `/var/lib/libvirt/swtpm/<UUID_DA_VM>/`), satisfazendo o requisito de TPM 2.0 do instalador do Windows 11.
@@ -3278,29 +3286,43 @@ Para o registro do Windows, exclua o valor `MSISupported` criado ou defina-o de 
 
 ## Próxima etapa
 
-Capítulo 23 — Rede em Bridge.
+Capítulo 23 — Rede da VM: Bridge Ethernet ou NAT Libvirt.
 
 ---
 
-# Capítulo 23 — Rede em Bridge
+# Capítulo 23 — Rede da VM: Bridge Ethernet ou NAT Libvirt
 
 ## Objetivo
 
-Configurar uma interface de rede em modo bridge no host, permitindo que a VM Windows obtenha um endereço IP diretamente da rede local (do mesmo roteador/DHCP usado pelo restante da rede doméstica), em vez do NAT isolado padrão do libvirt usado nos capítulos anteriores.
+Aplicar o backend de rede escolhido na etapa 02 sem perder a identidade da NIC: bridge somente sobre Ethernet, colocando a VM na LAN, ou uma rede NAT libvirt dedicada sobre Ethernet/Wi-Fi, sem alterar Netplan. Nos dois casos, manter o MAC persistido, produzir endereçamento estável para o airlock e permitir verificação/reversão objetiva.
 
 ## Pré-requisitos
 
 - Capítulo 18 concluído (driver de rede VirtIO instalado dentro da VM).
-- Interface de rede física do host identificada (Ethernet, preferencialmente — bridge sobre Wi-Fi é tecnicamente possível mas consideravelmente mais complexo e menos confiável, não coberto em detalhe por este documento).
+- Etapa 02 refeita com a versão atual: `REDE_MODO=bridge|nat` e `INTERFACE_FISICA` válidos.
+- VM desligada; a etapa 40 já criou a NIC NAT `default` temporária e persistiu `VM_NIC_MAC` (configurações antigas são migradas pela 60).
 
 ## Explicação
 
+### Seleção do uplink e matriz de suporte
+
+A etapa 02 não procura mais prefixos `en*`/`eth*`. Ela sempre enumera todas as interfaces com `/sys/class/net/<iface>/device`, exclui `lo` e interfaces virtuais, mostra estado, carrier, IPv4, MAC e driver, e destaca explicitamente o dispositivo retornado por `ip -4 route get 1.1.1.1`. Essa é apenas uma consulta à decisão local de roteamento do kernel: nenhum pacote é enviado. A classificação Wi-Fi usa exclusivamente `/sys/class/net/<iface>/wireless`. Se NAT for escolhido em outra interface, a etapa 02 avisa e a 60 aborta antes de qualquer mutação até o adaptador selecionado virar a rota padrão (ou o outro ser desconectado/ter a métrica ajustada). Trocar o uplink mantendo bridge também limpa os IPs reservados da LAN anterior.
+
+| Uplink | Bridge | NAT |
+|---|---|---|
+| Ethernet | suportada | suportada |
+| Wi-Fi station | **não suportada** | suportada e vinculada ao adaptador escolhido |
+
+Uma estação Wi-Fi 802.11 normalmente não consegue transportar os endereços MAC de convidados atrás dela. Isso exigiria 4addr/WDS compatível e habilitado tanto no adaptador quanto no ponto de acesso; por não ser uma propriedade portátil/confiável, o projeto rejeita bridge Wi-Fi e usa NAT libvirt.
+
 ### NAT vs Bridge
 
-Por padrão, o libvirt cria uma rede virtual chamada `default`, operando em modo **NAT**: a VM recebe um endereço IP de uma sub-rede privada específica do libvirt (tipicamente `192.168.122.0/24`), e o tráfego de saída é traduzido (NAT) pelo host antes de sair para a rede real. Isso funciona bem para acesso à internet a partir da VM, mas apresenta duas limitações relevantes para um ambiente de jogos:
+A rede `default` da etapa 40 é apenas temporária. Na etapa 60, `REDE_MODO=nat` cria uma rede libvirt **dedicada**, com bridge e sub-rede privadas próprias e `<forward mode='nat' dev='<INTERFACE_FISICA>'>`; `REDE_MODO=bridge` migra a NIC para a bridge Ethernet do host. NAT é menos exposto à LAN e funciona com Wi-Fi, mas tem estas diferenças em relação à bridge:
 
 1. Outros dispositivos na rede local (por exemplo, outro computador tentando se conectar a um servidor de jogo hospedado na VM) não conseguem alcançar a VM diretamente pelo IP da rede doméstica, pois ela está "atrás" do NAT do libvirt.
 2. Alguns jogos multiplayer e serviços de matchmaking têm melhor comportamento (menor NAT type restritivo, no jargão de consoles/jogos online) quando o dispositivo está na mesma sub-rede lógica do roteador.
+
+### Modo bridge (somente Ethernet)
 
 Uma **bridge** de rede resolve isso: cria uma interface virtual no host que atua como um switch de software, ao qual tanto a interface física do host quanto a interface virtual da VM se conectam. A VM passa a solicitar IP via DHCP diretamente ao roteador da rede doméstica, recebendo um endereço na mesma sub-rede que qualquer outro dispositivo físico da casa.
 
@@ -3323,28 +3345,27 @@ Interface física do host (<INTERFACE_FISICA>, ex.: enp5s0)
 ```bash
 ip link show
 ```
-**O que faz:** lista todas as interfaces de rede reconhecidas pelo kernel. Identifique o nome da interface Ethernet conectada fisicamente (algo como `enp5s0`, `eth0`, ou nomenclatura similar baseada em `predictable network interface names`) — este é o `<INTERFACE_FISICA>` usado a seguir.
+**O que faz:** lista todas as interfaces, inclusive virtuais. Para evitar escolher `lo`, bridges, veth/tap ou depender do prefixo do nome, use `bash etapas/02-detectar-config.sh --redetectar`: a seleção guiada consulta o sysfs e mantém o adaptador escolhido em `<INTERFACE_FISICA>` nos dois modos. Se ele for Wi-Fi, somente NAT será oferecida.
 
 ### Configurando a bridge via Netplan
 
-O Pop!_OS usa o **Netplan** como camada de configuração de rede declarativa sobre `NetworkManager` ou `systemd-networkd`, dependendo da configuração padrão da distribuição.
+O Pop!_OS usa o **Netplan** como camada declarativa sobre o renderer já escolhido pelo sistema. Este projeto não substitui o primeiro YAML encontrado e não força `networkd`: grava somente o arquivo dedicado `/etc/netplan/90-vm-passthrough-bridge.yaml`, preservando integralmente Wi-Fi e interfaces não relacionadas nos demais arquivos.
+
+Se o dedicado já existir, faça backup dele; caso contrário, não há arquivo anterior a restaurar:
 
 ```bash
-ls /etc/netplan/
-```
-**O que faz:** lista os arquivos de configuração existentes do Netplan (tipicamente um único arquivo `.yaml`, gerado pelo instalador).
-
-```bash
-sudo cp /etc/netplan/<ARQUIVO_EXISTENTE>.yaml /etc/netplan/<ARQUIVO_EXISTENTE>.yaml.bak-$(date +%Y%m%d)
-sudo nano /etc/netplan/<ARQUIVO_EXISTENTE>.yaml
+if sudo test -e /etc/netplan/90-vm-passthrough-bridge.yaml; then
+  sudo cp -p /etc/netplan/90-vm-passthrough-bridge.yaml \
+    /etc/netplan/90-vm-passthrough-bridge.yaml.bak-$(date +%Y%m%d-%H%M%S)
+fi
+sudo nano /etc/netplan/90-vm-passthrough-bridge.yaml
 ```
 
-Substitua o conteúdo (adaptando `<INTERFACE_FISICA>` ao nome real identificado acima) por:
+Conteúdo dedicado (adapte apenas os dois nomes):
 
 ```yaml
 network:
   version: 2
-  renderer: networkd
   ethernets:
     <INTERFACE_FISICA>:
       dhcp4: no
@@ -3358,15 +3379,10 @@ network:
         forward-delay: 4
 ```
 
-**Explicação campo a campo:**
-
-- `renderer: networkd`: instrui o Netplan a usar `systemd-networkd` como backend de aplicação, mais adequado para configuração de bridges em servidores/desktops sem necessidade da interface gráfica completa do NetworkManager para essa interface específica.
-- `<INTERFACE_FISICA>: dhcp4: no`: a interface física **não** deve mais solicitar IP diretamente — o IP passa a ser obtido pela bridge.
-- `bridges: br0: interfaces: [<INTERFACE_FISICA>]`: cria a interface de bridge `br0`, incluindo a interface física como uma de suas portas.
-- `dhcp4: yes` (na bridge): a bridge, e não a interface física isoladamente, é quem solicita o endereço IP via DHCP — esse IP passa a ser o do próprio host.
-- `stp: true`: habilita o Spanning Tree Protocol, prevenção padrão contra loops de rede — não estritamente necessário para uma bridge simples de duas portas, mas mantido como boa prática caso a topologia de rede mude no futuro.
+O arquivo contém somente `network/version`, o uplink escolhido e a bridge; não declara renderer nem qualquer outra interface. `<INTERFACE_FISICA>` deixa de solicitar IP diretamente, `br0` assume o DHCP do host e `stp` protege contra loops. Na execução automatizada, a etapa 60 arma rollback antes de escrever: falha em `netplan generate`, `try`, `apply` ou em passos posteriores restaura/remove o dedicado, executa `netplan generate` + `apply` para reaplicar o estado anterior e restaura o XML da VM.
 
 ```bash
+sudo netplan generate
 sudo netplan try
 ```
 **O que faz:** aplica a configuração de forma **temporária** e reversível — se a conectividade de rede não se recuperar dentro de um intervalo curto (o usuário precisa confirmar pressionando Enter), o Netplan reverte automaticamente à configuração anterior. Este é o comando recomendado para testar mudanças de rede remotamente ou em qualquer cenário em que perder a conectividade seria problemático.
@@ -3386,12 +3402,13 @@ Localize o bloco `<interface type='network'>` (rede NAT padrão) e substitua por
 
 ```xml
 <interface type='bridge'>
+  <mac address='<VM_NIC_MAC>'/>
   <source bridge='br0'/>
   <model type='virtio'/>
 </interface>
 ```
 
-**O que faz:** conecta a interface de rede virtual da VM diretamente à bridge `br0` criada no host, em vez da rede NAT isolada `default` do libvirt.
+**O que faz:** conecta a NIC cujo MAC foi persistido em `VM_NIC_MAC` à bridge `br0`. A etapa 60 seleciona esse bloco pelo MAC, nunca por `interface[1]`, troca somente tipo/fonte e confirma que o MAC foi preservado antes de redefinir a VM.
 
 ### Reserva de IP fixo para a VM (e para o host)
 
@@ -3410,53 +3427,132 @@ virsh --connect qemu:///system domiflist <VM_NAME>
 
 > **💡 DICA:** Alternativa sem acesso ao roteador: configurar IP estático diretamente dentro do Windows (Configurações → Rede e Internet → Ethernet → atribuição de IP manual), usando um endereço fora da faixa dinâmica do DHCP. A reserva no roteador é preferível por concentrar a administração de endereços em um único lugar.
 
-## Comandos
+### Modo NAT dedicado (Ethernet ou Wi-Fi)
+
+No NAT, a etapa 60 **não altera o uplink e não lê, cria nem substitui arquivos Netplan**. Ela apenas exige que `<INTERFACE_FISICA>` seja o dispositivo da rota IPv4 efetiva, procura uma `REDE_NAT_CIDR` privada `/24` sem sobreposição e cria/atualiza uma rede persistente (padrão `passthrough-nat`). O libvirt cria a bridge virtual, inicia uma instância `dnsmasq` para DHCP/DNS e instala no host as regras de encaminhamento/NAT; a configuração e a métrica do adaptador físico permanecem intactas.
+
+Na detecção de colisão, nenhuma rota sobreposta é ignorada por estar na mesma bridge. A única exceção são as rotas `proto kernel` exatas da sub-rede atualmente configurada na rede gerenciada: o CIDR conectado, `local` do gateway e `broadcast` dos endereços de rede/broadcast. Qualquer outra rota sobreposta bloqueia antes da definição.
+
+Estrutura conceitual gerada (os endereços reais vêm do `passthrough.conf`):
+
+```xml
+<network>
+  <name>passthrough-nat</name>
+  <description>vm-passthrough:60-rede-nat:v1</description>
+  <forward mode='nat' dev='<INTERFACE_FISICA>'/>
+  <bridge name='virbr-vmnat'/>
+  <ip address='<IP_FIXO_HOST>' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='<INICIO_DHCP>' end='<FIM_DHCP>'/>
+      <host mac='<VM_NIC_MAC>' ip='<VM_IP_FIXO>'/>
+    </dhcp>
+  </ip>
+</network>
+```
+
+A rede é iniciada e marcada para autostart. A reserva DHCP preenche `<VM_IP_FIXO>` e usa o gateway virtual como `<IP_FIXO_HOST>`; não há reserva no roteador. A NIC é localizada por `<VM_NIC_MAC>`. Em configurações antigas sem esse valor, a etapa consulta e conta **todas** as `/domain/devices/interface`: autoescolhe somente se o total for um; com várias, mostra todas e marca `network=default` como **RECOMENDADA**, sem filtrar as demais.
+
+O campo `description` prova a propriedade. Uma `<REDE_LIBVIRT>` homônima sem o marcador nunca é adotada nem alterada. Antes da primeira mutação, a etapa captura XML persistente/ativo, existência/persistência, ativo/autostart da rede, XML inativo da VM e uma cópia exata do `passthrough.conf`. Definição da rede, reinício, autostart, troca da fonte da NIC e persistência pertencem à mesma transação. Qualquer falha ou `INT`/`TERM` restaura XML e estados originais, VM e configuração; se a rede não existia, destrói e remove a criação parcial. Falhas de rollback são exibidas individualmente, e o commit lógico só ocorre após todas as verificações finais.
+
+Em uma atualização gerenciada, o UUID é preservado e o XML anterior também fica em `backups/rede-<nome>-<data>.xml`. Definição persistente e backend ativo são comparados separadamente. Os endereços só passam quando `<IP_FIXO_HOST>` está efetivamente na bridge e `<VM_IP_FIXO>` é unicast distinto no mesmo prefixo; `--verificar` repete essas checagens e a trava da rota IPv4 efetiva.
+
+> **⚠️ MIGRAÇÃO NAT → BRIDGE:** antes de tocar Netplan, se a rede marcada existir,
+> a etapa executa `virsh --connect qemu:///system list --all --name` e inspeciona
+> o XML inativo de todas as outras VMs, ligadas ou desligadas, por `source
+> network` e `source bridge`. Consumidores são listados e bloqueiam a migração.
+> Sem consumidores, desabilita autostart e para a rede; no sucesso deixa sua
+> definição inativa. Se a bridge falhar, a transação restaura esses estados. Uma
+> rede homônima sem marcador é apenas avisada e jamais alterada.
+>
+> **⚠️ MIGRAÇÃO BRIDGE → NAT:** o NAT não desfaz Netplan. Restaure o backup do
+> dedicado ou remova `/etc/netplan/90-vm-passthrough-bridge.yaml`, execute `sudo
+> netplan generate && sudo netplan apply` e só então rode a etapa 60. Ela aborta
+> enquanto `<INTERFACE_FISICA>` ainda estiver escravizada a qualquer bridge.
+
+### Fluxo automatizado recomendado
 
 ```bash
-ip link show
-ls /etc/netplan/
-sudo cp /etc/netplan/<ARQUIVO_EXISTENTE>.yaml /etc/netplan/<ARQUIVO_EXISTENTE>.yaml.bak-$(date +%Y%m%d)
-sudo nano /etc/netplan/<ARQUIVO_EXISTENTE>.yaml
+bash etapas/02-detectar-config.sh --redetectar  # escolher uplink e modo
+bash etapas/60-rede-bridge.sh                   # aplicar backend final
+bash etapas/60-rede-bridge.sh --verificar      # conferir backend/uplink/NIC/IP
+```
+
+Apesar do nome histórico, `60-rede-bridge.sh` configura os dois modos, exige a VM desligada e só conclui após o commit lógico da transação descrita acima.
+
+## Comandos
+
+Fluxo recomendado (ambos os modos):
+
+```bash
+bash etapas/02-detectar-config.sh --redetectar
+bash etapas/60-rede-bridge.sh
+bash etapas/60-rede-bridge.sh --verificar
+```
+
+Somente para uma implementação manual de **bridge Ethernet**:
+
+```bash
+ip -4 route get 1.1.1.1
+sudo cp -p /etc/netplan/90-vm-passthrough-bridge.yaml \
+  /etc/netplan/90-vm-passthrough-bridge.yaml.bak-$(date +%Y%m%d-%H%M%S)  # somente se existir
+sudo nano /etc/netplan/90-vm-passthrough-bridge.yaml
+sudo netplan generate
 sudo netplan try
 sudo netplan apply
 virsh --connect qemu:///system edit <VM_NAME>
 ```
 
+Para inspecionar o **NAT dedicado** (sem editar Netplan):
+
+```bash
+virsh --connect qemu:///system net-info passthrough-nat
+virsh --connect qemu:///system net-dumpxml passthrough-nat
+virsh --connect qemu:///system dumpxml <VM_NAME>
+```
+
 ## Arquivos modificados
 
-- `/etc/netplan/<ARQUIVO_EXISTENTE>.yaml` (reescrito para incluir a bridge).
-- `/etc/libvirt/qemu/<VM_NAME>.xml` (bloco `<interface>` alterado para `type='bridge'`).
+- `passthrough.conf`: modo, uplink, nomes do backend, `VM_NIC_MAC` e endereços.
+- Nos dois modos: `/etc/libvirt/qemu/<VM_NAME>.xml` (fonte da NIC, com backup datado).
+- Somente bridge: `/etc/netplan/90-vm-passthrough-bridge.yaml` (arquivo dedicado; backup datado se já existia; outros YAMLs preservados).
+- Somente NAT: definição persistente da rede libvirt `REDE_LIBVIRT`, bridge virtual, `dnsmasq` e regras host de encaminhamento/NAT; nenhum arquivo Netplan é tocado.
 
 ## Como verificar
 
-```bash
-ip addr show br0
-```
-**Critério de sucesso:** a interface `br0` exibe um endereço IP dentro da faixa da rede doméstica (a mesma faixa de outros dispositivos, como o roteador).
+Primeiro use o verificador orientado pelo modo:
 
 ```bash
-ping -c4 8.8.8.8
+bash etapas/60-rede-bridge.sh --verificar
 ```
-**Critério de sucesso:** confirma conectividade do host através da bridge.
 
-Dentro da VM, após iniciá-la:
+**Bridge Ethernet:** deve confirmar `br0` ativa, `<INTERFACE_FISICA>` como porta, NIC identificada por `<VM_NIC_MAC>` com `source bridge='br0'` e os dois IPs gravados. `ip addr show br0` mostra o IP LAN do host; `ipconfig` na VM mostra `<VM_IP_FIXO>` na mesma sub-rede do roteador; host e guest alcançam a internet.
 
-```powershell
-ipconfig
-```
-**Critério de sucesso:** o adaptador VirtIO exibe um endereço IP na mesma sub-rede do host e do roteador (não mais `192.168.122.x`, a sub-rede NAT anterior do libvirt).
+**NAT Ethernet/Wi-Fi:** deve confirmar a rede dedicada ativa/autostart, `<forward mode='nat' dev='<INTERFACE_FISICA>'>`, bridge virtual, sub-rede/reserva DHCP, NIC com `source network='<REDE_LIBVIRT>'` e `INTERFACE_FISICA` igual ao dispositivo de `ip -4 route get 1.1.1.1`. `ipconfig` mostra `<VM_IP_FIXO>` na sub-rede privada; a VM alcança a internet e `<IP_FIXO_HOST>`.
 
 ## Resultado esperado
 
-Host e VM ambos conectados diretamente à rede doméstica através da bridge `br0`, com a VM obtendo IP via DHCP do roteador, alcançável por outros dispositivos da rede local como se fosse uma máquina física adicional.
+A VM usa exatamente o backend persistido em `<REDE_MODO>`: como par da LAN em bridge Ethernet, ou isolada em uma sub-rede NAT libvirt dedicada vinculada ao uplink Ethernet/Wi-Fi. O MAC permanece estável e o airlock recebe IPs determinísticos nos dois modos.
 
 ## Como desfazer
 
+**Bridge:** falhas durante a etapa já disparam rollback automático. Para uma reversão manual, com a VM desligada, restaure o backup do dedicado (ou remova-o se ele não existia), gere/aplique e restaure o XML:
+
 ```bash
-sudo cp /etc/netplan/<ARQUIVO_EXISTENTE>.yaml.bak-<data> /etc/netplan/<ARQUIVO_EXISTENTE>.yaml
+sudo cp /etc/netplan/90-vm-passthrough-bridge.yaml.bak-<data> \
+  /etc/netplan/90-vm-passthrough-bridge.yaml  # ou: sudo rm ... se era novo
+sudo netplan generate
 sudo netplan apply
-virsh --connect qemu:///system edit <VM_NAME>   # reverter <interface> para type='network', network='default'
+virsh --connect qemu:///system define backups/<vm>-<data>.xml
 ```
+
+**NAT:** Netplan não precisa (e não deve) ser restaurado, pois não foi tocado. Restaure o backup XML da VM; para remover também o backend dedicado, confirme que nenhuma VM o usa e execute:
+
+```bash
+virsh --connect qemu:///system net-destroy <REDE_LIBVIRT>
+virsh --connect qemu:///system net-undefine <REDE_LIBVIRT>
+```
+
+A rede `default` temporária foi preservada. Se quiser voltar a ela, execute `virsh --connect qemu:///system net-start default` e `virsh --connect qemu:///system net-autostart default`, depois restaure o XML de backup que continha `source network='default'`. Ao trocar de modo, rode a etapa 61: ela remove todas as regras UFW antigas com o comentário exato e só aceita a pós-condição de uma regra atual.
 
 ## Problemas comuns
 
@@ -3464,11 +3560,13 @@ virsh --connect qemu:///system edit <VM_NAME>   # reverter <interface> para type
 |---|---|---|
 | Host perde conectividade de rede após `netplan apply` | Erro de sintaxe YAML, ou nome de interface física incorreto | Usar sempre `netplan try` primeiro; reverter do backup se necessário |
 | VM não recebe IP através da bridge | Bridge `br0` não está corretamente "up", ou firewall do roteador bloqueando novo dispositivo | Verificar `ip link show br0` (deve mostrar estado `UP`); verificar configuração do roteador |
-| Bridge funciona, mas Wi-Fi era a única opção disponível (sem cabo Ethernet) | Bridging sobre Wi-Fi exige configuração adicional (modo four-address/WDS), nem sempre suportado pelo hardware Wi-Fi do host ou pelo roteador | Considerar usar NAT (configuração padrão) combinado com redirecionamento de portas específicas no roteador, como alternativa mais simples que bridging sobre Wi-Fi |
+| Bridge solicitada com uplink Wi-Fi | Wi-Fi station não transporta MACs adicionais sem 4addr/WDS | Escolher `REDE_MODO=nat`; bridge Wi-Fi é deliberadamente rejeitada pelo projeto |
+| Etapa NAT aborta por colisão | `REDE_NAT_CIDR` sobrepõe rota/VPN ou outra rede libvirt | Escolher outra sub-rede privada `/24`; nada foi aplicado antes da detecção |
+| Rede NAT existe, mas a VM recebeu outro IP | lease antigo no Windows ou XML/reserva divergente | Rodar `--verificar`, renovar DHCP/reiniciar o Windows e conferir o MAC persistido |
 
 ## Próxima etapa
 
-Capítulo 24 — Compartilhamento Seguro de Arquivos (Airlock), que estabelece o canal controlado de troca de arquivos entre o host e a VM, usando a rede em bridge e o IP fixo definidos aqui.
+Capítulo 24 — Compartilhamento Seguro de Arquivos (Airlock), que usa o IP estável e a interface produzidos pelo backend selecionado: `br0`/`REDE_BRIDGE` em bridge ou a bridge virtual libvirt em NAT.
 
 ---
 
@@ -3482,7 +3580,7 @@ Estabelecer o único canal autorizado de troca de arquivos entre o host Linux e 
 
 - Capítulo 11 concluído (HD2 montado em `/mnt/docs4` via `ntfs-3g`).
 - Capítulo 19 concluído (estrutura de hooks do libvirt criada e funcional).
-- Capítulo 23 concluído (bridge ativa; `<VM_IP_FIXO>` e `<IP_FIXO_HOST>` reservados no roteador).
+- Capítulo 23 concluído no modo escolhido; `<VM_IP_FIXO>` e `<IP_FIXO_HOST>` preenchidos pela etapa 60 (roteador em bridge, DHCP/gateway libvirt em NAT).
 - VM Windows funcional (Capítulos 17 e 18), com a Inicialização Rápida desativada (Capítulo 18).
 
 ## Explicação
@@ -3491,7 +3589,7 @@ Estabelecer o único canal autorizado de troca de arquivos entre o host Linux e 
 
 O vetor de ataque mais provável deste ambiente não é sofisticado: é um arquivo malicioso que entra na VM pelos downloads e launchers do HD1 e, a partir dela, procura um caminho de escrita até os dados reais do usuário. Dois fatos dos capítulos anteriores tornam esse risco concreto:
 
-1. **A rede em bridge (Capítulo 23) faz da VM um par pleno na LAN**, com alcance de rede irrestrito a qualquer serviço que o host exponha.
+1. **Em bridge, a VM é um par pleno na LAN; em NAT, ela fica atrás da sub-rede libvirt.** Nos dois casos, a VM alcança serviços do host pelo endereço `<IP_FIXO_HOST>`, portanto a restrição por interface+IP e a autenticação forte continuam necessárias.
 2. **Qualquer compartilhamento que apontasse para as pastas reais do HD2** (`Documentos`, `Downloads` etc.) anularia, na prática, o princípio do Capítulo 2: a integridade do HD2 não pode depender do estado da VM.
 
 A solução é uma **zona de trânsito**: uma pasta dedicada e isolada, usada exclusivamente para arquivos em movimento entre os dois sistemas — nunca para dados permanentes. A VM enxerga essa pasta, e **somente** essa pasta.
@@ -3566,7 +3664,7 @@ Instalar o `openssh-server` para o airlock significa abrir a porta 22 justamente
 
 ### Limites do desenho
 
-- **Spoofing na LAN:** a regra de firewall por IP pode, em tese, ser contornada por outro dispositivo da LAN que falsifique o IP/MAC da VM. Por isso o desenho usa **duas** barreiras independentes: mesmo alcançando a porta, o atacante ainda precisa da chave privada. Em uma LAN doméstica, o risco residual é aceitável.
+- **Spoofing/escopo da rede:** em bridge, outro dispositivo da LAN poderia tentar falsificar o IP/MAC da VM; no NAT, a regra existe somente na bridge virtual e a LAN não possui rota para a sub-rede privada. Em ambos, a chave privada continua sendo uma segunda barreira independente.
 - **Conteúdo em trânsito é não confiável:** o Defender examina os arquivos no lado Windows (Capítulo 18), mas não há antivírus no lado Linux. A visão de serviço é montada com `noexec`, e a regra operacional é: **não execute binários ou scripts vindos do airlock**; trate-os como dados.
 - **Zona de trânsito, não armazenamento:** a pasta airlock não guarda dados permanentes e fica **fora do escopo de backup** (Capítulo 25). Mova os arquivos para o destino final (`Documentos` etc.) após cada transferência.
 
@@ -3706,11 +3804,13 @@ sudo chmod 644 /etc/ssh/authorized_keys/<TRANSFER_USER>
 
 ### 6. Firewall (ufw)
 
+Defina `<INTERFACE_AIRLOCK>` como `br0`/`REDE_BRIDGE` em bridge ou como `virbr-vmnat`/`REDE_BRIDGE_LIBVIRT` em NAT. Para a etapa 61, o comentário `SFTP airlock - somente VM Windows` é a identidade da regra: ela captura **todas** as ocorrências, falha fechado se qualquer uma não tiver exatamente o formato esperado, remove cada regra com o comentário exato (sem fallback permissivo), confirma cardinalidade zero, adiciona a atual e exige exatamente uma regra marcada e exata para interface, IP, porta 22 e TCP.
+
 ```bash
 sudo apt install -y ufw
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw allow in on br0 from <VM_IP_FIXO> to any port 22 proto tcp comment 'SFTP airlock - somente VM Windows'
+sudo ufw allow in on <INTERFACE_AIRLOCK> from <VM_IP_FIXO> to any port 22 proto tcp comment 'SFTP airlock - somente VM Windows'
 ```
 
 > **⚠️ ALERTA:** Se você administra este host por SSH a partir de **outro** dispositivo, adicione a regra correspondente **antes** do `ufw enable` (ex.: `sudo ufw allow from <IP_DO_DISPOSITIVO_ADMIN> to any port 22 proto tcp`), ou a próxima conexão desse dispositivo será bloqueada. O console local nunca é afetado pelo ufw.
@@ -3720,9 +3820,9 @@ sudo ufw enable
 sudo ufw status verbose
 ```
 
-**O que fazem:** com a política padrão `deny incoming`, **tudo** o que não for explicitamente liberado é bloqueado — a regra `allow` restringe o SFTP ao IP fixo da VM, na interface `br0` (regras `deny` explícitas por porta tornam-se desnecessárias). O `enable` ativa o firewall de forma persistente entre boots; `status verbose` exibe política e regras para conferência.
+**O que fazem:** com `deny incoming`, tudo que não for explicitamente liberado é bloqueado. A regra combina interface do backend, `<VM_IP_FIXO>`, porta 22 e TCP. `bash etapas/61-airlock.sh --verificar` exige `total marcado=1` e `exato=1`; qualquer regra residual ou marcada mas não parseável reprova.
 
-> **📝 NOTA:** O ufw filtra apenas o tráfego **destinado ao host**. O tráfego da própria VM com a internet/LAN atravessa a bridge em camada 2 e não é afetado; a rede NAT do libvirt (usada antes do Capítulo 23) também mantém suas próprias regras de encaminhamento e segue funcionando.
+> **📝 NOTA:** O ufw filtra tráfego destinado ao host. Em bridge, o encaminhamento L2 normal da VM não é bloqueado por essa regra; em NAT, o libvirt mantém suas próprias regras de saída. Acesso da VM ao airlock não exige port-forward em nenhum modo.
 
 ### 7. Criação automática e idempotente (hook `00-airlock.sh`)
 
@@ -3779,7 +3879,7 @@ sudo chmod +x /etc/libvirt/hooks/qemu.d/<VM_NAME>/prepare/begin/00-airlock.sh
 ### 8. Cliente no Windows (WinSCP)
 
 1. Instale o WinSCP (`winscp.net`) dentro da VM — ou use o cliente nativo do Windows: `sftp -i $env:USERPROFILE\.ssh\airlock <TRANSFER_USER>@<IP_FIXO_HOST>`.
-2. Nova sessão: protocolo **SFTP**; Host: `<IP_FIXO_HOST>`; porta `22`; usuário `<TRANSFER_USER>`.
+2. Nova sessão: protocolo **SFTP**; Host: `<IP_FIXO_HOST>` (IP LAN do host em bridge; gateway da bridge virtual em NAT); porta `22`; usuário `<TRANSFER_USER>`.
 3. Em Advanced → SSH → Authentication → "Private key file", aponte para `%USERPROFILE%\.ssh\airlock` (o WinSCP oferece converter a chave para o formato `.ppk` — aceite).
 4. Salve a sessão e conecte. Na primeira conexão, confirme a impressão digital do servidor — para conferir, execute no host: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
 5. A sessão abre diretamente em `/files` (a pasta airlock). Arraste arquivos nos dois sentidos normalmente.
@@ -3824,7 +3924,7 @@ sudo smbpasswd -a <TRANSFER_USER>
 sudo smbpasswd -e <TRANSFER_USER>
 testparm
 sudo systemctl enable --now smbd
-sudo ufw allow in on br0 from <VM_IP_FIXO> to any port 445 proto tcp comment 'Samba airlock - somente VM Windows'
+sudo ufw allow in on <INTERFACE_AIRLOCK> from <VM_IP_FIXO> to any port 445 proto tcp comment 'Samba airlock - somente VM Windows'
 ```
 
 **O que fazem:** o Samba mantém uma base de senhas própria — `smbpasswd -a` cria a senha SMB do usuário (independente da senha de sistema, que a conta não tem) e `-e` habilita a conta; `testparm` valida a sintaxe do `smb.conf`; as demais linhas ativam o serviço e liberam a porta 445 apenas para a VM.
@@ -3879,7 +3979,7 @@ Cada verificação abaixo cobre uma camada independente do desenho:
 3. **Transferência real:** conectar pelo WinSCP na VM → a sessão abre em `/files`; enviar um arquivo → ele aparece em `/mnt/docs4/airlock` no host; criar um arquivo no host → ele aparece no WinSCP.
 4. **Confinamento:** no WinSCP, navegar para o diretório raiz (`/`) → deve exibir apenas `files/` (nenhum diretório do host visível).
 5. **Autenticação:** da VM, `ssh <TRANSFER_USER>@<IP_FIXO_HOST>` **sem** a chave → recusa imediata com `Permission denied (publickey)` (senha nem sequer é oferecida). Com a chave, a mesma tentativa não abre shell (`ForceCommand` em ação).
-6. **Escopo do firewall (teste negativo):** de **outro** dispositivo da LAN (não a VM): `Test-NetConnection <IP_FIXO_HOST> -Port 22` (Windows) ou `nc -vzw3 <IP_FIXO_HOST> 22` (Linux) → deve **falhar por timeout**. Da VM, a mesma porta conecta.
+6. **Escopo/cardinalidade do firewall:** `sudo ufw show added` contém exatamente uma regra com o comentário `SFTP airlock - somente VM Windows`, e ela corresponde a `<INTERFACE_AIRLOCK>`, `<VM_IP_FIXO>`, porta 22 e TCP. `bash etapas/61-airlock.sh --verificar` deve reportar `marcado=1/exato=1`.
 7. **Hook:** com a VM desligada, `sudo umount /srv/airlock/files`; iniciar a VM; `journalctl -t hook-qemu -b` deve registrar a remontagem, e `mount | grep airlock` volta a exibir a visão de serviço.
 
 ## Resultado esperado
@@ -3889,7 +3989,7 @@ Um único canal de troca de arquivos entre host e VM, com todas as propriedades 
 ## Como desfazer
 
 ```bash
-sudo ufw delete allow in on br0 from <VM_IP_FIXO> to any port 22 proto tcp
+sudo ufw --force delete allow in on <INTERFACE_AIRLOCK> from <VM_IP_FIXO> to any port 22 proto tcp comment 'SFTP airlock - somente VM Windows'
 sudo rm /etc/ssh/sshd_config.d/10-airlock.conf
 sudo sshd -t && sudo systemctl reload ssh
 sudo rm /etc/ssh/authorized_keys/<TRANSFER_USER>
