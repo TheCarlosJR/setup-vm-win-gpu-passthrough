@@ -29,15 +29,47 @@ carregar_conf
 
 verificar() {
     [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
-    local var
+    local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0
     for var in USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID \
-               UUID_HD2 CPUS_VM CPUS_HOST VM_RAM_MB INTERFACE_FISICA DM_SERVICE; do
+               UUID_HD2 CPUS_VM CPUS_HOST VM_RAM_MB DM_SERVICE; do
         if [ -n "${!var:-}" ]; then
             v_ok "$var=${!var}"
         else
             v_falta "$var ainda não definido."
         fi
     done
+    if validar_config_rede; then
+        tipo="Ethernet"
+        interface_wifi "$INTERFACE_FISICA" && tipo="Wi-Fi"
+        v_ok "Rede: modo=$REDE_MODO, uplink=$INTERFACE_FISICA ($tipo)."
+    else
+        v_falta "$REDE_CONFIG_ERRO"
+    fi
+
+    rota="$(dispositivo_uplink_ipv4_efetivo || true)"
+    echo "Interfaces físicas elegíveis:"
+    for caminho in /sys/class/net/*; do
+        [ -e "$caminho" ] || continue
+        iface="$(basename "$caminho")"
+        interface_fisica_elegivel "$iface" || continue
+        encontrou=1
+        tipo_lista="Ethernet"
+        interface_wifi "$iface" && tipo_lista="Wi-Fi"
+        ipv4="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk 'NR==1 {print $4}')"
+        [ -n "$ipv4" ] || ipv4="sem IPv4"
+        marca=""
+        [ "$iface" = "$rota" ] && marca=" <-- ROTA IPv4 EFETIVA"
+        echo "  - $iface [$tipo_lista; IPv4=$ipv4]$marca"
+    done
+    [ "$encontrou" -eq 1 ] || v_falta "Nenhuma interface física elegível encontrada."
+    if [ -n "$rota" ]; then
+        v_ok "Rota IPv4 efetiva para 1.1.1.1: dispositivo $rota (nenhum pacote enviado)."
+        if [ "${REDE_MODO:-}" = "nat" ] && [ "${INTERFACE_FISICA:-}" != "$rota" ]; then
+            aviso "NAT está selecionado em ${INTERFACE_FISICA:-vazio}, mas a rota IPv4 efetiva usa $rota; ajuste a rota/métrica antes da etapa 60."
+        fi
+    else
+        aviso "Rota IPv4 efetiva indisponível para destacar."
+    fi
     # Áudio HDMI da GPU: opcional (algumas placas não expõem a função)
     if [ -n "${GPU_AUDIO_PCI_ID:-}" ]; then
         v_ok "GPU_AUDIO_PCI_ID=$GPU_AUDIO_PCI_ID"
@@ -453,23 +485,124 @@ salvar_conf HUGEPAGES_1G "$((VM_RAM_MB / 1024))"
 # 8. Rede, transferência de arquivos e ISOs
 # ----------------------------------------------------------------------------
 titulo "8/8 Rede e complementos"
-if ja_definido INTERFACE_FISICA; then
-    info "INTERFACE_FISICA já definida: $INTERFACE_FISICA"
-else
-    mapfile -t ETHS < <(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' || true)
-    aviso "Use a interface Ethernet CABEADA (bridge sobre Wi-Fi não é coberta pelo manual)."
-    if [ "${#ETHS[@]}" -eq 0 ]; then
-        echo "Interfaces disponíveis:"
-        ip -o link show | awk -F': ' '{print "  - "$2}'
-        salvar_conf INTERFACE_FISICA "$(perguntar 'Interface física para a bridge' '')"
-    elif [ "${#ETHS[@]}" -eq 1 ]; then
-        ok "Interface cabeada detectada: ${ETHS[0]}"
-        salvar_conf INTERFACE_FISICA "${ETHS[0]}"
+
+# Interfaces elegíveis vêm do sysfs: uma interface física possui o vínculo
+# /sys/class/net/<nome>/device. Isso exclui lo, bridges, veth, tun/tap e demais
+# interfaces virtuais sem depender de prefixos como en*/eth*. Wi-Fi é
+# classificado exclusivamente pela presença de /wireless. A lista é sempre
+# exibida, mesmo quando uma escolha válida já existe no arquivo central.
+INTERFACE_ANTERIOR="${INTERFACE_FISICA:-}"
+UPLINK_IPV4_EFETIVO="$(dispositivo_uplink_ipv4_efetivo || true)"
+INTERFACES=()
+DESCRICOES_REDE=()
+for CAMINHO_IFACE in /sys/class/net/*; do
+    [ -e "$CAMINHO_IFACE" ] || continue
+    IFACE="$(basename "$CAMINHO_IFACE")"
+    interface_fisica_elegivel "$IFACE" || continue
+    TIPO="Ethernet"
+    interface_wifi "$IFACE" && TIPO="Wi-Fi"
+    ESTADO="$(cat "$CAMINHO_IFACE/operstate" 2>/dev/null || echo '?')"
+    CARRIER="$(cat "$CAMINHO_IFACE/carrier" 2>/dev/null || echo '?')"
+    MAC="$(cat "$CAMINHO_IFACE/address" 2>/dev/null || echo '?')"
+    DRIVER_ALVO="$(readlink -f "$CAMINHO_IFACE/device/driver" 2>/dev/null || true)"
+    DRIVER="${DRIVER_ALVO##*/}"
+    [ -n "$DRIVER" ] || DRIVER="?"
+    IPV4="$(ip -4 -o addr show dev "$IFACE" 2>/dev/null | awk 'NR==1 {print $4}')"
+    [ -n "$IPV4" ] || IPV4="sem IPv4"
+    MARCA_ROTA=""
+    [ "$IFACE" = "$UPLINK_IPV4_EFETIVO" ] \
+        && MARCA_ROTA="; ROTA IPv4 EFETIVA para a internet"
+    INTERFACES+=("$IFACE")
+    DESCRICOES_REDE+=("$IFACE [$TIPO; estado=$ESTADO; carrier=$CARRIER; IPv4=$IPV4; MAC=$MAC; driver=$DRIVER$MARCA_ROTA]")
+done
+if [ "${#INTERFACES[@]}" -eq 0 ]; then
+    erro "Nenhuma interface física Ethernet/Wi-Fi elegível foi encontrada."
+    echo "Interfaces do kernel (lo e virtuais são deliberadamente excluídas):"
+    ip -o link show | awk -F': ' '{print "  - "$2}'
+    falhar "Conecte/habilite um adaptador físico e rode esta etapa novamente."
+fi
+
+echo "Interfaces físicas elegíveis:"
+for IDX_REDE in "${!DESCRICOES_REDE[@]}"; do
+    printf '  %d) %s\n' "$((IDX_REDE + 1))" "${DESCRICOES_REDE[$IDX_REDE]}"
+done
+if [ -n "$UPLINK_IPV4_EFETIVO" ]; then
+    if interface_fisica_elegivel "$UPLINK_IPV4_EFETIVO"; then
+        ok "Rota IPv4 efetiva para 1.1.1.1: dispositivo $UPLINK_IPV4_EFETIVO (consulta local; nenhum pacote enviado)."
     else
-        IDX="$(escolher_da_lista 'Interface física para a bridge (número)' nao "${ETHS[@]}")"
-        salvar_conf INTERFACE_FISICA "${ETHS[$((IDX - 1))]}"
+        aviso "A rota IPv4 efetiva usa '$UPLINK_IPV4_EFETIVO', que não é uma interface física elegível da lista (pode ser VPN/bridge)."
+    fi
+else
+    aviso "Não foi possível determinar a rota IPv4 efetiva com 'ip -4 route get 1.1.1.1'."
+fi
+
+if ja_definido INTERFACE_FISICA && interface_fisica_elegivel "$INTERFACE_FISICA"; then
+    TIPO_UPLINK="Ethernet"
+    interface_wifi "$INTERFACE_FISICA" && TIPO_UPLINK="Wi-Fi"
+    info "INTERFACE_FISICA já definida: $INTERFACE_FISICA ($TIPO_UPLINK)"
+else
+    if [ -n "${INTERFACE_FISICA:-}" ] && [ "$REDETECTAR" -eq 0 ]; then
+        aviso "INTERFACE_FISICA='$INTERFACE_FISICA' não existe mais ou não é física; escolha novamente."
+    fi
+    PADRAO_REDE=""
+    [ "${#INTERFACES[@]}" -eq 1 ] && PADRAO_REDE=1
+    IDX="$(perguntar_inteiro 'Uplink físico da VM (número)' "$PADRAO_REDE" 1 "${#INTERFACES[@]}")"
+    salvar_conf INTERFACE_FISICA "${INTERFACES[$((IDX - 1))]}"
+fi
+
+TIPO_UPLINK="Ethernet"
+interface_wifi "$INTERFACE_FISICA" && TIPO_UPLINK="Wi-Fi"
+ok "Uplink escolhido explicitamente: $INTERFACE_FISICA ($TIPO_UPLINK)."
+
+MODO_ANTERIOR="${REDE_MODO:-}"
+if [ "$TIPO_UPLINK" = "Wi-Fi" ]; then
+    aviso "Wi-Fi station não transporta normalmente MACs de convidados sem 4addr/WDS."
+    aviso "Bridge sobre Wi-Fi não é suportada por este projeto; será usada NAT libvirt vinculada ao adaptador."
+    salvar_conf REDE_MODO "nat"
+elif [ "$REDETECTAR" -eq 0 ] && { [ "${REDE_MODO:-}" = "bridge" ] || [ "${REDE_MODO:-}" = "nat" ]; }; then
+    info "REDE_MODO já definido: $REDE_MODO"
+else
+    MODOS_REDE=(
+        "bridge - VM recebe IP da LAN (Ethernet; exige mudança Netplan e reservas no roteador)"
+        "nat - VM fica em sub-rede libvirt privada vinculada a $INTERFACE_FISICA (sem tocar Netplan)"
+    )
+    IDX="$(escolher_da_lista 'Modo final da rede (número)' nao "${MODOS_REDE[@]}")"
+    if [ "$IDX" -eq 1 ]; then
+        salvar_conf REDE_MODO "bridge"
+    else
+        salvar_conf REDE_MODO "nat"
     fi
 fi
+
+# Defaults explícitos mantêm configurações antigas válidas e deixam todos os
+# nomes usados em YAML/XML visíveis e editáveis no arquivo central.
+salvar_conf REDE_BRIDGE "${REDE_BRIDGE:-br0}"
+salvar_conf REDE_LIBVIRT "${REDE_LIBVIRT:-passthrough-nat}"
+salvar_conf REDE_BRIDGE_LIBVIRT "${REDE_BRIDGE_LIBVIRT:-virbr-vmnat}"
+if [ -n "$MODO_ANTERIOR" ] && [ "$MODO_ANTERIOR" != "$REDE_MODO" ]; then
+    aviso "Modo de rede mudou de '$MODO_ANTERIOR' para '$REDE_MODO'; os IPs serão recalculados na etapa 60."
+    salvar_conf VM_IP_FIXO ""
+    salvar_conf IP_FIXO_HOST ""
+elif [ -n "$INTERFACE_ANTERIOR" ] \
+     && [ "$INTERFACE_ANTERIOR" != "$INTERFACE_FISICA" ] \
+     && [ "$REDE_MODO" = "bridge" ]; then
+    aviso "Uplink da bridge mudou de '$INTERFACE_ANTERIOR' para '$INTERFACE_FISICA'; reservas da LAN anterior foram limpas."
+    salvar_conf VM_IP_FIXO ""
+    salvar_conf IP_FIXO_HOST ""
+fi
+if [ "$REDE_MODO" = "nat" ]; then
+    if [ -z "$UPLINK_IPV4_EFETIVO" ]; then
+        aviso "NAT escolhido, mas a rota IPv4 efetiva não pôde ser determinada; a etapa 60 recusará mutações enquanto isso persistir."
+    elif [ "$INTERFACE_FISICA" != "$UPLINK_IPV4_EFETIVO" ]; then
+        aviso "NAT foi escolhido em INTERFACE_FISICA=$INTERFACE_FISICA, mas a rota IPv4 efetiva usa $UPLINK_IPV4_EFETIVO."
+        aviso "Torne $INTERFACE_FISICA a rota padrão ou desconecte/ajuste a métrica do outro adaptador."
+        aviso "Depois execute novamente esta etapa e a etapa 60."
+    else
+        ok "NAT selecionado no uplink IPv4 efetivo: $INTERFACE_FISICA."
+    fi
+fi
+exigir_config_rede
+ok "Rede selecionada: modo=$REDE_MODO, uplink=$INTERFACE_FISICA ($TIPO_UPLINK)."
 
 # Transferência de arquivos (airlock): local configurável
 DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
@@ -507,4 +640,4 @@ titulo "Resumo gravado em $CONF_ARQUIVO"
 grep -vE '^\s*(#|$)' "$CONF_ARQUIVO" | sed 's/^/  /'
 echo
 ok "Detecção concluída. Revise o resumo acima antes de seguir para as próximas etapas."
-info "VM_IP_FIXO e IP_FIXO_HOST são preenchidos na etapa 60 (rede em bridge)."
+info "Na etapa 60: bridge solicitará reservas no roteador; NAT criará a reserva e o gateway automaticamente."

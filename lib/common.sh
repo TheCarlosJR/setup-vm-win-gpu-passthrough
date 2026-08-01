@@ -5,7 +5,7 @@
 # Este arquivo NÃO é executado diretamente: ele é carregado via "source"
 # pelos scripts de etapas/ e util/.
 #
-# Referência: Windows11_VM_Passthrough_PopOS_v2.md (manual completo).
+# Referência: Velho_Windows11_VM_Passthrough_PopOS_v2.md (manual completo).
 # ============================================================================
 
 # --- Localização do projeto e arquivos centrais -----------------------------
@@ -120,6 +120,216 @@ exigir_conf() {
     if [ "$faltando" -eq 1 ]; then
         falhar "Execute antes: etapas/02-detectar-config.sh (ou edite o passthrough.conf)."
     fi
+}
+
+# --- Rede: validação compartilhada -------------------------------------------
+# Nomes e valores abaixo são interpolados em XML, YAML, caminhos e comandos.
+# Aceitar somente formatos estritos evita ambiguidades e injeção por um conf
+# editado à mão, sem recorrer a eval.
+nome_interface_valido() {
+    local nome="${1:-}"
+    [[ "$nome" =~ ^[[:alnum:]_][[:alnum:]_.-]{0,14}$ ]]
+}
+
+nome_rede_libvirt_valido() {
+    local nome="${1:-}"
+    [[ "$nome" =~ ^[[:alnum:]_][[:alnum:]_.-]{0,62}$ ]]
+}
+
+nome_vm_valido() {
+    nome_rede_libvirt_valido "${1:-}"
+}
+
+nome_usuario_valido() {
+    local nome="${1:-}"
+    [[ "$nome" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+}
+
+mac_valido() {
+    local mac="${1:-}"
+    [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]
+}
+
+ipv4_valido() {
+    local ip="${1:-}" octeto
+    local -a partes=()
+    IFS='.' read -r -a partes <<< "$ip"
+    [ "${#partes[@]}" -eq 4 ] || return 1
+    for octeto in "${partes[@]}"; do
+        [[ "$octeto" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( 10#$octeto <= 255 )) || return 1
+    done
+}
+
+ipv4_para_inteiro() {
+    local ip="${1:-}" a b c d
+    ipv4_valido "$ip" || return 1
+    IFS='.' read -r a b c d <<< "$ip"
+    echo $(( (10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d ))
+}
+
+cidr_intervalo() {
+    local cidr="${1:-}" ip prefixo inteiro mascara inicio fim
+    ip="${cidr%/*}"
+    prefixo="${cidr##*/}"
+    [ "$ip" != "$cidr" ] && ipv4_valido "$ip" || return 1
+    [[ "$prefixo" =~ ^[0-9]+$ ]] && [ "$prefixo" -ge 0 ] && [ "$prefixo" -le 32 ] || return 1
+    inteiro="$(ipv4_para_inteiro "$ip")"
+    if [ "$prefixo" -eq 0 ]; then
+        mascara=0
+    else
+        mascara=$(( (0xFFFFFFFF << (32 - prefixo)) & 0xFFFFFFFF ))
+    fi
+    inicio=$((inteiro & mascara))
+    fim=$((inicio | (0xFFFFFFFF ^ mascara)))
+    echo "$inicio $fim"
+}
+
+cidrs_sobrepoem() {
+    local a_inicio a_fim b_inicio b_fim
+    read -r a_inicio a_fim <<< "$(cidr_intervalo "$1")" || return 1
+    read -r b_inicio b_fim <<< "$(cidr_intervalo "$2")" || return 1
+    [ "$a_inicio" -le "$b_fim" ] && [ "$b_inicio" -le "$a_fim" ]
+}
+
+ipv4_unicast_em_cidr() {
+    local ip="${1:-}" cidr="${2:-}" inteiro inicio fim
+    inteiro="$(ipv4_para_inteiro "$ip")" || return 1
+    read -r inicio fim <<< "$(cidr_intervalo "$cidr")" || return 1
+    [ "$inteiro" -gt "$inicio" ] && [ "$inteiro" -lt "$fim" ]
+}
+
+REDE_IP_ERRO=""
+validar_ips_interface_rede() {
+    # validar_ips_interface_rede IFACE IP_VM IP_HOST
+    # O endereço do host precisa estar efetivamente na interface, e o da VM
+    # precisa ser um unicast distinto dentro do mesmo prefixo IPv4.
+    local iface="${1:-}" ip_vm="${2:-}" ip_host="${3:-}" cidr endereco
+    local -a cidrs=()
+    REDE_IP_ERRO=""
+    nome_interface_valido "$iface" || { REDE_IP_ERRO="Interface de rede inválida: '$iface'."; return 1; }
+    ipv4_valido "$ip_vm" || { REDE_IP_ERRO="VM_IP_FIXO inválido: '${ip_vm:-vazio}'."; return 1; }
+    ipv4_valido "$ip_host" || { REDE_IP_ERRO="IP_FIXO_HOST inválido: '${ip_host:-vazio}'."; return 1; }
+    [ "$ip_vm" != "$ip_host" ] || { REDE_IP_ERRO="VM_IP_FIXO e IP_FIXO_HOST não podem ser iguais."; return 1; }
+    mapfile -t cidrs < <(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk '{print $4}')
+    [ "${#cidrs[@]}" -gt 0 ] \
+        || { REDE_IP_ERRO="A interface '$iface' não possui endereço IPv4 global."; return 1; }
+    for cidr in "${cidrs[@]}"; do
+        endereco="${cidr%/*}"
+        if [ "$ip_host" = "$endereco" ]; then
+            ipv4_unicast_em_cidr "$ip_vm" "$cidr" \
+                || { REDE_IP_ERRO="VM_IP_FIXO=$ip_vm não é unicast no prefixo $cidr de $iface."; return 1; }
+            return 0
+        fi
+    done
+    REDE_IP_ERRO="IP_FIXO_HOST=$ip_host não está atribuído à interface '$iface'."
+    return 1
+}
+
+cidr_privado_24_valido() {
+    local cidr="${1:-}" ip a b c d
+    [ "${cidr##*/}" = "24" ] || return 1
+    ip="${cidr%/*}"
+    [ "$ip" != "$cidr" ] && ipv4_valido "$ip" || return 1
+    IFS='.' read -r a b c d <<< "$ip"
+    (( 10#$d == 0 )) || return 1
+    if (( 10#$a == 10 )); then
+        return 0
+    fi
+    if (( 10#$a == 172 && 10#$b >= 16 && 10#$b <= 31 )); then
+        return 0
+    fi
+    (( 10#$a == 192 && 10#$b == 168 ))
+}
+
+interface_fisica_elegivel() {
+    local iface="${1:-}"
+    nome_interface_valido "$iface" || return 1
+    [ "$iface" != "lo" ] || return 1
+    [ -e "/sys/class/net/$iface/device" ] || return 1
+    [ "$(cat "/sys/class/net/$iface/type" 2>/dev/null)" = "1" ]
+}
+
+interface_wifi() {
+    local iface="${1:-}"
+    [ -d "/sys/class/net/$iface/wireless" ]
+}
+
+dispositivo_uplink_ipv4_efetivo() {
+    # Consulta somente a decisão local de roteamento do kernel: nenhum pacote é
+    # enviado a 1.1.1.1. Imprime o dispositivo usado pela rota IPv4 efetiva.
+    local rota dispositivo
+    rota="$(ip -4 route get 1.1.1.1 2>/dev/null)" || return 1
+    dispositivo="$(awk 'NR == 1 {
+        for (i = 1; i <= NF; i++) {
+            if ($i == "dev" && (i + 1) <= NF) { print $(i + 1); exit }
+        }
+    }' <<< "$rota")"
+    [ -n "$dispositivo" ] || return 1
+    printf '%s\n' "$dispositivo"
+}
+
+REDE_CONFIG_ERRO=""
+validar_config_rede() {
+    # Valida apenas a decisão da etapa 02. VM_NIC_MAC, sub-rede e IPs podem
+    # continuar vazios até as etapas 40/60, mas, quando presentes, são validados.
+    local modo="${REDE_MODO:-}" iface="${INTERFACE_FISICA:-}"
+    local bridge="${REDE_BRIDGE:-br0}"
+    local rede_libvirt="${REDE_LIBVIRT:-passthrough-nat}"
+    local bridge_libvirt="${REDE_BRIDGE_LIBVIRT:-virbr-vmnat}"
+    REDE_CONFIG_ERRO=""
+
+    case "$modo" in
+        bridge|nat) : ;;
+        *) REDE_CONFIG_ERRO="REDE_MODO precisa ser 'bridge' ou 'nat' (está: '${modo:-vazio}')."; return 1 ;;
+    esac
+    if ! nome_interface_valido "$iface"; then
+        REDE_CONFIG_ERRO="INTERFACE_FISICA tem nome inválido: '${iface:-vazio}'."
+        return 1
+    fi
+    if ! interface_fisica_elegivel "$iface"; then
+        REDE_CONFIG_ERRO="INTERFACE_FISICA='$iface' não existe ou não é uma interface física elegível."
+        return 1
+    fi
+    if [ "$modo" = "bridge" ] && interface_wifi "$iface"; then
+        REDE_CONFIG_ERRO="Bridge sobre Wi-Fi station não é suportada; selecione REDE_MODO='nat'."
+        return 1
+    fi
+    if ! nome_interface_valido "$bridge" || [ "$bridge" = "$iface" ]; then
+        REDE_CONFIG_ERRO="REDE_BRIDGE='$bridge' é inválida ou coincide com o uplink."
+        return 1
+    fi
+    if ! nome_rede_libvirt_valido "$rede_libvirt" || [ "$rede_libvirt" = "default" ]; then
+        REDE_CONFIG_ERRO="REDE_LIBVIRT='$rede_libvirt' é inválida ou usa o nome reservado 'default'."
+        return 1
+    fi
+    if ! nome_interface_valido "$bridge_libvirt" \
+       || [ "$bridge_libvirt" = "$iface" ] \
+       || [ "$bridge_libvirt" = "$bridge" ]; then
+        REDE_CONFIG_ERRO="REDE_BRIDGE_LIBVIRT='$bridge_libvirt' é inválida ou coincide com outra interface."
+        return 1
+    fi
+    if [ -n "${REDE_NAT_CIDR:-}" ] && ! cidr_privado_24_valido "$REDE_NAT_CIDR"; then
+        REDE_CONFIG_ERRO="REDE_NAT_CIDR='$REDE_NAT_CIDR' precisa ser uma sub-rede privada /24 (terminada em .0/24)."
+        return 1
+    fi
+    if [ -n "${VM_NIC_MAC:-}" ] && ! mac_valido "$VM_NIC_MAC"; then
+        REDE_CONFIG_ERRO="VM_NIC_MAC='$VM_NIC_MAC' não é um endereço MAC válido."
+        return 1
+    fi
+    if [ -n "${VM_IP_FIXO:-}" ] && ! ipv4_valido "$VM_IP_FIXO"; then
+        REDE_CONFIG_ERRO="VM_IP_FIXO='$VM_IP_FIXO' não é um IPv4 válido."
+        return 1
+    fi
+    if [ -n "${IP_FIXO_HOST:-}" ] && ! ipv4_valido "$IP_FIXO_HOST"; then
+        REDE_CONFIG_ERRO="IP_FIXO_HOST='$IP_FIXO_HOST' não é um IPv4 válido."
+        return 1
+    fi
+}
+
+exigir_config_rede() {
+    validar_config_rede \
+        || falhar "$REDE_CONFIG_ERRO Rode: bash etapas/02-detectar-config.sh --redetectar"
 }
 
 # --- Interação ----------------------------------------------------------------

@@ -5,7 +5,7 @@
 # (pode também ser editado à mão; os scripts fazem "source" dele).
 #
 # Cada variável corresponde a um "placeholder" do manual
-# Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
+# Velho_Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
 # todos os valores de hardware devem vir da detecção feita no SEU sistema.
 #
 # Para usar este modelo manualmente:
@@ -60,9 +60,26 @@ ISO_WINDOWS=""                   # caminho local da ISO do Windows 11
 ISO_VIRTIO=""                    # caminho local da virtio-win.iso
 
 # --- Rede (Capítulos 23 e 24) ------------------------------------------------
-INTERFACE_FISICA=""              # ex. de formato: enp5s0
-VM_IP_FIXO=""                    # IP fixo da VM (reserva DHCP no roteador)
-IP_FIXO_HOST=""                  # IP fixo do host/br0 (reserva DHCP no roteador)
+# A etapa 02 enumera interfaces físicas pelo sysfs (não pelo nome), exige a
+# escolha do uplink e grava o modo. Wi-Fi station aceita somente NAT.
+REDE_MODO=""                    # obrigatório: bridge ou nat
+INTERFACE_FISICA=""             # uplink físico escolhido em ambos os modos
+REDE_BRIDGE="br0"               # bridge Netplan do modo bridge (só Ethernet)
+
+# Modo NAT: rede libvirt DEDICADA; a rede "default" é apenas temporária na 40.
+# A etapa 60 cria/atualiza a rede sem tocar Netplan e vincula o forward ao
+# INTERFACE_FISICA. Nomes de interface Linux têm no máximo 15 caracteres.
+REDE_LIBVIRT="passthrough-nat"  # nome da rede libvirt dedicada (não use default)
+REDE_BRIDGE_LIBVIRT="virbr-vmnat" # bridge virtual criada pelo libvirt
+REDE_NAT_CIDR=""                # sub-rede privada /24; vazio = escolher uma livre
+                                 # automaticamente após testar colisões
+
+# Identidade e endereçamento da NIC. O MAC é gerado na etapa 40 e persistido;
+# configurações antigas são migradas com segurança pela etapa 60.
+VM_NIC_MAC=""                   # MAC da NIC a alterar (nunca se usa posição no XML)
+VM_IP_FIXO=""                   # bridge: reserva no roteador; NAT: reserva libvirt
+IP_FIXO_HOST=""                 # bridge: IP LAN do host; NAT: gateway virtual
+                                 # (destino SFTP usado pela VM nos dois modos)
 
 # --- Airlock: canal de transferência host <-> VM (Capítulo 24) ----------------
 TRANSFER_USER="vmtransfer"       # conta de sistema dedicada às transferências

@@ -33,7 +33,7 @@ ETAPAS=(
     "51-usb-passthrough.sh|USB passthrough (Cap. 20)|opcional|"
     "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages (Cap. 21)|auto|reboot"
     "53-cpu-isolation.sh|CPU isolation (Cap. 22)|auto|reboot"
-    "60-rede-bridge.sh|Rede em bridge (Cap. 23)|auto|"
+    "60-rede-bridge.sh|Rede final: bridge Ethernet ou NAT (Cap. 23)|auto|"
     "61-airlock.sh|Airlock: SFTP seguro (Cap. 24)|auto|"
     "70-trim-discard.sh|TRIM/discard e backups (Cap. 25)|auto|"
 )

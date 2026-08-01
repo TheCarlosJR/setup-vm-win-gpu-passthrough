@@ -8,7 +8,8 @@
 #   - TPM 2.0 emulado (swtpm)
 #   - Disco /vm/Windows11.qcow2 (qcow2 dinâmico, VirtIO, cache=none)
 #   - 2 CD-ROMs: ISO do Windows 11 + virtio-win.iso
-#   - CPU host-passthrough, rede NAT 'default' com modelo virtio (bridge: etapa 60)
+#   - CPU host-passthrough, NIC virtio em NAT 'default' TEMPORÁRIA
+#     (a etapa 60 aplica o modo final bridge ou NAT dedicado)
 #   - Vídeo QXL temporário (a GPU real entra na etapa 50)
 # Também aplica a regra AppArmor para o caminho customizado /vm.
 # ============================================================================
@@ -21,6 +22,11 @@ REGRA_APPARMOR='/vm/** rwk,'
 
 verificar() {
     [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido (etapa 02)."; v_fim; }
+    if validar_config_rede; then
+        v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 60)."
+    else
+        v_falta "$REDE_CONFIG_ERRO"
+    fi
     if [ -f "${QCOW2_PATH:-/vm/Windows11.qcow2}" ]; then
         v_ok "Disco ${QCOW2_PATH} existe."
     else
@@ -28,6 +34,13 @@ verificar() {
     fi
     if vm_existe "$VM_NAME"; then
         v_ok "VM '$VM_NAME' definida no libvirt."
+        if [ -n "${VM_NIC_MAC:-}" ]; then
+            mac_valido "$VM_NIC_MAC" \
+                && v_ok "MAC persistido da NIC: $VM_NIC_MAC" \
+                || v_falta "VM_NIC_MAC inválido: $VM_NIC_MAC"
+        else
+            v_ok "Configuração antiga: a etapa 60 registrará VM_NIC_MAC antes de alterar a NIC."
+        fi
     else
         v_falta "VM '$VM_NAME' não definida."
     fi
@@ -42,10 +55,13 @@ verificar() {
 
 exigir_nao_root
 exigir_sudo
-exigir_comando virt-install qemu-img virsh
+exigir_comando virt-install qemu-img virsh xmlstarlet
 exigir_conf VM_NAME QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS
+exigir_config_rede
+nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros para libvirt/caminhos."
 
 titulo "Capítulo 17: Criação da VM '$VM_NAME'"
+info "Modo final selecionado: $REDE_MODO via $INTERFACE_FISICA; a criação usa NAT default somente até a etapa 60."
 
 # Rede de segurança: o conf pode ter sido editado à mão depois da etapa 02.
 RAM_MAX="$(ram_max_vm_mib)"
@@ -155,9 +171,9 @@ fi
 qemu-img info "$QCOW2_PATH" | sed 's/^/  /'
 
 # ----------------------------------------------------------------------------
-# 4. Rede default do libvirt ativa (NAT, suficiente até a etapa 60)
+# 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 60)
 # ----------------------------------------------------------------------------
-titulo "4/5 Rede NAT default"
+titulo "4/5 Rede NAT default temporária"
 if ! $VIRSH net-info default 2>/dev/null | grep -q 'Active:.*yes'; then
     $VIRSH net-start default || true
     $VIRSH net-autostart default || true
@@ -193,6 +209,13 @@ virt-install \
     --video qxl \
     --sound ich9 \
     --noautoconsole
+
+VM_NIC_MAC_DETECTADO="$($VIRSH dumpxml --inactive "$VM_NAME" \
+    | xmlstarlet sel -t -v "string(/domain/devices/interface[source/@network='default'][1]/mac/@address)")"
+mac_valido "$VM_NIC_MAC_DETECTADO" \
+    || falhar "A VM foi criada, mas não foi possível obter com segurança o MAC da NIC NAT temporária."
+salvar_conf VM_NIC_MAC "${VM_NIC_MAC_DETECTADO,,}"
+ok "NIC virtio temporária em network=default; MAC persistido: $VM_NIC_MAC."
 
 echo
 ok "VM criada e instalação iniciada em segundo plano."
