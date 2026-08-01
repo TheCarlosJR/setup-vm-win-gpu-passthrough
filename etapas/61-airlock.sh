@@ -11,7 +11,8 @@
 #   3. Visão de serviço bindfs (fstab, noexec/nosuid/nodev)
 #   4. sshd endurecido global + Match User com chroot e internal-sftp
 #   5. Instalação da chave pública gerada DENTRO do Windows
-#   6. Firewall ufw: porta 22 apenas para o VM_IP_FIXO (com anti-lockout)
+#   6. Firewall ufw: porta 22 apenas para VM_IP_FIXO na interface do modo
+#      (REDE_BRIDGE em bridge; REDE_BRIDGE_LIBVIRT em NAT)
 #   7. Hook 00-airlock.sh (criação automática e idempotente a cada boot da VM)
 #
 # Uso:
@@ -25,6 +26,97 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
+REDE_BRIDGE="${REDE_BRIDGE:-br0}"
+REDE_BRIDGE_LIBVIRT="${REDE_BRIDGE_LIBVIRT:-virbr-vmnat}"
+AIRLOCK_REDE_IFACE=""
+
+interface_rede_airlock() {
+    case "${REDE_MODO:-}" in
+        bridge) echo "$REDE_BRIDGE" ;;
+        nat) echo "$REDE_BRIDGE_LIBVIRT" ;;
+        *) return 1 ;;
+    esac
+}
+
+UFW_MARCADOR="SFTP airlock - somente VM Windows"
+UFW_COLETA_ERRO=""
+UFW_REGRAS_MARCADAS=()
+UFW_REGRAS_IFACES=()
+UFW_REGRAS_IPS=()
+UFW_REGRAS_INVALIDAS=()
+REGRA_UFW_IFACE=""
+REGRA_UFW_IP=""
+
+parsear_regra_ufw_airlock() {
+    local linha="$1"
+    local -a campos=()
+    read -r -a campos <<< "$linha"
+    [ "${#campos[@]}" -eq 20 ] || return 1
+    [ "${campos[0]}" = "ufw" ] \
+        && [ "${campos[1]}" = "allow" ] \
+        && [ "${campos[2]}" = "in" ] \
+        && [ "${campos[3]}" = "on" ] \
+        && [ "${campos[5]}" = "from" ] \
+        && [ "${campos[7]}" = "to" ] \
+        && [ "${campos[8]}" = "any" ] \
+        && [ "${campos[9]}" = "port" ] \
+        && [ "${campos[10]}" = "22" ] \
+        && [ "${campos[11]}" = "proto" ] \
+        && [ "${campos[12]}" = "tcp" ] \
+        && [ "${campos[13]}" = "comment" ] \
+        && [ "${campos[14]} ${campos[15]} ${campos[16]} ${campos[17]} ${campos[18]} ${campos[19]}" = "'$UFW_MARCADOR'" ] \
+        || return 1
+    nome_interface_valido "${campos[4]}" || return 1
+    ipv4_valido "${campos[6]}" || return 1
+    REGRA_UFW_IFACE="${campos[4]}"
+    REGRA_UFW_IP="${campos[6]}"
+}
+
+coletar_regras_ufw_airlock() {
+    local modo_sudo="${1:-normal}" saida linha
+    UFW_COLETA_ERRO=""
+    UFW_REGRAS_MARCADAS=()
+    UFW_REGRAS_IFACES=()
+    UFW_REGRAS_IPS=()
+    UFW_REGRAS_INVALIDAS=()
+    if [ "$modo_sudo" = "sem-senha" ]; then
+        if ! saida="$(sudo -n ufw show added 2>/dev/null)"; then
+            UFW_COLETA_ERRO="Não foi possível consultar 'ufw show added' sem interação."
+            return 1
+        fi
+    else
+        if ! saida="$(sudo ufw show added)"; then
+            UFW_COLETA_ERRO="Falha ao consultar todas as regras adicionadas do UFW."
+            return 1
+        fi
+    fi
+    while IFS= read -r linha; do
+        [[ "$linha" == *"$UFW_MARCADOR"* ]] || continue
+        UFW_REGRAS_MARCADAS+=("$linha")
+        if parsear_regra_ufw_airlock "$linha"; then
+            UFW_REGRAS_IFACES+=("$REGRA_UFW_IFACE")
+            UFW_REGRAS_IPS+=("$REGRA_UFW_IP")
+        else
+            UFW_REGRAS_INVALIDAS+=("$linha")
+        fi
+    done <<< "$saida"
+    if [ "${#UFW_REGRAS_INVALIDAS[@]}" -gt 0 ]; then
+        UFW_COLETA_ERRO="Há ${#UFW_REGRAS_INVALIDAS[@]} regra(s) com o comentário exato, mas fora do formato seguro esperado: ${UFW_REGRAS_INVALIDAS[0]}"
+        return 1
+    fi
+}
+
+contar_regras_ufw_airlock_exatas() {
+    local iface="$1" ip="$2" i total=0
+    for i in "${!UFW_REGRAS_IFACES[@]}"; do
+        if [ "${UFW_REGRAS_IFACES[$i]}" = "$iface" ] \
+           && [ "${UFW_REGRAS_IPS[$i]}" = "$ip" ]; then
+            total=$((total + 1))
+        fi
+    done
+    printf '%s\n' "$total"
+}
+
 DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
 # Pasta de TRÂNSITO: configurável (etapa 02). Padrão: dentro do HD2.
 AIRLOCK_TRANSITO="${AIRLOCK_DIR:-$DOCS4/airlock}"
@@ -39,25 +131,51 @@ case "$AIRLOCK_TRANSITO" in
 esac
 
 verificar() {
+    if ! validar_config_rede; then
+        v_falta "$REDE_CONFIG_ERRO"
+        v_fim
+    fi
+    AIRLOCK_REDE_IFACE="$(interface_rede_airlock)"
+    if ip link show "$AIRLOCK_REDE_IFACE" >/dev/null 2>&1; then
+        v_ok "Interface do airlock: $AIRLOCK_REDE_IFACE (modo $REDE_MODO)."
+    else
+        v_falta "Interface do airlock $AIRLOCK_REDE_IFACE ausente; conclua a etapa 60."
+    fi
+    if validar_ips_interface_rede "$AIRLOCK_REDE_IFACE" "${VM_IP_FIXO:-}" "${IP_FIXO_HOST:-}"; then
+        v_ok "IPs do airlock coerentes: VM=$VM_IP_FIXO, host=$IP_FIXO_HOST."
+    else
+        v_falta "$REDE_IP_ERRO"
+    fi
     [ -n "${TRANSFER_USER:-}" ] || { v_falta "TRANSFER_USER não definido."; v_fim; }
     getent passwd "$TRANSFER_USER" >/dev/null && v_ok "Usuário $TRANSFER_USER existe." || v_falta "Usuário $TRANSFER_USER ausente."
     mountpoint -q "$AIRLOCK_BIND" && v_ok "Visão bindfs montada." || v_falta "Visão bindfs não montada."
     [ -f "$SSHD_DROPIN" ] && v_ok "Drop-in do sshd presente." || v_falta "Drop-in do sshd ausente."
     [ -s "/etc/ssh/authorized_keys/${TRANSFER_USER}" ] && v_ok "Chave pública instalada." || v_falta "Chave pública pendente."
-    if command -v ufw >/dev/null 2>&1 && sudo -n ufw status 2>/dev/null | grep -q 'Status: active'; then
-        v_ok "ufw ativo."
+    if command -v ufw >/dev/null 2>&1; then
+        if sudo -n ufw status 2>/dev/null | grep -q 'Status: active'; then
+            v_ok "ufw ativo."
+        else
+            v_falta "ufw inativo (ou sem sudo sem senha para checar)."
+        fi
+        if coletar_regras_ufw_airlock sem-senha; then
+            TOTAL_MARCADAS="${#UFW_REGRAS_MARCADAS[@]}"
+            TOTAL_EXATAS="$(contar_regras_ufw_airlock_exatas "$AIRLOCK_REDE_IFACE" "${VM_IP_FIXO:-}")"
+            if [ "$TOTAL_MARCADAS" -eq 1 ] && [ "$TOTAL_EXATAS" -eq 1 ]; then
+                v_ok "UFW contém exatamente uma regra marcada, exata para interface=$AIRLOCK_REDE_IFACE, origem=$VM_IP_FIXO, porta=22/tcp."
+            else
+                v_falta "UFW exige total marcado=1 e exato=1; encontrado marcado=$TOTAL_MARCADAS, exato=$TOTAL_EXATAS. Remova regras residuais."
+            fi
+        else
+            v_falta "$UFW_COLETA_ERRO"
+        fi
     else
-        v_falta "ufw inativo (ou sem sudo sem senha para checar)."
+        v_falta "ufw não instalado."
     fi
     [ -x "/etc/libvirt/hooks/qemu.d/${VM_NAME:-}/prepare/begin/00-airlock.sh" ] \
         && v_ok "Hook 00-airlock.sh instalado." || v_falta "Hook 00-airlock.sh ausente."
     v_fim
 }
 [ "${1:-}" = "--verificar" ] && verificar
-
-exigir_nao_root
-exigir_sudo
-exigir_conf TRANSFER_USER VM_NAME USUARIO_LINUX
 
 instalar_chave() {
     titulo "Chave pública do Windows -> /etc/ssh/authorized_keys/$TRANSFER_USER"
@@ -85,15 +203,31 @@ COMO
 }
 
 if [ "${1:-}" = "--instalar-chave" ]; then
+    exigir_nao_root
+    exigir_sudo
+    exigir_conf TRANSFER_USER
+    nome_usuario_valido "$TRANSFER_USER" \
+        || falhar "TRANSFER_USER='$TRANSFER_USER' não é um nome de usuário seguro."
     sudo mkdir -p /etc/ssh/authorized_keys
     sudo chmod 755 /etc/ssh/authorized_keys
     instalar_chave
     exit 0
 fi
 
-titulo "Capítulo 24: Airlock (usuário: $TRANSFER_USER, VM: $VM_NAME)"
+exigir_nao_root
+exigir_sudo
+exigir_conf TRANSFER_USER VM_NAME USUARIO_LINUX REDE_MODO INTERFACE_FISICA VM_IP_FIXO IP_FIXO_HOST
+exigir_config_rede
+nome_usuario_valido "$TRANSFER_USER" \
+    || falhar "TRANSFER_USER='$TRANSFER_USER' não é um nome de usuário seguro."
+nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros para caminhos."
+AIRLOCK_REDE_IFACE="$(interface_rede_airlock)"
+ip link show "$AIRLOCK_REDE_IFACE" >/dev/null 2>&1 \
+    || falhar "Interface $AIRLOCK_REDE_IFACE ausente; conclua e verifique a etapa 60 primeiro."
+validar_ips_interface_rede "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO" "$IP_FIXO_HOST" \
+    || falhar "$REDE_IP_ERRO"
 
-# Caminhos configuráveis: impedir combinação que criaria montagem sobre si mesma
+titulo "Capítulo 24: Airlock (modo: $REDE_MODO; interface: $AIRLOCK_REDE_IFACE; VM: $VM_NAME)"
 case "$AIRLOCK_TRANSITO" in
     /*) : ;;
     *)  falhar "AIRLOCK_DIR precisa ser um caminho absoluto (está: '$AIRLOCK_TRANSITO')." ;;
@@ -211,31 +345,53 @@ fi
 # ----------------------------------------------------------------------------
 # 6. Firewall (ufw)
 # ----------------------------------------------------------------------------
-titulo "6/7 Firewall (ufw)"
-if [ -z "${VM_IP_FIXO:-}" ]; then
-    aviso "VM_IP_FIXO não definido (reserva DHCP da etapa 60 pendente)."
-    aviso "Firewall NÃO configurado agora; rode esta etapa de novo depois da reserva."
+titulo "6/7 Firewall (ufw: $AIRLOCK_REDE_IFACE <- $VM_IP_FIXO)"
+dpkg -s ufw >/dev/null 2>&1 || { sudo apt update; sudo apt install -y ufw; }
+
+# O comentário é a identidade da regra gerenciada. Captura e valida TODAS as
+# ocorrências antes de qualquer adição; uma ocorrência não parseável fecha o
+# fluxo em vez de deixar uma abertura residual sem controle.
+coletar_regras_ufw_airlock normal || falhar "$UFW_COLETA_ERRO"
+if confirmar "Você acessa este host por SSH de OUTRO dispositivo (ex.: notebook)?"; then
+    IP_ADMIN="$(perguntar 'IPv4 do dispositivo administrador' '')"
+    if [ -n "$IP_ADMIN" ]; then
+        ipv4_valido "$IP_ADMIN" || falhar "IPv4 do administrador inválido: '$IP_ADMIN'."
+        sudo ufw allow from "$IP_ADMIN" to any port 22 proto tcp comment 'SSH admin'
+        ok "Regra anti-lockout criada para $IP_ADMIN."
+    fi
+fi
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+for IDX_REGRA in "${!UFW_REGRAS_MARCADAS[@]}"; do
+    IFACE_ANTIGA="${UFW_REGRAS_IFACES[$IDX_REGRA]}"
+    IP_ANTIGO="${UFW_REGRAS_IPS[$IDX_REGRA]}"
+    if ! sudo ufw --force delete allow in on "$IFACE_ANTIGA" from "$IP_ANTIGO" \
+        to any port 22 proto tcp comment "$UFW_MARCADOR" >/dev/null; then
+        falhar "Falha ao remover regra UFW marcada em interface=$IFACE_ANTIGA, origem=$IP_ANTIGO; nenhuma regra nova foi adicionada."
+    fi
+done
+coletar_regras_ufw_airlock normal || falhar "$UFW_COLETA_ERRO"
+[ "${#UFW_REGRAS_MARCADAS[@]}" -eq 0 ] \
+    || falhar "Ainda existem ${#UFW_REGRAS_MARCADAS[@]} regras UFW marcadas após a remoção; adição recusada."
+ok "Cardinalidade UFW marcada confirmada em zero antes da adição."
+
+sudo ufw allow in on "$AIRLOCK_REDE_IFACE" from "$VM_IP_FIXO" \
+    to any port 22 proto tcp comment "$UFW_MARCADOR"
+coletar_regras_ufw_airlock normal || falhar "$UFW_COLETA_ERRO"
+TOTAL_MARCADAS="${#UFW_REGRAS_MARCADAS[@]}"
+TOTAL_EXATAS="$(contar_regras_ufw_airlock_exatas "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO")"
+[ "$TOTAL_MARCADAS" -eq 1 ] && [ "$TOTAL_EXATAS" -eq 1 ] \
+    || falhar "Pós-condição UFW falhou: esperado marcado=1/exato=1 para $AIRLOCK_REDE_IFACE <- $VM_IP_FIXO porta 22/tcp; encontrado marcado=$TOTAL_MARCADAS/exato=$TOTAL_EXATAS."
+ok "UFW confirmado com exatamente uma regra marcada e exata para interface/IP/porta/protocolo atuais."
+echo
+aviso "Política: tudo que não for liberado explicitamente será bloqueado na entrada."
+if confirmar "Ativar o ufw agora?"; then
+    sudo ufw --force enable
+    sudo ufw status verbose
+    ok "Firewall ativo e persistente entre boots."
 else
-    dpkg -s ufw >/dev/null 2>&1 || { sudo apt update; sudo apt install -y ufw; }
-    if confirmar "Você acessa este host por SSH de OUTRO dispositivo (ex.: notebook)?"; then
-        IP_ADMIN="$(perguntar 'IP do dispositivo administrador' '')"
-        if [ -n "$IP_ADMIN" ]; then
-            sudo ufw allow from "$IP_ADMIN" to any port 22 proto tcp comment 'SSH admin'
-            ok "Regra anti-lockout criada para $IP_ADMIN."
-        fi
-    fi
-    sudo ufw default deny incoming
-    sudo ufw default allow outgoing
-    sudo ufw allow in on br0 from "$VM_IP_FIXO" to any port 22 proto tcp comment 'SFTP airlock - somente VM Windows'
-    echo
-    aviso "Política: TUDO que não for liberado explicitamente será bloqueado na entrada."
-    if confirmar "Ativar o ufw agora?"; then
-        sudo ufw --force enable
-        sudo ufw status verbose
-        ok "Firewall ativo e persistente entre boots."
-    else
-        aviso "ufw configurado mas NÃO ativado (ative depois com: sudo ufw enable)."
-    fi
+    aviso "ufw configurado mas NÃO ativado (ative depois com: sudo ufw enable)."
 fi
 
 # ----------------------------------------------------------------------------
@@ -297,6 +453,11 @@ echo
 titulo "Como testar (as 7 verificações do Capítulo 24)"
 IP_FIXO_HOST_DISPLAY="${IP_FIXO_HOST:-<IP_FIXO_HOST>}"
 SUBDIR="$(basename "$AIRLOCK_BIND")"
+if [ "$REDE_MODO" = "bridge" ]; then
+    TESTE_FIREWALL="de OUTRO dispositivo da LAN a porta 22 deve dar TIMEOUT; da VM, conecta"
+else
+    TESTE_FIREWALL="a LAN não possui rota para a sub-rede NAT; confirme que a regra existe SOMENTE em $AIRLOCK_REDE_IFACE para $VM_IP_FIXO"
+fi
 cat <<TESTES
 1. Visão:        mount | grep airlock  (tipo fuse.bindfs) - teste de escrita já feito acima.
 2. sshd:         sudo sshd -t (sem saída) e systemctl status ssh.
@@ -305,8 +466,8 @@ cat <<TESTES
                  O que você envia aparece em $AIRLOCK_TRANSITO (e vice-versa).
 4. Confinamento: no WinSCP, subir para / mostra APENAS $SUBDIR/.
 5. Autenticação: ssh sem chave -> "Permission denied (publickey)" imediato.
-6. Firewall:     de OUTRO dispositivo da LAN a porta 22 deve dar TIMEOUT;
-                 da VM, conecta. (Teste negativo importante!)
+6. Firewall:     $TESTE_FIREWALL.
+                 Verifique: sudo ufw show added (interface $AIRLOCK_REDE_IFACE).
 7. Hook:         com a VM desligada: sudo umount $AIRLOCK_BIND; iniciar a VM;
                  journalctl -t hook-qemu -b deve registrar a remontagem.
 
