@@ -10,8 +10,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
-PACOTES=(ntfs-3g pciutils usbutils dmidecode curl wget git htop xmlstarlet
-         rsync xdg-user-dirs openssh-client)
+PACOTES=(ntfs-3g pciutils usbutils dmidecode curl wget git htop xmlstarlet)
 
 verificar() {
     local p

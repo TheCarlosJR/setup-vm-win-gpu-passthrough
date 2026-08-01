@@ -36,13 +36,46 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     exit 0
 fi
 
-info "Driver não encontrado. Versões disponíveis nos repositórios:"
+info "Driver não encontrado. Consultando os repositórios..."
 sudo apt update
-apt list --all-versions 2>/dev/null | grep -i '^nvidia-driver' || true
+
+# O manual usa "nvidia-driver", que é o nome do meta-pacote no Debian. No
+# Pop!_OS/Ubuntu os pacotes são versionados (nvidia-driver-550, -535, ...):
+# instalar o nome genérico falharia e abortaria a etapa. Descobrimos o que
+# existe de fato neste sistema antes de instalar.
+PACOTES=()
+if apt-cache show system76-driver-nvidia >/dev/null 2>&1; then
+    PACOTES+=(system76-driver-nvidia)
+    info "Pacote do Pop!_OS disponível: system76-driver-nvidia"
+fi
+
+if apt-cache show nvidia-driver >/dev/null 2>&1; then
+    PACOTES+=(nvidia-driver)
+    info "Meta-pacote 'nvidia-driver' disponível."
+else
+    VERSIONADO="$(apt-cache search --names-only '^nvidia-driver-[0-9]+$' 2>/dev/null \
+        | awk '{print $1}' | sort -V | tail -n1)"
+    if [ -n "$VERSIONADO" ]; then
+        info "Pacote versionado mais recente encontrado: $VERSIONADO"
+        PACOTES+=("$VERSIONADO")
+    fi
+fi
+
+if [ "${#PACOTES[@]}" -eq 0 ]; then
+    erro "Nenhum pacote de driver NVIDIA encontrado nos repositórios habilitados."
+    info "Alternativas:"
+    info "  sudo ubuntu-drivers install        (escolhe a versão recomendada)"
+    info "  Loja Pop!_Shop > 'NVIDIA'          (interface gráfica)"
+    falhar "Instale o driver por um desses caminhos e rode esta etapa novamente."
+fi
 
 echo
-info "Instalando o meta-pacote do Pop!_OS (system76-driver-nvidia + nvidia-driver)..."
-sudo apt install -y system76-driver-nvidia nvidia-driver
+info "Instalando: ${PACOTES[*]}"
+if ! sudo apt install -y "${PACOTES[@]}"; then
+    erro "A instalação falhou."
+    info "Tente: sudo ubuntu-drivers install"
+    falhar "Driver não instalado; sem ele o passthrough dinâmico (etapa 50) não funciona."
+fi
 
 echo
 ok "Instalação concluída."

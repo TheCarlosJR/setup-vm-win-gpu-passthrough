@@ -38,9 +38,29 @@ exigir_nao_root() {
     fi
 }
 
+# --- Sessão sudo: senha UMA vez por execução ---------------------------------
+# A senha NUNCA é armazenada (nem em arquivo temporário): o que é renovado é o
+# ticket do próprio sudo, a cada 50 s, enquanto o script roda. Assim etapas
+# longas (apt, rsync, virt-install) não voltam a pedir senha no meio.
+SUDO_KEEPALIVE_PID=""
+
+encerrar_sudo_keepalive() {
+    if [ -n "$SUDO_KEEPALIVE_PID" ] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
+        kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    fi
+    SUDO_KEEPALIVE_PID=""
+}
+
 exigir_sudo() {
-    info "Validando acesso sudo (a senha pode ser pedida)..."
-    sudo -v || falhar "Sem acesso sudo."
+    if ! sudo -n true 2>/dev/null; then
+        info "Acesso administrativo necessário: a senha do sudo será pedida UMA vez."
+        sudo -v || falhar "Sem acesso sudo."
+    fi
+    if [ -z "$SUDO_KEEPALIVE_PID" ]; then
+        ( while :; do sudo -n true 2>/dev/null || exit 0; sleep 50; done ) &
+        SUDO_KEEPALIVE_PID=$!
+        trap encerrar_sudo_keepalive EXIT INT TERM
+    fi
 }
 
 exigir_comando() {
@@ -51,352 +71,41 @@ exigir_comando() {
     done
 }
 
-# --- Validadores simples ------------------------------------------------------
-inteiro_positivo() {
-    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
-}
-
-indice_array_valido() {
-    # indice_array_valido ESCOLHA TAMANHO -> índice humano entre 1 e TAMANHO
-    local indice="${1:-}" tamanho="${2:-}"
-    inteiro_positivo "$indice" || return 1
-    [[ "$tamanho" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
-    [ "${#indice}" -le 18 ] && [ "${#tamanho}" -le 18 ] || return 1
-    (( 10#$indice <= 10#$tamanho ))
-}
-
-ipv4_valido() {
-    local ip="${1:-}" octeto
-    local -a octetos
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    IFS='.' read -r -a octetos <<< "$ip"
-    for octeto in "${octetos[@]}"; do
-        [ "${#octeto}" -eq 1 ] || [ "${octeto:0:1}" != "0" ] || return 1
-        (( 10#$octeto <= 255 )) || return 1
-    done
-}
-
 # --- Configuração central (passthrough.conf) ---------------------------------
-conf_chave_permitida() {
-    case "${1:-}" in
-        USUARIO_LINUX|VM_NAME|BOOTLOADER|GPU_PCI_ID|GPU_AUDIO_PCI_ID|\
-        GPU_VENDOR_DEVICE_ID|GPU_AUDIO_VENDOR_DEVICE_ID|IOMMU_GROUP_GPU|\
-        DM_SERVICE|NVME_DEVICE|UUID_HD2|HD2_DISCO_PAI|HD1_BY_ID_PATH|\
-        DOCS4_MONTAGEM|QCOW2_PATH|QCOW2_TAMANHO|VM_RAM_MB|VM_VCPUS|\
-        VM_CORES|VM_THREADS|CPUS_VM|CPUS_HOST|HUGEPAGES_1G|ISO_WINDOWS|\
-        ISO_VIRTIO|INTERFACE_FISICA|VM_IP_FIXO|IP_FIXO_HOST|TRANSFER_USER)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-_conf_decodificar_linha() {
-    # Define _CONF_LINHA_CHAVE, _CONF_LINHA_VALOR e _CONF_LINHA_SUFIXO.
-    local linha="$1" numero="$2" resto caractere proximo valor="" i=1
-    local regex_chave='^([A-Z][A-Z0-9_]*)='
-    local regex_sufixo='^[[:blank:]]*(#.*)?$'
-
-    if [[ "$linha" =~ $regex_chave ]]; then
-        _CONF_LINHA_CHAVE="${BASH_REMATCH[1]}"
-    else
-        falhar "Linha $numero malformada em $CONF_ARQUIVO."
-    fi
-    conf_chave_permitida "$_CONF_LINHA_CHAVE" \
-        || falhar "Chave desconhecida '$_CONF_LINHA_CHAVE' na linha $numero de $CONF_ARQUIVO."
-
-    resto="${linha#*=}"
-    [ "${resto:0:1}" = '"' ] \
-        || falhar "Linha $numero malformada em $CONF_ARQUIVO: o valor deve estar entre aspas."
-
-    while [ "$i" -lt "${#resto}" ]; do
-        caractere="${resto:i:1}"
-        if [ "$caractere" = '"' ]; then
-            _CONF_LINHA_SUFIXO="${resto:i+1}"
-            [[ "$_CONF_LINHA_SUFIXO" =~ $regex_sufixo ]] \
-                || falhar "Conteúdo inválido após o valor na linha $numero de $CONF_ARQUIVO."
-            _CONF_LINHA_VALOR="$valor"
-            return 0
-        fi
-        if [ "$caractere" = '\' ]; then
-            [ $((i + 1)) -lt "${#resto}" ] \
-                || falhar "Escape incompleto na linha $numero de $CONF_ARQUIVO."
-            proximo="${resto:i+1:1}"
-            if [ "$proximo" = '\' ] || [ "$proximo" = '"' ] \
-                || [ "$proximo" = '$' ] || [ "$proximo" = '`' ]; then
-                valor+="$proximo"
-                i=$((i + 2))
-                continue
-            fi
-            # Compatibilidade com arquivos antigos: escapes que o serializer
-            # não emite são mantidos literalmente, nunca interpretados.
-            valor+='\'
-            i=$((i + 1))
-            continue
-        fi
-        valor+="$caractere"
-        i=$((i + 1))
-    done
-
-    falhar "Aspas de fechamento ausentes na linha $numero de $CONF_ARQUIVO."
-}
-
-CONF_LOCK_TIMEOUT_SEGUNDOS=10
-
-_conf_validar_metadados() {
-    local dono modo
-
-    [ -L "$CONF_ARQUIVO" ] && falhar "$CONF_ARQUIVO não pode ser um link simbólico."
-    [ -e "$CONF_ARQUIVO" ] || return 0
-    [ -f "$CONF_ARQUIVO" ] || falhar "$CONF_ARQUIVO não é um arquivo regular."
-    read -r dono modo < <(stat -c '%u %a' -- "$CONF_ARQUIVO") \
-        || falhar "Não foi possível consultar dono e permissões de $CONF_ARQUIVO."
-    [ "$dono" = "$(id -u)" ] \
-        || falhar "$CONF_ARQUIVO deve pertencer ao usuário atual."
-    [[ "$modo" =~ ^[0-7]{3,4}$ ]] \
-        || falhar "Não foi possível validar as permissões de $CONF_ARQUIVO."
-    [ $((8#$modo & 8#22)) -eq 0 ] \
-        || falhar "$CONF_ARQUIVO não pode ser gravável por grupo ou outros."
-}
-
-_conf_validar_arquivo() {
-    local carregar="${1:-0}" linha chave numero=0 status antes_nul
-    local regex_comentario='^[[:blank:]]*(#.*)?$'
-    local -A valores=()
-
-    [ -r "$CONF_ARQUIVO" ] || falhar "Sem permissão para ler $CONF_ARQUIVO."
-    if IFS= read -r -d '' antes_nul < "$CONF_ARQUIVO"; then
-        falhar "Byte NUL encontrado em $CONF_ARQUIVO."
-    fi
-    if LC_ALL=C grep -q '[[:cntrl:]]' "$CONF_ARQUIVO"; then
-        falhar "Caractere de controle encontrado em $CONF_ARQUIVO."
-    else
-        status=$?
-        [ "$status" -eq 1 ] || falhar "Não foi possível validar $CONF_ARQUIVO."
-    fi
-
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        numero=$((numero + 1))
-        [[ "$linha" =~ $regex_comentario ]] && continue
-        _conf_decodificar_linha "$linha" "$numero"
-        chave="$_CONF_LINHA_CHAVE"
-        [ -z "${valores[$chave]+definida}" ] \
-            || falhar "Chave duplicada '$chave' na linha $numero de $CONF_ARQUIVO."
-        valores[$chave]="$_CONF_LINHA_VALOR"
-    done < "$CONF_ARQUIVO"
-
-    if [ "$carregar" -eq 1 ]; then
-        for chave in "${!valores[@]}"; do
-            printf -v "$chave" '%s' "${valores[$chave]}"
-        done
-    fi
-}
-
 carregar_conf() {
-    _conf_validar_metadados
-    [ -e "$CONF_ARQUIVO" ] || return 0
-    _conf_validar_arquivo 1
-}
-
-_conf_codificar_valor() {
-    local valor="$1" caractere saida="" i
-    for ((i = 0; i < ${#valor}; i++)); do
-        caractere="${valor:i:1}"
-        if [ "$caractere" = '\' ] || [ "$caractere" = '"' ] \
-            || [ "$caractere" = '$' ] || [ "$caractere" = '`' ]; then
-            saida+='\'
-        fi
-        saida+="$caractere"
-    done
-    printf '%s' "$saida"
-}
-
-_conf_lock_fd_valido() {
-    local fd="$1" caminho="$2" processo_pid="$3"
-    local identidade_fd identidade_caminho dono modo links dispositivo inode
-
-    [ ! -L "$caminho" ] && [ -f "$caminho" ] || return 1
-    identidade_fd="$(stat -Lc '%u:%a:%h:%d:%i' -- "/proc/$processo_pid/fd/$fd" 2>/dev/null)" \
-        || return 1
-    identidade_caminho="$(stat -Lc '%u:%a:%h:%d:%i' -- "$caminho" 2>/dev/null)" \
-        || return 1
-    [ "$identidade_fd" = "$identidade_caminho" ] || return 1
-    IFS=':' read -r dono modo links dispositivo inode <<< "$identidade_fd"
-    [ "$dono" = "$(id -u)" ] && [ "$links" -eq 1 ] \
-        && [[ "$modo" =~ ^[0-7]{3,4}$ ]] \
-        && [ $((8#$modo & 8#22)) -eq 0 ]
-}
-
-_conf_com_lock() (
-    local operacao="$1" lock_fd="" processo_pid="$BASHPID"
-    local lock_arquivo="${CONF_ARQUIVO}.lock"
-    shift
-
-    _conf_limpar_lock() {
-        local status="$1"
-        trap - EXIT
-        if [[ "${lock_fd:-}" =~ ^[0-9]+$ ]]; then
-            eval "exec ${lock_fd}>&-"
-        fi
-        exit "$status"
-    }
-    trap '_conf_limpar_lock "$?"' EXIT
-    trap 'exit 1' HUP INT TERM
-
-    command -v flock >/dev/null 2>&1 \
-        || { erro "Comando 'flock' não encontrado; não é seguro atualizar $CONF_ARQUIVO."; return 1; }
-    [[ "$CONF_LOCK_TIMEOUT_SEGUNDOS" =~ ^[1-9][0-9]*$ ]] \
-        || { erro "Timeout interno inválido para o lock de configuração."; return 1; }
-    [ ! -L "$lock_arquivo" ] \
-        || { erro "$lock_arquivo não pode ser um link simbólico."; return 1; }
-
-    umask 077
-    exec {lock_fd}<>"$lock_arquivo" \
-        || { erro "Não foi possível abrir o lock dedicado $lock_arquivo."; return 1; }
-    _conf_lock_fd_valido "$lock_fd" "$lock_arquivo" "$processo_pid" \
-        || { erro "O arquivo de lock $lock_arquivo não é seguro."; return 1; }
-    chmod 0600 -- "/proc/$processo_pid/fd/$lock_fd" \
-        || { erro "Não foi possível proteger $lock_arquivo."; return 1; }
-
-    if ! flock -w "$CONF_LOCK_TIMEOUT_SEGUNDOS" "$lock_fd"; then
-        erro "Tempo esgotado após ${CONF_LOCK_TIMEOUT_SEGUNDOS}s aguardando o lock de $CONF_ARQUIVO."
-        return 1
+    if [ -f "$CONF_ARQUIVO" ]; then
+        # shellcheck disable=SC1090
+        source "$CONF_ARQUIVO"
     fi
-    _conf_lock_fd_valido "$lock_fd" "$lock_arquivo" "$processo_pid" \
-        || { erro "O arquivo de lock $lock_arquivo mudou durante a espera."; return 1; }
-
-    "$operacao" "$@"
-)
-
-_conf_gravar_atomico() (
-    local linha chave codificado numero=0 temporario="" conf_destino="$CONF_ARQUIVO"
-    local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}"
-    local regex_comentario='^[[:blank:]]*(#.*)?$'
-    local -a ordem=()
-    local -A novos=() encontrados=()
-
-    trap 'status=$?; [ -z "$temporario" ] || rm -f -- "$temporario"; exit "$status"' EXIT
-    trap 'exit 1' HUP INT TERM
-
-    while [ "$#" -gt 0 ]; do
-        chave="$1"; codificado="$2"; shift 2
-        ordem+=("$chave")
-        novos[$chave]="$codificado"
-    done
-
-    _conf_validar_metadados
-    if [ -e "$CONF_ARQUIVO" ]; then
-        _conf_validar_arquivo 0
-    fi
-
-    temporario="$(mktemp -- "$diretorio/.${nome}.tmp.XXXXXX")" || return 1
-    chmod 0600 "$temporario" || return 1
-
-    {
-        if [ -e "$CONF_ARQUIVO" ]; then
-            while IFS= read -r linha || [ -n "$linha" ]; do
-                numero=$((numero + 1))
-                if [[ "$linha" =~ $regex_comentario ]]; then
-                    printf '%s\n' "$linha" || return 1
-                    continue
-                fi
-                _conf_decodificar_linha "$linha" "$numero"
-                chave="$_CONF_LINHA_CHAVE"
-                if [ -n "${novos[$chave]+definida}" ]; then
-                    printf '%s="%s"%s\n' \
-                        "$chave" "${novos[$chave]}" "$_CONF_LINHA_SUFIXO" || return 1
-                    encontrados[$chave]=1
-                else
-                    printf '%s\n' "$linha" || return 1
-                fi
-            done < "$CONF_ARQUIVO"
-        fi
-        for chave in "${ordem[@]}"; do
-            if [ -z "${encontrados[$chave]+definida}" ]; then
-                printf '%s="%s"\n' "$chave" "${novos[$chave]}" || return 1
-            fi
-        done
-    } > "$temporario" || return 1
-
-    # Recarrega o batch completo pelo parser seguro sem alterar as variáveis
-    # já carregadas e sem tentar adquirir novamente o lock ainda mantido.
-    CONF_ARQUIVO="$temporario"
-    _conf_validar_arquivo 0 || return 1
-    CONF_ARQUIVO="$conf_destino"
-
-    mv -f -- "$temporario" "$CONF_ARQUIVO" || return 1
-    temporario=""
-)
-
-_conf_inicializar_atomico() (
-    local modelo="$1" temporario="" conf_destino="$CONF_ARQUIVO"
-    local diretorio="${CONF_ARQUIVO%/*}" nome="${CONF_ARQUIVO##*/}"
-
-    trap 'status=$?; [ -z "$temporario" ] || rm -f -- "$temporario"; exit "$status"' EXIT
-    trap 'exit 1' HUP INT TERM
-
-    _conf_validar_metadados
-    if [ -e "$CONF_ARQUIVO" ]; then
-        _conf_validar_arquivo 0
-        return 0
-    fi
-    [ ! -L "$modelo" ] && [ -f "$modelo" ] && [ -r "$modelo" ] \
-        || falhar "Modelo de configuração inválido ou ilegível: $modelo"
-
-    temporario="$(mktemp -- "$diretorio/.${nome}.tmp.XXXXXX")" || return 1
-    cp -- "$modelo" "$temporario" || return 1
-    chmod 0600 "$temporario" || return 1
-    CONF_ARQUIVO="$temporario"
-    _conf_validar_arquivo 0
-    CONF_ARQUIVO="$conf_destino"
-    mv -f -- "$temporario" "$CONF_ARQUIVO" || return 1
-    temporario=""
-)
-
-inicializar_conf() {
-    [ "$#" -eq 1 ] || falhar "Uso: inicializar_conf MODELO"
-    _conf_com_lock _conf_inicializar_atomico "$1" \
-        || falhar "Falha ao inicializar $CONF_ARQUIVO de forma segura."
 }
 
-salvar_conf_multiplos() {
-    # salvar_conf_multiplos CHAVE VALOR [CHAVE VALOR ...]
-    [ "$#" -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] \
-        || falhar "Uso: salvar_conf_multiplos CHAVE VALOR [CHAVE VALOR ...]"
-    local chave valor i
-    local -a codificados=() originais=()
-    local -A vistos=()
-
-    while [ "$#" -gt 0 ]; do
-        chave="$1"; valor="$2"; shift 2
-        conf_chave_permitida "$chave" \
-            || falhar "Chave de configuração não permitida: '$chave'."
-        [ -z "${vistos[$chave]+definida}" ] \
-            || falhar "Chave repetida na atualização múltipla: '$chave'."
-        if [[ "$valor" =~ [[:cntrl:]] ]]; then
-            falhar "O valor de '$chave' contém newline, CR, NUL ou outro caractere de controle."
-        fi
-        vistos[$chave]=1
-        originais+=("$chave" "$valor")
-        codificados+=("$chave" "$(_conf_codificar_valor "$valor")")
-    done
-
-    _conf_com_lock _conf_gravar_atomico "${codificados[@]}" \
-        || falhar "Falha ao atualizar $CONF_ARQUIVO de forma atômica."
-
-    for ((i = 0; i < ${#originais[@]}; i += 2)); do
-        chave="${originais[$i]}"; valor="${originais[$((i + 1))]}"
-        printf -v "$chave" '%s' "$valor"
-        export "$chave"
-    done
+_citar_shell() {
+    # Envolve o valor em aspas SIMPLES, escapando aspas simples internas.
+    # O conf é lido com "source": sem isso, um valor com $(...) ou ` ` seria
+    # EXECUTADO na próxima carga (o usuário digita esses valores à mão).
+    local v="$1"
+    printf "'%s'" "${v//\'/\'\\\'\'}"
 }
 
 salvar_conf() {
-    # salvar_conf CHAVE VALOR -> compatibilidade para atualização individual
-    [ "$#" -eq 2 ] || falhar "Uso: salvar_conf CHAVE VALOR"
-    salvar_conf_multiplos "$@"
+    # salvar_conf CHAVE VALOR -> cria/atualiza a linha CHAVE='VALOR' no conf
+    local chave="$1" valor="$2" tmp
+    touch "$CONF_ARQUIVO"
+    if grep -q "^${chave}=" "$CONF_ARQUIVO"; then
+        # awk (e não sed) porque o valor pode conter |, & e / de caminhos
+        tmp="$(mktemp)"
+        CONF_CHAVE="$chave" CONF_LINHA="${chave}=$(_citar_shell "$valor")" \
+        awk 'BEGIN { k = ENVIRON["CONF_CHAVE"]; l = ENVIRON["CONF_LINHA"] }
+             index($0, k "=") == 1 && !feito { print l; feito = 1; next }
+             { print }' "$CONF_ARQUIVO" > "$tmp"
+        cat "$tmp" > "$CONF_ARQUIVO"   # preserva permissões do arquivo original
+        rm -f "$tmp"
+    else
+        printf '%s=%s\n' "$chave" "$(_citar_shell "$valor")" >> "$CONF_ARQUIVO"
+    fi
+    # exporta para o processo atual também
+    printf -v "$chave" '%s' "$valor"
+    export "${chave?}"
 }
 
 exigir_conf() {
@@ -441,6 +150,98 @@ perguntar() {
         read -r -p "$texto: " resposta
         echo "$resposta"
     fi
+}
+
+perguntar_inteiro() {
+    # perguntar_inteiro "texto" PADRAO MIN MAX -> imprime um inteiro VÁLIDO.
+    # Repergunta em vez de deixar o script morrer com valor fora da faixa ou
+    # com texto no lugar de número (proteção de interface).
+    local texto="$1" padrao="${2:-}" min="$3" max="$4" resposta
+    while :; do
+        resposta="$(perguntar "$texto ($min-$max)" "$padrao")"
+        if [[ "$resposta" =~ ^[0-9]+$ ]] && [ "$resposta" -ge "$min" ] && [ "$resposta" -le "$max" ]; then
+            echo "$resposta"
+            return 0
+        fi
+        erro "Valor inválido: '${resposta}'. Informe um número inteiro entre $min e $max."
+    done
+}
+
+escolher_da_lista() {
+    # escolher_da_lista "pergunta" sim|nao item1 item2 ...
+    # Lista os itens numerados (em stderr) e imprime no stdout o ÍNDICE
+    # escolhido: 1..N, ou 0 quando "nenhum" é permitido e o usuário escolhe 0.
+    local pergunta="$1" permitir_nenhum="$2"
+    shift 2
+    local itens=("$@") i min=1 padrao=""
+    for i in "${!itens[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "${itens[$i]}" >&2
+    done
+    if [ "$permitir_nenhum" = "sim" ]; then
+        printf '  0) nenhum\n' >&2
+        min=0
+    fi
+    [ "${#itens[@]}" -eq 1 ] && [ "$min" -eq 1 ] && padrao=1
+    perguntar_inteiro "$pergunta" "$padrao" "$min" "${#itens[@]}"
+}
+
+# --- Discos: identificação segura (nunca /dev/sdX chumbado) --------------------
+disco_de() {
+    # disco_de /dev/sda3 -> /dev/sda ; /dev/nvme0n1p2 -> /dev/nvme0n1
+    # Sobe na hierarquia até encontrar um dispositivo do tipo "disk", para
+    # funcionar também com LVM/LUKS (/dev/mapper/...).
+    local atual="$1" tipo pk _i
+    [ -n "$atual" ] || return 1
+    for _i in 1 2 3 4 5; do
+        tipo="$(lsblk -no TYPE "$atual" 2>/dev/null | head -n1 | tr -d ' ')"
+        [ "$tipo" = "disk" ] && { echo "$atual"; return 0; }
+        pk="$(lsblk -no PKNAME "$atual" 2>/dev/null | head -n1 | tr -d ' ')"
+        [ -n "$pk" ] || return 1
+        atual="/dev/$pk"
+    done
+    return 1
+}
+
+disco_raiz() {
+    # Disco físico que contém a raiz (/) do Linux: JAMAIS pode ir para a VM.
+    local fonte
+    fonte="$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*\]$//')"
+    [ -n "$fonte" ] || return 1
+    disco_de "$fonte"
+}
+
+disco_em_uso_pelo_host() {
+    # 0 se qualquer partição do disco estiver montada no host (ou for a raiz).
+    local disco="$1" raiz
+    raiz="$(disco_raiz 2>/dev/null || true)"
+    [ -n "$raiz" ] && [ "$disco" = "$raiz" ] && return 0
+    lsblk -nlo NAME,MOUNTPOINT "$disco" 2>/dev/null \
+        | awk 'NF>1 && $2!="" {encontrado=1} END{exit !encontrado}'
+}
+
+# --- Memória ---------------------------------------------------------------------
+ram_total_mib() { awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo; }
+
+ram_reserva_host_mib() {
+    # Reserva mínima do host: 25% do total, nunca abaixo de 4 GiB nem acima de 8.
+    local total reserva
+    total="$(ram_total_mib)"
+    reserva=$((total / 4))
+    [ "$reserva" -lt 4096 ] && reserva=4096
+    [ "$reserva" -gt 8192 ] && reserva=8192
+    echo "$reserva"
+}
+
+ram_max_vm_mib() {
+    # Teto para a VM: total menos a reserva do host, arredondado para baixo em
+    # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 52).
+    local total reserva max
+    total="$(ram_total_mib)"
+    reserva="$(ram_reserva_host_mib)"
+    max=$((total - reserva))
+    max=$(((max / 1024) * 1024))
+    [ "$max" -lt 1024 ] && max=0
+    echo "$max"
 }
 
 # --- Bootloader e parâmetros de kernel (Capítulos 15 e 16) --------------------

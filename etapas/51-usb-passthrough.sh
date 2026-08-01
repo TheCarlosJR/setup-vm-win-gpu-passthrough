@@ -43,9 +43,11 @@ if [ "${1:-}" = "--remover" ]; then
     titulo "Remover USB passthrough da VM $VM_NAME"
     mapfile -t ATUAIS < <(listar_usb_xml | sed '/^$/d')
     [ "${#ATUAIS[@]}" -gt 0 ] || { info "Nenhum hostdev USB no XML."; exit 0; }
-    i=1
-    for a in "${ATUAIS[@]}"; do echo "  $i) vendor=$(cut -d' ' -f1 <<<"$a") product=$(cut -d' ' -f2 <<<"$a")"; i=$((i+1)); done
-    ESCOLHA="$(perguntar 'Qual remover? (número)' '1')"
+    DESCRICOES=()
+    for a in "${ATUAIS[@]}"; do
+        DESCRICOES+=("vendor=$(cut -d' ' -f1 <<<"$a") product=$(cut -d' ' -f2 <<<"$a")")
+    done
+    ESCOLHA="$(escolher_da_lista 'Qual remover? (número)' nao "${DESCRICOES[@]}")"
     SEL="${ATUAIS[$((ESCOLHA-1))]}"
     VEND="$(cut -d' ' -f1 <<<"$SEL")"; PROD="$(cut -d' ' -f2 <<<"$SEL")"
     xml_backup "$VM_NAME"
@@ -65,19 +67,23 @@ XML
 fi
 
 titulo "Capítulo 20: USB passthrough (VM: $VM_NAME)"
-info "Dispositivos USB conectados agora:"
 mapfile -t LINHAS < <(lsusb)
-i=1
-for l in "${LINHAS[@]}"; do echo "  $i) $l"; i=$((i+1)); done
+[ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
 echo
 aviso "O dispositivo escolhido fica EXCLUSIVO da VM enquanto ela estiver ligada."
 aviso "Nunca passe o ÚNICO teclado do host: ele é necessário para o TTY de emergência (Capítulo 29)."
 
 while :; do
-    ESCOLHA="$(perguntar 'Número do dispositivo para passar à VM (ENTER para terminar)' '')"
-    [ -n "$ESCOLHA" ] || break
+    echo
+    echo "Dispositivos USB conectados agora (0 = terminar):"
+    ESCOLHA="$(escolher_da_lista 'Dispositivo para passar à VM' sim "${LINHAS[@]}")"
+    [ "$ESCOLHA" -eq 0 ] && break
     LINHA="${LINHAS[$((ESCOLHA-1))]}"
     PAR="$(grep -oE 'ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}' <<< "$LINHA" | awk '{print $2}')"
+    if [ -z "$PAR" ]; then
+        erro "Não consegui extrair vendor:product de: $LINHA"
+        continue
+    fi
     VEND="${PAR%%:*}"; PROD="${PAR##*:}"
     echo "Selecionado: $LINHA  (vendor=0x$VEND product=0x$PROD)"
     confirmar "Confirmar?" || continue

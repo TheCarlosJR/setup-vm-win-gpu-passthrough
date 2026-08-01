@@ -8,11 +8,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 PACOTES=(qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients bridge-utils
-         virt-manager ovmf swtpm swtpm-tools virtinst cpu-checker)
+         virt-manager ovmf swtpm swtpm-tools virtinst)
 
 verificar() {
     local p
-    for p in "${PACOTES[@]}"; do
+    for p in qemu-kvm libvirt-daemon-system virt-manager ovmf swtpm virtinst; do
         dpkg -s "$p" >/dev/null 2>&1 && v_ok "$p instalado." || v_falta "$p ausente."
     done
     if systemctl is-active --quiet libvirtd; then
@@ -42,6 +42,9 @@ sudo systemctl status libvirtd --no-pager | head -n 5
 
 titulo "Verificações do capítulo"
 info "Aceleração KVM:"
+if ! command -v kvm-ok >/dev/null 2>&1; then
+    sudo apt install -y cpu-checker
+fi
 kvm-ok || aviso "kvm-ok reprovou: revise SVM na BIOS (etapa 01/Capítulo 12)."
 
 info "Firmware OVMF:"

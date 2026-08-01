@@ -2,8 +2,7 @@
 # passthrough.conf - configuração central dos scripts
 # ============================================================================
 # Este arquivo é gerado/atualizado por: etapas/02-detectar-config.sh
-# (pode também ser editado à mão no formato restrito CHAVE="valor"; este
-# arquivo contém apenas dados e nunca é interpretado como shell executável).
+# (pode também ser editado à mão; os scripts fazem "source" dele).
 #
 # Cada variável corresponde a um "placeholder" do manual
 # Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
@@ -35,14 +34,20 @@ DM_SERVICE=""
 # --- Discos (Capítulos 5, 11 e 19) ------------------------------------------
 NVME_DEVICE=""                   # ex. de formato: /dev/nvme0n1
 UUID_HD2=""                      # <UUID_HD2> (obtido com blkid)
-HD2_DISCO_PAI=""                 # derivado automaticamente de UUID_HD2
-HD1_BY_ID_PATH=""                # caminho completo /dev/disk/by-id/... do HD1
-DOCS4_MONTAGEM="/mnt/docs4"
+HD2_DISCO_PAI=""                 # preenchido pela etapa 02: disco físico do HD2,
+                                 # usado para nunca oferecê-lo à VM por engano
+HD1_BY_ID_PATH=""                # disco inteiro entregue à VM (/dev/disk/by-id/...)
+                                 # VAZIO = nenhum: a VM usa somente o QCOW2
+HD1_DISPENSADO=""                # "sim" quando você escolheu NÃO usar disco físico
+                                 # (evita a etapa 02 reperguntar a cada execução)
+DOCS4_MONTAGEM="/mnt/docs4"      # onde o HD2 (documentos) é montado
 
 # --- VM (Capítulos 17 e 21) --------------------------------------------------
 QCOW2_PATH="/vm/Windows11.qcow2"
 QCOW2_TAMANHO="250G"
-VM_RAM_MB="16384"                # RAM da VM em MiB
+VM_RAM_MB="16384"                # RAM da VM em MiB. TETO imposto pela etapa 02:
+                                 # total do host menos a reserva do host
+                                 # (25% do total, entre 4 e 8 GiB)
 VM_VCPUS="12"                    # total de vCPUs (VM_CORES x VM_THREADS)
 VM_CORES="6"                     # núcleos físicos dedicados à VM
 VM_THREADS="2"                   # threads por núcleo (SMT)
@@ -59,5 +64,15 @@ INTERFACE_FISICA=""              # ex. de formato: enp5s0
 VM_IP_FIXO=""                    # IP fixo da VM (reserva DHCP no roteador)
 IP_FIXO_HOST=""                  # IP fixo do host/br0 (reserva DHCP no roteador)
 
-# --- Airlock (Capítulo 24) ----------------------------------------------------
+# --- Airlock: canal de transferência host <-> VM (Capítulo 24) ----------------
 TRANSFER_USER="vmtransfer"       # conta de sistema dedicada às transferências
+AIRLOCK_DIR=""                   # pasta de TRÂNSITO dos arquivos (configurável).
+                                 # Vazio = $DOCS4_MONTAGEM/airlock (padrão).
+                                 # Pode ficar em qualquer caminho local; se
+                                 # estiver fora do HD2, a montagem da visão não
+                                 # depende mais do docs4.
+AIRLOCK_BIND="/srv/airlock/files"  # visão de serviço exposta pelo SFTP (chroot)
+
+# --- Backups da VM (Capítulo 25) ----------------------------------------------
+BACKUPS_VM_DIR=""                # destino dos backups do QCOW2.
+                                 # Vazio = $DOCS4_MONTAGEM/backups-vm (padrão)

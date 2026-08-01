@@ -112,6 +112,21 @@ titulo "Fase B: HugePages de 1 GiB"
 if [ $((VM_RAM_MB % 1024)) -ne 0 ]; then
     falhar "VM_RAM_MB=$VM_RAM_MB não é múltiplo de 1024; ajuste no passthrough.conf."
 fi
+# A reserva sempre acompanha a RAM da VM: um HUGEPAGES_1G defasado (conf antigo,
+# edição manual) reservaria memória a mais ou a menos.
+if [ "$((HUGEPAGES_1G * 1024))" -ne "$VM_RAM_MB" ]; then
+    aviso "HUGEPAGES_1G ($HUGEPAGES_1G GiB) não corresponde a VM_RAM_MB ($VM_RAM_MB MiB); corrigindo."
+    salvar_conf HUGEPAGES_1G "$((VM_RAM_MB / 1024))"
+fi
+# Trava de segurança: HugePages saem do pool do host PERMANENTEMENTE (mesmo com
+# a VM desligada). Reservar além do teto deixa o host sem memória para subir a
+# sessão gráfica, cenário difícil de reverter sem TTY.
+RAM_MAX="$(ram_max_vm_mib)"
+if [ "$((HUGEPAGES_1G * 1024))" -gt "$RAM_MAX" ]; then
+    erro "Reserva pedida: $((HUGEPAGES_1G * 1024)) MiB. Teto seguro deste host: $RAM_MAX MiB."
+    erro "O host ficaria sem memória suficiente para funcionar após o reboot."
+    falhar "Corrija com: bash etapas/02-detectar-config.sh --redetectar"
+fi
 if ! grep -qi pdpe1gb /proc/cpuinfo; then
     aviso "CPU sem flag pdpe1gb (HugePages de 1 GiB indisponíveis)."
     falhar "Ajuste manual necessário (páginas de 2 MiB); o Ryzen 7 5700X do manual suporta 1 GiB."

@@ -96,6 +96,12 @@ if [ "${1:-}" = "--status" ]; then
     exit 0
 fi
 
+exigir_nao_root
+# Senha do sudo pedida UMA vez, aqui: o ticket é renovado em segundo plano
+# enquanto o menu estiver aberto, e as etapas filhas herdam essa sessão.
+# A senha em si nunca é guardada em arquivo.
+exigir_sudo
+
 while :; do
     imprimir_lista
     echo
