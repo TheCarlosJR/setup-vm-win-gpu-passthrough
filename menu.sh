@@ -14,6 +14,14 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 carregar_conf
 
+# Verificadores de boot usam sudo -n apenas para leitura. No modo --status não
+# há prompt: sem ticket em cache, 52/53 ficam explicitamente indeterminadas em
+# vez de serem confundidas com configuração pendente.
+STATUS_PRIVILEGIADO=0
+if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    STATUS_PRIVILEGIADO=1
+fi
+
 # arquivo|título|tipo(auto/manual/opcional)|pós-execução(reboot/logout/vazio)
 ETAPAS=(
     "00-inventario.sh|Inventário de hardware (Cap. 3)|auto|"
@@ -31,8 +39,8 @@ ETAPAS=(
     "41-instalacao-windows.sh|Instalar o Windows na VM (Cap. 18)|manual|"
     "50-hooks-gpu-hd1.sh|Hooks da GPU e HD1 físico (Cap. 19)|auto|"
     "51-usb-passthrough.sh|USB passthrough (Cap. 20)|opcional|"
-    "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages (Cap. 21)|auto|reboot"
-    "53-cpu-isolation.sh|CPU isolation (Cap. 22)|auto|reboot"
+    "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages (Cap. 21)|opcional|reboot"
+    "53-cpu-isolation.sh|CPU isolation (Cap. 22)|opcional|reboot"
     "60-rede-bridge.sh|Rede final: bridge Ethernet ou NAT (Cap. 23)|auto|"
     "61-airlock.sh|Airlock: SFTP seguro (Cap. 24)|auto|"
     "70-trim-discard.sh|TRIM/discard e backups (Cap. 25)|auto|"
@@ -48,10 +56,14 @@ UTILS=(
 )
 
 status_etapa() {
-    # imprime: ok | pendente
+    # imprime: ok | pendente | indeterminado
     local arquivo="$1"
     if bash "$PROJETO_DIR/etapas/$arquivo" --verificar >/dev/null 2>&1; then
         echo ok
+    elif [ "$STATUS_PRIVILEGIADO" -eq 0 ] \
+         && { [ "$arquivo" = 52-cpu-pinning-hugepages.sh ] \
+              || [ "$arquivo" = 53-cpu-isolation.sh ]; }; then
+        echo indeterminado
     else
         echo pendente
     fi
@@ -68,6 +80,8 @@ imprimir_lista() {
         st="$(status_etapa "$arquivo")"
         if [ "$st" = "ok" ]; then
             simbolo="${C_VERDE}[ok]${C_RESET}"
+        elif [ "$st" = "indeterminado" ]; then
+            simbolo="${C_AMARELO}[??]${C_RESET}"
         elif [ "$tipo" = "opcional" ]; then
             simbolo="${C_AZUL}[--]${C_RESET}"
         else
@@ -88,7 +102,7 @@ imprimir_lista() {
         u=$((u+1))
     done
     echo
-    echo " Legenda: [ok] concluída  [  ] pendente  [--] opcional  <reboot>/<logout> exigidos ao final"
+    echo " Legenda: [ok] concluída  [  ] pendente  [--] opcional  [??] sem privilégio de leitura  <reboot>/<logout> exigidos ao final"
 }
 
 if [ "${1:-}" = "--status" ]; then
@@ -101,6 +115,7 @@ exigir_nao_root
 # enquanto o menu estiver aberto, e as etapas filhas herdam essa sessão.
 # A senha em si nunca é guardada em arquivo.
 exigir_sudo
+STATUS_PRIVILEGIADO=1
 
 while :; do
     imprimir_lista
