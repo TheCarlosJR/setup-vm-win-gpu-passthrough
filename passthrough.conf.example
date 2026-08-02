@@ -2,7 +2,8 @@
 # passthrough.conf - configuração central dos scripts
 # ============================================================================
 # Este arquivo é gerado/atualizado por: etapas/02-detectar-config.sh
-# (pode também ser editado à mão; os scripts fazem "source" dele).
+# (pode também ser editado à mão; é lido como dados por um parser restrito,
+# nunca executado com source/eval).
 #
 # Cada variável corresponde a um "placeholder" do manual
 # Velho_Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
@@ -45,15 +46,15 @@ DOCS4_MONTAGEM="/mnt/docs4"      # onde o HD2 (documentos) é montado
 # --- VM (Capítulos 17 e 21) --------------------------------------------------
 QCOW2_PATH="/vm/Windows11.qcow2"
 QCOW2_TAMANHO="250G"
-VM_RAM_MB="16384"                # RAM da VM em MiB. TETO imposto pela etapa 02:
-                                 # total do host menos a reserva do host
-                                 # (25% do total, entre 4 e 8 GiB)
-VM_VCPUS="12"                    # total de vCPUs (VM_CORES x VM_THREADS)
-VM_CORES="6"                     # núcleos físicos dedicados à VM
-VM_THREADS="2"                   # threads por núcleo (SMT)
-CPUS_VM=""                       # ex. de formato: 0,8,1,9,2,10,3,11,4,12,5,13
-CPUS_HOST=""                     # ex. de formato: 6,14,7,15
-HUGEPAGES_1G="16"                # páginas de 1 GiB reservadas (= VM_RAM_MB/1024)
+VM_RAM_MB=""                     # derivado/confirmado pela etapa 02 em MiB;
+                                 # respeita a reserva obrigatória do host
+VM_VCPUS=""                     # derivado: quantidade real de CPUs em CPUS_VM
+VM_CORES=""                     # derivado da topologia SOCKET:CORE do host
+VM_THREADS=""                   # derivado dos siblings online por core
+CPUS_VM=""                      # derivado; aceita IDs e intervalos (ex.: 0-5,8-13)
+CPUS_HOST=""                    # derivado; cobre todo o restante sem sobreposição
+HUGEPAGES_1G=""                 # derivado exatamente de VM_RAM_MB/1024
+                                 # Etapas 52/53 são opcionais e reversíveis.
 
 # --- ISOs (Capítulo 17): baixe SEMPRE dos canais oficiais -------------------
 ISO_WINDOWS=""                   # caminho local da ISO do Windows 11

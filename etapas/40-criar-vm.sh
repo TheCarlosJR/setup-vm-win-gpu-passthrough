@@ -80,6 +80,10 @@ info "Recursos: ${VM_RAM_MB} MiB de RAM (teto ${RAM_MAX}), ${VM_VCPUS} vCPUs de 
 if vm_existe "$VM_NAME"; then
     falhar "A VM '$VM_NAME' já existe. Para recriar: virsh --connect qemu:///system undefine $VM_NAME --nvram (CUIDADO: leia o Capítulo 17, 'Como desfazer')."
 fi
+HOOKS_RESIDUAIS="/etc/libvirt/hooks/qemu.d/$VM_NAME"
+if sudo test -e "$HOOKS_RESIDUAIS" || sudo test -L "$HOOKS_RESIDUAIS"; then
+    falhar "Existem hooks residuais para '$VM_NAME' em $HOOKS_RESIDUAIS. Revise/arquive-os manualmente antes de recriar a VM; eles não serão removidos automaticamente."
+fi
 
 # ----------------------------------------------------------------------------
 # 1. ISOs (sempre de canais oficiais; o manual não fornece links de propósito)

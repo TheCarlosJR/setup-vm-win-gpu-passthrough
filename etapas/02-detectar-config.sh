@@ -29,15 +29,42 @@ carregar_conf
 
 verificar() {
     [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
-    local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0
+    local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0 topologia ram_max
+    local cpu_completa=1 memoria_completa=1
     for var in USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID \
-               UUID_HD2 CPUS_VM CPUS_HOST VM_RAM_MB DM_SERVICE; do
+               UUID_HD2 CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS \
+               VM_RAM_MB HUGEPAGES_1G DM_SERVICE; do
         if [ -n "${!var:-}" ]; then
             v_ok "$var=${!var}"
         else
             v_falta "$var ainda não definido."
+            case "$var" in
+                CPUS_VM|CPUS_HOST|VM_VCPUS|VM_CORES|VM_THREADS) cpu_completa=0 ;;
+                VM_RAM_MB|HUGEPAGES_1G) memoria_completa=0 ;;
+            esac
         fi
     done
+    if [ "$cpu_completa" -eq 1 ]; then
+        topologia="$(cpu_topologia_csv)" || topologia=""
+        if [ -n "$topologia" ] \
+           && validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$topologia"; then
+            v_ok "Partição CPU cobre exatamente as CPUs online por socket/core."
+        else
+            v_falta "Configuração relacional de CPU inválida: ${CPU_LAYOUT_ERRO:-topologia indisponível}."
+        fi
+    fi
+    if [ "$memoria_completa" -eq 1 ]; then
+        ram_max="$(ram_max_vm_mib)"
+        if inteiro_na_faixa "$VM_RAM_MB" 1024 1048576 \
+           && inteiro_na_faixa "$HUGEPAGES_1G" 1 1048576 \
+           && [ $((10#$VM_RAM_MB % 1024)) -eq 0 ] \
+           && [ $((10#$HUGEPAGES_1G * 1024)) -eq $((10#$VM_RAM_MB)) ] \
+           && [ "$VM_RAM_MB" -le "$ram_max" ]; then
+            v_ok "RAM e HUGEPAGES_1G são coerentes e respeitam o teto atual de ${ram_max} MiB."
+        else
+            v_falta "VM_RAM_MB/HUGEPAGES_1G divergentes, fora do teto ou sem alinhamento de 1 GiB."
+        fi
+    fi
     if validar_config_rede; then
         tipo="Ethernet"
         interface_wifi "$INTERFACE_FISICA" && tipo="Wi-Fi"
@@ -352,7 +379,15 @@ EXPLICA
         TAM="$(lsblk -dno SIZE "$ALVO" 2>/dev/null | tr -d ' ')"
         MODELO="$(lsblk -dno MODEL "$ALVO" 2>/dev/null | sed 's/ *$//')"
         MONTADO=""
-        disco_em_uso_pelo_host "$ALVO" && MONTADO="  [MONTADO NO HOST]"
+        if disco_em_uso_pelo_host "$ALVO"; then
+            MONTADO="  [MONTADO NO HOST]"
+        else
+            USO_STATUS=$?
+            if [ "$USO_STATUS" -ne 1 ]; then
+                aviso "Ignorando $b: ${DISCO_USO_ERRO:-falha ao inspecionar uso/montagens}."
+                continue
+            fi
+        fi
         CANDIDATOS+=("$b")
         DESCRICOES+=("$(basename "$b")  ->  $ALVO  (${TAM:-?}; ${MODELO:-?})${MONTADO}")
     done
@@ -382,8 +417,12 @@ EXPLICA
             fi
             if disco_em_uso_pelo_host "$HD1_ALVO"; then
                 erro "Esse disco tem partição MONTADA no host agora:"
-                lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$HD1_ALVO"
+                lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINTS "$HD1_ALVO"
                 falhar "Desmonte tudo dele (e remova do fstab) antes de entregá-lo à VM."
+            else
+                USO_STATUS=$?
+                [ "$USO_STATUS" -eq 1 ] \
+                    || falhar "Não foi possível provar que o disco está livre: ${DISCO_USO_ERRO:-erro de inspeção}."
             fi
             echo "Disco escolhido:"
             lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL "$HD1_ALVO"
@@ -399,57 +438,99 @@ fi
 # ----------------------------------------------------------------------------
 # 6. CPU: topologia e pinning (Capítulo 21)
 # ----------------------------------------------------------------------------
-titulo "6/8 CPU (topologia real via lscpu -e)"
-if ja_definido CPUS_VM && ja_definido CPUS_HOST; then
-    info "Pinning já definido: VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
-else
+titulo "6/8 CPU (topologia parseável por socket/core)"
+TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
+    || falhar "lscpu não conseguiu fornecer CPU,CORE,SOCKET,NODE,ONLINE em formato parseável."
+[ -n "$TOPOLOGIA_CPU" ] || falhar "A topologia parseável de CPU está vazia."
+
+CPU_EXISTENTE_VALIDA=0
+if ja_definido CPUS_VM && ja_definido CPUS_HOST \
+   && ja_definido VM_VCPUS && ja_definido VM_CORES && ja_definido VM_THREADS; then
+    if validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU"; then
+        CPU_EXISTENTE_VALIDA=1
+        info "Pinning já definido e validado: VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
+    else
+        aviso "O mapa CPU persistido não corresponde mais ao host: $CPU_LAYOUT_ERRO"
+        aviso "Ele será redetectado antes de qualquer etapa de pinning/isolamento."
+    fi
+fi
+
+if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
     echo "Mapa lógico da CPU:"
-    lscpu -e
+    LC_ALL=C lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE
     echo
 
-    # Agrupa CPUs lógicas por núcleo físico
+    # SOCKET faz parte da chave: IDs de CORE podem se repetir em hosts
+    # multissocket. Todos os siblings online de um core permanecem juntos.
     declare -A NUCLEO_THREADS=()
-    while read -r CPU CORE ONLINE; do
-        [ "$ONLINE" = "yes" ] || continue
-        NUCLEO_THREADS[$CORE]="${NUCLEO_THREADS[$CORE]:+${NUCLEO_THREADS[$CORE]},}$CPU"
-    done < <(lscpu -e=CPU,CORE,ONLINE | tail -n +2)
+    while IFS=, read -r CPU CORE SOCKET NODE ONLINE; do
+        case "$ONLINE" in Y|yes|YES|1) ;; *) continue ;; esac
+        CHAVE_NUCLEO="$SOCKET:$CORE"
+        NUCLEO_THREADS[$CHAVE_NUCLEO]="${NUCLEO_THREADS[$CHAVE_NUCLEO]:+${NUCLEO_THREADS[$CHAVE_NUCLEO]},}$CPU"
+    done <<< "$TOPOLOGIA_CPU"
 
-    mapfile -t NUCLEOS < <(printf '%s\n' "${!NUCLEO_THREADS[@]}" | sort -n)
+    mapfile -t NUCLEOS < <(printf '%s\n' "${!NUCLEO_THREADS[@]}" \
+        | LC_ALL=C sort -t: -k1,1n -k2,2n)
     TOTAL_NUCLEOS="${#NUCLEOS[@]}"
-    [ "$TOTAL_NUCLEOS" -ge 2 ] || falhar "Só encontrei $TOTAL_NUCLEOS núcleo(s): não há como reservar CPU para o host."
-    THREADS_POR_NUCLEO="$(awk -F',' '{print NF}' <<< "${NUCLEO_THREADS[${NUCLEOS[0]}]}")"
-    info "Detectados $TOTAL_NUCLEOS núcleos físicos, $THREADS_POR_NUCLEO thread(s) por núcleo."
+    [ "$TOTAL_NUCLEOS" -ge 2 ] \
+        || falhar "Só encontrei $TOTAL_NUCLEOS core(s) físico(s) online; um precisa ficar integralmente com o host."
+    THREADS_POR_NUCLEO=""
+    CHAVE_CPU_BOOT=""
+    for CHAVE_NUCLEO in "${NUCLEOS[@]}"; do
+        QTD_THREADS="$(awk -F',' '{print NF}' <<< "${NUCLEO_THREADS[$CHAVE_NUCLEO]}")"
+        IFS=',' read -r -a THREADS_CORE <<< "${NUCLEO_THREADS[$CHAVE_NUCLEO]}"
+        for CPU_LOGICA in "${THREADS_CORE[@]}"; do
+            [ "$CPU_LOGICA" -ne 0 ] || CHAVE_CPU_BOOT="$CHAVE_NUCLEO"
+        done
+        if [ -z "$THREADS_POR_NUCLEO" ]; then
+            THREADS_POR_NUCLEO="$QTD_THREADS"
+        elif [ "$QTD_THREADS" -ne "$THREADS_POR_NUCLEO" ]; then
+            falhar "Topologia SMT heterogênea/offline: core $CHAVE_NUCLEO tem $QTD_THREADS thread(s), esperado $THREADS_POR_NUCLEO. Reative CPUs ou configure manualmente."
+        fi
+    done
+    [ -n "$CHAVE_CPU_BOOT" ] \
+        || falhar "A CPU lógica 0 não aparece online na topologia; não é seguro gerar um mapa pronto para nohz_full."
+    info "Detectados $TOTAL_NUCLEOS cores físicos online, $THREADS_POR_NUCLEO thread(s) por core."
+    info "Core de housekeeping da CPU 0: $CHAVE_CPU_BOOT [${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}]."
 
-    # Teto: o host precisa de pelo menos 1 núcleo físico (2 quando há folga)
+    # Teto: o host mantém ao menos um core completo (dois quando há folga).
     MAX_VM=$((TOTAL_NUCLEOS - 1))
     [ "$TOTAL_NUCLEOS" -ge 6 ] && MAX_VM=$((TOTAL_NUCLEOS - 2))
     PADRAO_VM="$MAX_VM"
-    aviso "Máximo permitido para a VM: $MAX_VM de $TOTAL_NUCLEOS núcleos"
-    aviso "(o restante fica com o host: sem isso o Linux engasga e o próprio QEMU sofre)."
-    NUC_VM="$(perguntar_inteiro 'Núcleos físicos dedicados à VM' "$PADRAO_VM" 1 "$MAX_VM")"
+    aviso "Máximo permitido para a VM: $MAX_VM de $TOTAL_NUCLEOS cores físicos."
+    NUC_VM="$(perguntar_inteiro 'Cores físicos dedicados à VM' "$PADRAO_VM" 1 "$MAX_VM")"
 
-    LISTA_VM=""; LISTA_HOST=""
-    idx=0
-    for CORE in "${NUCLEOS[@]}"; do
-        if [ "$idx" -lt "$NUC_VM" ]; then
-            LISTA_VM="${LISTA_VM:+${LISTA_VM},}${NUCLEO_THREADS[$CORE]}"
+    LISTA_VM=""
+    LISTA_HOST="${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}"
+    CORES_HOST=$((TOTAL_NUCLEOS - NUC_VM))
+    CORES_HOST_RESTANTES=$((CORES_HOST - 1))
+    IDX_HOST=0
+    for CHAVE_NUCLEO in "${NUCLEOS[@]}"; do
+        [ "$CHAVE_NUCLEO" != "$CHAVE_CPU_BOOT" ] || continue
+        if [ "$IDX_HOST" -lt "$CORES_HOST_RESTANTES" ]; then
+            LISTA_HOST="${LISTA_HOST:+${LISTA_HOST},}${NUCLEO_THREADS[$CHAVE_NUCLEO]}"
+            IDX_HOST=$((IDX_HOST + 1))
         else
-            LISTA_HOST="${LISTA_HOST:+${LISTA_HOST},}${NUCLEO_THREADS[$CORE]}"
+            LISTA_VM="${LISTA_VM:+${LISTA_VM},}${NUCLEO_THREADS[$CHAVE_NUCLEO]}"
         fi
-        idx=$((idx + 1))
     done
-    VCPUS_TOTAL="$(awk -F',' '{print NF}' <<< "$LISTA_VM")"
+    VCPUS_TOTAL="$(expandir_lista_cpus "$LISTA_VM" | wc -l)"
+    validar_layout_cpu "$LISTA_VM" "$LISTA_HOST" "$VCPUS_TOTAL" "$NUC_VM" "$THREADS_POR_NUCLEO" "$TOPOLOGIA_CPU" \
+        || falhar "A proposta gerada falhou na validação interna: $CPU_LAYOUT_ERRO"
 
-    echo "Proposta de alocação (mesma estratégia do Capítulo 21):"
-    echo "  VM   ($NUC_VM núcleos, $VCPUS_TOTAL vCPUs): $LISTA_VM"
-    echo "  HOST ($((TOTAL_NUCLEOS - NUC_VM)) núcleos):            $LISTA_HOST"
-    confirmar "Confirmar este mapa?" || falhar "Cancelado. Rode novamente e ajuste."
+    echo "Proposta de alocação por core físico completo:"
+    echo "  VM   ($NUC_VM cores, $VCPUS_TOTAL vCPUs): $LISTA_VM"
+    echo "  HOST ($((TOTAL_NUCLEOS - NUC_VM)) cores): $LISTA_HOST"
+    confirmar "Confirmar este mapa?" || falhar "Cancelado sem alterar o mapa CPU."
 
-    salvar_conf CPUS_VM "$LISTA_VM"
-    salvar_conf CPUS_HOST "$LISTA_HOST"
-    salvar_conf VM_CORES "$NUC_VM"
-    salvar_conf VM_THREADS "$THREADS_POR_NUCLEO"
-    salvar_conf VM_VCPUS "$VCPUS_TOTAL"
+    salvar_conf_lote \
+        CPUS_VM "$LISTA_VM" \
+        CPUS_HOST "$LISTA_HOST" \
+        VM_CORES "$NUC_VM" \
+        VM_THREADS "$THREADS_POR_NUCLEO" \
+        VM_VCPUS "$VCPUS_TOTAL"
+    validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU" \
+        || falhar "O mapa salvo não passou na validação final: $CPU_LAYOUT_ERRO"
 fi
 
 # ----------------------------------------------------------------------------
@@ -466,6 +547,7 @@ info "Reserva do host:   ${RESERVA_HOST_MB} MiB (~$((RESERVA_HOST_MB / 1024)) Gi
 
 if ja_definido VM_RAM_MB && [ "$VM_RAM_MB" -le "$RAM_MAX_VM_MB" ] 2>/dev/null && [ $((VM_RAM_MB % 1024)) -eq 0 ]; then
     info "VM_RAM_MB já definido: $VM_RAM_MB MiB (~$((VM_RAM_MB / 1024)) GiB)"
+    salvar_conf HUGEPAGES_1G "$((VM_RAM_MB / 1024))"
 else
     if [ -n "${VM_RAM_MB:-}" ] && [ "$REDETECTAR" -eq 0 ]; then
         aviso "VM_RAM_MB atual (${VM_RAM_MB}) é inválido: acima do teto ou não múltiplo de 1024 MiB."
@@ -476,10 +558,12 @@ else
     aviso "Teto para a VM: ${MAX_GIB} GiB. O restante NÃO é negociável: fica com o host."
     info "A etapa 52 (HugePages) reserva essa RAM no boot, tirando-a do host mesmo com a VM desligada."
     RAM_GIB="$(perguntar_inteiro 'RAM da VM em GiB' "$PADRAO_GIB" 4 "$MAX_GIB")"
-    salvar_conf VM_RAM_MB "$((RAM_GIB * 1024))"
+    NOVA_RAM_MB=$((RAM_GIB * 1024))
+    salvar_conf_lote \
+        VM_RAM_MB "$NOVA_RAM_MB" \
+        HUGEPAGES_1G "$RAM_GIB"
     ok "RAM da VM: $VM_RAM_MB MiB (${RAM_GIB} GiB); host mantém $((RAM_TOTAL_MB - VM_RAM_MB)) MiB."
 fi
-salvar_conf HUGEPAGES_1G "$((VM_RAM_MB / 1024))"
 
 # ----------------------------------------------------------------------------
 # 8. Rede, transferência de arquivos e ISOs

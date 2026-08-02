@@ -32,10 +32,18 @@ verificar() {
     else
         v_falta "Módulo vfio_pci não carregado."
     fi
-    if ls /sys/kernel/iommu_groups/ 2>/dev/null | grep -q .; then
-        v_ok "Grupos IOMMU populados."
+    if [ -z "${GPU_PCI_ID:-}" ]; then
+        v_falta "GPU_PCI_ID não definido; não é possível validar o grupo da GPU específica."
+    elif [ -z "${IOMMU_GROUP_GPU:-}" ]; then
+        v_falta "IOMMU_GROUP_GPU ainda não foi persistido pela fase B."
+    elif [ -n "${GPU_AUDIO_PCI_ID:-}" ] && [ -z "${GPU_AUDIO_VENDOR_DEVICE_ID:-}" ]; then
+        v_falta "GPU_AUDIO_PCI_ID existe, mas seu vendor/device não foi persistido."
+    elif validar_grupo_iommu_gpu \
+            "$GPU_PCI_ID" "${GPU_AUDIO_PCI_ID:-}" "$IOMMU_GROUP_GPU" \
+            "${GPU_VENDOR_DEVICE_ID:-}" "${GPU_AUDIO_VENDOR_DEVICE_ID:-}"; then
+        v_ok "GPU, áudio e bridges autorizadas formam exatamente o grupo IOMMU $IOMMU_GRUPO_ATUAL."
     else
-        v_falta "Grupos IOMMU vazios (IOMMU inativo)."
+        v_falta "$IOMMU_ERRO"
     fi
     v_fim
 }
@@ -43,7 +51,11 @@ verificar() {
 
 exigir_nao_root
 exigir_sudo
-exigir_conf BOOTLOADER GPU_PCI_ID   # GPU_AUDIO_PCI_ID é opcional (etapa 02)
+exigir_comando lspci
+exigir_conf BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID
+if [ -n "${GPU_AUDIO_PCI_ID:-}" ]; then
+    exigir_conf GPU_AUDIO_VENDOR_DEVICE_ID
+fi
 
 titulo "Capítulo 16: IOMMU e VFIO"
 
@@ -89,8 +101,11 @@ cat /proc/cmdline
 cmdline_tem "amd_iommu=on" && ok "amd_iommu=on ativo." || falhar "amd_iommu=on ausente."
 
 info "2) Mensagens do kernel (AMD-Vi):"
-if sudo dmesg | grep -i "AMD-Vi" | head -n 10 | grep -q .; then
-    sudo dmesg | grep -i "AMD-Vi" | head -n 10
+AMD_VI_LOG="$(sudo dmesg | awk 'BEGIN { exibidas=0 }
+    tolower($0) ~ /amd-vi/ { if (exibidas < 10) print; exibidas++ }')" \
+    || falhar "Não foi possível ler/analisar o dmesg para validar AMD-Vi."
+if [ -n "$AMD_VI_LOG" ]; then
+    printf '%s\n' "$AMD_VI_LOG"
     ok "AMD-Vi reportado pelo kernel."
 else
     aviso "Nenhuma mensagem AMD-Vi: confirme IOMMU=Enabled na BIOS (etapa 01)."
@@ -104,32 +119,29 @@ else
 fi
 
 info "4) Grupo IOMMU da GPU:"
-LINK_GRUPO="/sys/bus/pci/devices/${GPU_PCI_ID}/iommu_group"
-[ -e "$LINK_GRUPO" ] || falhar "Dispositivo $GPU_PCI_ID sem grupo IOMMU (IOMMU realmente ativo?)."
-GRUPO="$(basename "$(readlink -f "$LINK_GRUPO")")"
-ok "GPU ($GPU_PCI_ID) no grupo IOMMU $GRUPO. Conteúdo do grupo:"
-
-PROBLEMA=0
-for DEV in "/sys/kernel/iommu_groups/$GRUPO/devices/"*; do
-    END="$(basename "$DEV")"
-    DESCRICAO="$(lspci -nns "${END#0000:}")"
-    echo "   $DESCRICAO"
-    if [ "$END" != "$GPU_PCI_ID" ] && [ "$END" != "${GPU_AUDIO_PCI_ID:-}" ]; then
-        # Bridges PCI (pcieport) no grupo são normais e não impedem passthrough
-        if ! grep -qi "bridge" <<< "$DESCRICAO"; then
-            PROBLEMA=1
-        fi
+if ! validar_grupo_iommu_gpu \
+        "$GPU_PCI_ID" "${GPU_AUDIO_PCI_ID:-}" "${IOMMU_GROUP_GPU:-}" \
+        "$GPU_VENDOR_DEVICE_ID" "${GPU_AUDIO_VENDOR_DEVICE_ID:-}"; then
+    erro "$IOMMU_ERRO"
+    if [ -n "$IOMMU_GRUPO_ATUAL" ] && [ -d "/sys/kernel/iommu_groups/$IOMMU_GRUPO_ATUAL/devices" ]; then
+        erro "Conteúdo observado no grupo $IOMMU_GRUPO_ATUAL:"
+        for DEV in "/sys/kernel/iommu_groups/$IOMMU_GRUPO_ATUAL/devices/"*; do
+            [ -e "$DEV" ] || continue
+            END="${DEV##*/}"
+            lspci -nns "${END#0000:}" 2>/dev/null | sed 's/^/   /' || echo "   $END (descrição indisponível)"
+        done
     fi
-done
-if [ "$PROBLEMA" -eq 1 ]; then
-    aviso "Há dispositivo(s) NÃO relacionados à GPU no grupo $GRUPO."
-    aviso "Consulte o Capítulo 28 (outro slot físico, atualização de BIOS, ACS override como último recurso)."
-else
-    ok "Grupo limpo: apenas GPU + áudio (bridges são inofensivas)."
+    falhar "Grupo IOMMU inseguro. Não foi persistido nem liberado para passthrough; corrija hardware/BIOS antes de continuar."
 fi
+GRUPO="$IOMMU_GRUPO_ATUAL"
+ok "GPU ($GPU_PCI_ID) no grupo IOMMU $GRUPO. Conteúdo autorizado:"
+for END in $IOMMU_MEMBROS; do
+    lspci -nns "${END#0000:}" 2>/dev/null | sed 's/^/   /' || echo "   $END (descrição indisponível)"
+done
+ok "Grupo limpo: apenas GPU, áudio configurado e bridges PCI de classe 0x06."
 
 salvar_conf IOMMU_GROUP_GPU "$GRUPO"
-info "IOMMU_GROUP_GPU=$GRUPO gravado no passthrough.conf."
+info "IOMMU_GROUP_GPU=$GRUPO validado e gravado no passthrough.conf."
 
 info "5) Listagem completa dos grupos (registro em ~/inventario-hardware/):"
 mkdir -p "$HOME/inventario-hardware"
