@@ -1671,7 +1671,7 @@ ls /usr/share/OVMF/
 
 ## Resultado esperado
 
-Pilha completa de virtualização instalada e operacional: `libvirtd` ativo, `virsh list --all` funcional, KVM confirmado como disponível, firmware OVMF presente no sistema, `swtpm` instalado e pronto para uso na criação da VM (Capítulo 17).
+Pilha completa de virtualização instalada e operacional: `libvirtd` ativo, `virsh --connect qemu:///system list --all` funcional, KVM confirmado como disponível, firmware OVMF presente no sistema, `swtpm` instalado e pronto para uso na criação da VM (Capítulo 17).
 
 ## Como desfazer
 
@@ -1689,7 +1689,7 @@ sudo rm -rf /etc/libvirt /var/lib/libvirt
 | Sintoma | Causa provável | Correção |
 |---|---|---|
 | `kvm-ok` reporta "KVM acceleration can NOT be used" | SVM desabilitado na BIOS (Capítulo 12 não aplicado ou revertido) | Revisar Capítulo 12 |
-| `virsh list --all` retorna erro de permissão/conexão | Usuário `<USUARIO_LINUX>` não está no grupo `libvirt` | Ver Capítulo 14 |
+| `virsh --connect qemu:///system list --all` retorna erro de permissão/conexão | Usuário `<USUARIO_LINUX>` não está no grupo `libvirt` | Ver Capítulo 14 |
 | `systemctl status libvirtd` mostra `failed` | Conflito de configuração ou módulo KVM não carregado | `sudo modprobe kvm_amd`; verificar `journalctl -u libvirtd -e` para o erro específico |
 
 ## Próxima etapa
@@ -1802,7 +1802,7 @@ sudo chmod 755 /vm
 
 | Sintoma | Causa provável | Correção |
 |---|---|---|
-| `virsh list` ainda pede senha/nega acesso após `usermod` | Sessão de shell antiga, grupos não recarregados | Fazer logout/login completo (não apenas fechar o terminal) |
+| `virsh --connect qemu:///system list` ainda pede senha/nega acesso após `usermod` | Sessão de shell antiga, grupos não recarregados | Fazer logout/login completo (não apenas fechar o terminal) |
 | Virt-Manager não inicia a VM, erro mencionando `/vm/Windows11.qcow2: Permission denied` | Permissão de `/vm` incorreta, ou SELinux/AppArmor bloqueando (ver Capítulo 17) | Revisar `chown`/`chmod` deste capítulo; revisar perfil AppArmor no Capítulo 17 |
 | `sudo -u libvirt-qemu touch` falha | Nome de usuário de sistema incorreto (variação de distribuição) | Reconfirmar com `getent passwd \| grep libvirt` |
 
@@ -2384,7 +2384,7 @@ Dentro do Windows já instalado, com a ISO `virtio-win.iso` ainda anexada como u
 2. Execute o instalador gráfico `virtio-win-guest-tools.exe` (presente na raiz da ISO), que instala automaticamente todos os drivers restantes (rede, balão de memória, `qemu-guest-agent`, dispositivos seriais) em um único assistente.
 3. Reinicie a VM quando solicitado.
 
-**O que o `qemu-guest-agent` (instalado por esse pacote) faz:** um serviço em segundo plano dentro do Windows que se comunica com o `libvirtd` no host via um canal virtual serial (`virtio-serial`), permitindo operações como desligamento gracioso da VM a partir do host (`virsh shutdown`), sincronização de horário, congelamento de sistema de arquivos para snapshots consistentes (Capítulo 25), e relatório de endereço IP da VM ao host — recursos usados em capítulos posteriores.
+**O que o `qemu-guest-agent` (instalado por esse pacote) faz:** um serviço em segundo plano dentro do Windows que se comunica com o `libvirtd` no host via um canal virtual serial (`virtio-serial`), permitindo operações como desligamento gracioso da VM a partir do host (`virsh --connect qemu:///system shutdown`), sincronização de horário, congelamento de sistema de arquivos para snapshots consistentes (Capítulo 25), e relatório de endereço IP da VM ao host — recursos usados em capítulos posteriores.
 
 ### Configurações recomendadas dentro do Windows (pós-instalação)
 
@@ -2516,7 +2516,7 @@ Os **hook scripts do libvirt** são a ferramenta correta para essa transição, 
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│  virsh start <VM_NAME>                                             │
+│  virsh --connect qemu:///system start <VM_NAME>                  │
 │         │                                                          │
 │         ▼                                                          │
 │  Hook "prepare/begin"  →  para display manager, unbind nvidia,      │
@@ -2525,8 +2525,8 @@ Os **hook scripts do libvirt** são a ferramenta correta para essa transição, 
 │         ▼                                                          │
 │  QEMU inicia, assume a GPU via VFIO, Windows usa a RTX 3060 nativa  │
 │         │                                                          │
-│         ▼  (usuário desliga o Windows dentro da VM, ou virsh       │
-│             shutdown/destroy)                                      │
+│         ▼  (usuário desliga o Windows dentro da VM, ou           │
+│             virsh --connect qemu:///system shutdown/destroy)     │
 │         ▼                                                          │
 │  Hook "release/end"    →  unbind vfio-pci, bind nvidia,             │
 │                            reiniciar display manager                │
@@ -2833,7 +2833,7 @@ sudo /etc/libvirt/hooks/qemu.d/<VM_NAME>/release/end/01-gpu-para-linux.sh
 | Sintoma | Causa provável | Correção |
 |---|---|---|
 | VM não inicia, erro "Device or resource busy" relacionado à GPU | GPU ainda vinculada ao driver `nvidia` (hook `prepare/begin` falhou silenciosamente) | Executar manualmente cada linha do script `01-gpu-para-vfio.sh` para identificar onde falhou; verificar `sudo journalctl -u libvirtd -e` |
-| Após desligar a VM, Linux não recupera vídeo | Hook `release/end` não foi executado (VM finalizada de forma abrupta, ex.: `virsh destroy` em vez de desligamento gracioso) | Executar manualmente o script de release (comando acima); acessar via TTY texto (`Ctrl+Alt+F3`) se a interface gráfica não responder |
+| Após desligar a VM, Linux não recupera vídeo | Hook `release/end` não foi executado (VM finalizada de forma abrupta, ex.: `virsh --connect qemu:///system destroy` em vez de desligamento gracioso) | Executar manualmente o script de release (comando acima); acessar via TTY texto (`Ctrl+Alt+F3`) se a interface gráfica não responder |
 | HD1 aparece vazio/sem dados dentro do Windows | `<HD1_BY_ID_PATH>` incorreto, apontando para outro disco | Reconferir `ls -la /dev/disk/by-id/` comparando modelo/serial com o inventário do Capítulo 3 |
 | GPU não reaparece para o `nvidia` mesmo após o script de release, exigindo reboot do host | Estado de hardware da GPU não resetado corretamente por function-level reset (FLR) — problema conhecido em algumas combinações de placa-mãe/GPU | Ver Capítulo 28, seção específica sobre "reset bug" de GPUs NVIDIA em passthrough |
 
@@ -3379,7 +3379,7 @@ network:
         forward-delay: 4
 ```
 
-O arquivo contém somente `network/version`, o uplink escolhido e a bridge; não declara renderer nem qualquer outra interface. `<INTERFACE_FISICA>` deixa de solicitar IP diretamente, `br0` assume o DHCP do host e `stp` protege contra loops. Na execução automatizada, a etapa 60 arma rollback antes de escrever: falha em `netplan generate`, `try`, `apply` ou em passos posteriores restaura/remove o dedicado, executa `netplan generate` + `apply` para reaplicar o estado anterior e restaura o XML da VM.
+O arquivo contém somente `network/version`, o uplink escolhido e a bridge; não declara renderer nem qualquer outra interface. `<INTERFACE_FISICA>` deixa de solicitar IP diretamente, `br0` assume o DHCP do host e `stp` protege contra loops. Na execução automatizada, a etapa 60 arma rollback antes de escrever: falha em `netplan generate`, `try`, `apply` ou nas pós-condições estruturais (`br0` `UP`, `<INTERFACE_FISICA>` com `master br0` e NIC da VM apontando para `br0` com o MAC preservado) restaura/remove o dedicado, executa `netplan generate` + `apply` para reaplicar o estado anterior e restaura o XML da VM. Quando essas pós-condições passam, Netplan, bridge `UP`, vínculo `master` e NIC podem ser commitados mesmo que `<VM_IP_FIXO>` e/ou `<IP_FIXO_HOST>` ainda estejam incompletos; nesse caso, `--verificar` e a etapa 61 permanecem pendentes até os dois endereços serem preenchidos e validados.
 
 ```bash
 sudo netplan generate
@@ -3477,7 +3477,7 @@ bash etapas/60-rede-bridge.sh                   # aplicar backend final
 bash etapas/60-rede-bridge.sh --verificar      # conferir backend/uplink/NIC/IP
 ```
 
-Apesar do nome histórico, `60-rede-bridge.sh` configura os dois modos, exige a VM desligada e só conclui após o commit lógico da transação descrita acima.
+Apesar do nome histórico, `60-rede-bridge.sh` configura os dois modos, exige a VM desligada e conclui após o commit lógico do backend. Em bridge, esse commit pode abranger somente Netplan, bridge `UP`, vínculo `master` e NIC; se `<VM_IP_FIXO>` e/ou `<IP_FIXO_HOST>` ainda estiverem incompletos, `--verificar` e a etapa 61 permanecem pendentes.
 
 ## Comandos
 
@@ -3525,7 +3525,7 @@ Primeiro use o verificador orientado pelo modo:
 bash etapas/60-rede-bridge.sh --verificar
 ```
 
-**Bridge Ethernet:** deve confirmar `br0` ativa, `<INTERFACE_FISICA>` como porta, NIC identificada por `<VM_NIC_MAC>` com `source bridge='br0'` e os dois IPs gravados. `ip addr show br0` mostra o IP LAN do host; `ipconfig` na VM mostra `<VM_IP_FIXO>` na mesma sub-rede do roteador; host e guest alcançam a internet.
+**Bridge Ethernet:** o commit estrutural deve confirmar `br0` ativa, `<INTERFACE_FISICA>` como porta e NIC identificada por `<VM_NIC_MAC>` com `source bridge='br0'`. Se `<VM_IP_FIXO>` e/ou `<IP_FIXO_HOST>` ainda estiverem incompletos, esses elementos permanecem aplicados, mas `--verificar` e a etapa 61 permanecem pendentes. Com os dois IPs gravados, o verificador também os valida; `ip addr show br0` mostra o IP LAN do host; `ipconfig` na VM mostra `<VM_IP_FIXO>` na mesma sub-rede do roteador; host e guest alcançam a internet.
 
 **NAT Ethernet/Wi-Fi:** deve confirmar a rede dedicada ativa/autostart, `<forward mode='nat' dev='<INTERFACE_FISICA>'>`, bridge virtual, sub-rede/reserva DHCP, NIC com `source network='<REDE_LIBVIRT>'` e `INTERFACE_FISICA` igual ao dispositivo de `ip -4 route get 1.1.1.1`. `ipconfig` mostra `<VM_IP_FIXO>` na sub-rede privada; a VM alcança a internet e `<IP_FIXO_HOST>`.
 
@@ -4459,7 +4459,7 @@ Diagnosticar de baixo para cima (do firmware para o guest) evita perder tempo in
 
 **Correção:** revisar CPU isolation (Capítulo 22); dentro do Windows, aumentar o tamanho do buffer de áudio nas propriedades avançadas do dispositivo de som NVIDIA HD Audio.
 
-### Problema: `virsh start` falha com erro relacionado a `vfio-pci`/IOMMU
+### Problema: `virsh --connect qemu:///system start` falha com erro relacionado a `vfio-pci`/IOMMU
 
 **Sintoma:** mensagem como "vfio: error, group ... is not viable" ou "Failed to open /dev/vfio/X".
 

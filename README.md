@@ -181,6 +181,13 @@ ele recebe backup datado. Antes da primeira escrita, a etapa arma rollback: uma
 falha em `netplan generate`, `try`, `apply` ou em qualquer passo posterior
 restaura/remove o dedicado, reaplica o Netplan anterior e restaura o XML da VM.
 
+No modo bridge, o commit estrutural cobre o Netplan aplicado, a `REDE_BRIDGE`
+administrativamente `UP`, a `INTERFACE_FISICA` anexada como porta (com a bridge
+como `master`) e a NIC da VM em `source bridge`. `VM_IP_FIXO` e `IP_FIXO_HOST`
+podem permanecer pendentes sem desfazer essa estrutura; enquanto não estiverem
+efetivos e coerentes, `bash etapas/60-rede-bridge.sh --verificar` e, por
+dependência, a etapa `61-airlock` permanecem pendentes.
+
 O NAT **não altera o uplink nem lê/modifica Netplan**. Ele cria uma bridge
 virtual, uma instância `dnsmasq` para DHCP/DNS e regras de encaminhamento/NAT no
 host por meio de uma rede libvirt dedicada. A etapa só atualiza uma

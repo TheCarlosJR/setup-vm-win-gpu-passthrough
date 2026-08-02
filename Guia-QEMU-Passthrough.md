@@ -606,8 +606,11 @@ XML anterior da rede, existência/persistência, ativo/autostart, XML da VM e
 Falha ou sinal restaura tudo; se a rede não existia, uma criação parcial é
 parada e removida. O bridge arma rollback antes de escrever Netplan ou parar a
 NAT; uma falha em Netplan ou depois restaura/remove o dedicado, executa
-`netplan generate` + `apply`, restaura a rede anterior e o XML da VM. O commit
-lógico só ocorre após todas as pós-condições passarem.
+`netplan generate` + `apply`, restaura a rede anterior e o XML da VM.
+No bridge, o commit lógico exige Netplan aplicado, `REDE_BRIDGE`
+administrativamente `UP`, uplink como `master` da bridge e NIC da VM apontando
+para ela. `VM_IP_FIXO` e `IP_FIXO_HOST` podem permanecer incompletos; nesse caso,
+o `--verificar` e a etapa 61 ficam pendentes.
 
 Na migração NAT → bridge, antes de tocar Netplan, a etapa consulta com
 `virsh --connect qemu:///system list --all --name` todas as outras VMs e seus
@@ -710,9 +713,9 @@ XML de backup cuja NIC apontava para `network='default'`.
 | IOMMU | `cat /proc/cmdline` e `sudo dmesg \| grep AMD-Vi` | parâmetros presentes, IOMMU encontrado |
 | Grupo IOMMU | `bash util/listar-grupos-iommu.sh` | só GPU, áudio e pontes no grupo |
 | VM definida | `virsh --connect qemu:///system dumpxml win11 \| grep -E "loader\|qcow2"` | OVMF e caminho do QCOW2 |
-| Guest agent | `virsh ... qemu-agent-command win11 '{"execute":"guest-ping"}'` | `{"return":{}}` |
+| Guest agent | `virsh --connect qemu:///system qemu-agent-command win11 '{"execute":"guest-ping"}'` | `{"return":{}}` |
 | Passthrough | ligar a VM | boot do Windows pela GPU real, sem "Code 43" |
-| Pinning | `virsh ... vcpuinfo win11` (VM ligada) | afinidade restrita aos núcleos escolhidos |
+| Pinning | `virsh --connect qemu:///system vcpuinfo win11` (VM ligada) | afinidade restrita aos núcleos escolhidos |
 | HugePages | `grep Huge /proc/meminfo` | `HugePages_Total` igual ao reservado |
 | Isolamento | `cat /sys/devices/system/cpu/isolated` | exatamente as CPUs da VM |
 | Rede bridge | `bash etapas/60-rede-bridge.sh --verificar` | bridge ativa, uplink Ethernet membro, NIC pelo MAC em `source bridge`, IPs da LAN |
