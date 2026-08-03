@@ -26,52 +26,46 @@ verificar() {
 [ "${1:-}" = "--verificar" ] && verificar
 
 exigir_nao_root
+
+titulo "Antes de continuar"
+info "Finalidade: manter a GPU no driver proprietário NVIDIA enquanto a VM estiver desligada."
+info "Pré-requisitos: etapa 10 concluída, GPU NVIDIA presente, rede/repositórios funcionais e sudo."
+info "Alterações: se nvidia-smi já funciona, nenhuma; caso contrário, o APT é atualizado e pacotes NVIDIA são instalados."
+info "Recomendação: mantenha acesso a TTY ou mídia de recuperação e não interrompa a instalação."
+aviso "Risco principal: um driver incompatível pode impedir a sessão gráfica no próximo boot."
+info "Reboot/retorno: com nvidia-smi funcional, sai sem alteração nem reboot; após instalar, reinicie, valide nvidia-smi e retorne ao menu."
+
 exigir_sudo
 
 titulo "Capítulo 8: Driver NVIDIA no host"
 
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-    ok "Driver NVIDIA já instalado e funcional (caso da ISO Pop!_OS com NVIDIA integrado):"
+    ok "nvidia-smi já funciona: nenhum pacote será alterado e não é necessário reiniciar."
     nvidia-smi
     exit 0
 fi
 
-info "Driver não encontrado. Consultando os repositórios..."
+info "nvidia-smi ausente ou não funcional. Consultando os repositórios..."
 sudo apt update
 
-# O manual usa "nvidia-driver", que é o nome do meta-pacote no Debian. No
-# Pop!_OS/Ubuntu os pacotes são versionados (nvidia-driver-550, -535, ...):
-# instalar o nome genérico falharia e abortaria a etapa. Descobrimos o que
-# existe de fato neste sistema antes de instalar.
-PACOTES=()
+# Usa uma única estratégia: o meta-pacote do Pop!_OS tem precedência. Em
+# Ubuntu, instala somente o driver que ubuntu-drivers marcar como recomendado.
+PACOTE=""
 if apt-cache show system76-driver-nvidia >/dev/null 2>&1; then
-    PACOTES+=(system76-driver-nvidia)
+    PACOTE="system76-driver-nvidia"
     info "Pacote do Pop!_OS disponível: system76-driver-nvidia"
-fi
-
-if apt-cache show nvidia-driver >/dev/null 2>&1; then
-    PACOTES+=(nvidia-driver)
-    info "Meta-pacote 'nvidia-driver' disponível."
 else
-    VERSIONADO="$(apt-cache search --names-only '^nvidia-driver-[0-9]+$' 2>/dev/null \
-        | awk '{print $1}' | sort -V | tail -n1)"
-    if [ -n "$VERSIONADO" ]; then
-        info "Pacote versionado mais recente encontrado: $VERSIONADO"
-        PACOTES+=("$VERSIONADO")
-    fi
-fi
-
-if [ "${#PACOTES[@]}" -eq 0 ]; then
-    erro "Nenhum pacote de driver NVIDIA encontrado nos repositórios habilitados."
-    info "Alternativas:"
-    info "  sudo ubuntu-drivers install        (escolhe a versão recomendada)"
-    info "  Loja Pop!_Shop > 'NVIDIA'          (interface gráfica)"
-    falhar "Instale o driver por um desses caminhos e rode esta etapa novamente."
+    command -v ubuntu-drivers >/dev/null 2>&1 \
+        || falhar "'ubuntu-drivers' não está disponível e system76-driver-nvidia não existe nos repositórios. Instale ubuntu-drivers-common ou use a ferramenta recomendada pela sua distribuição."
+    PACOTE="$(ubuntu-drivers devices 2>/dev/null | awk '/driver[[:space:]]*:/ && /recommended/ {print $3; exit}')"
+    [ -n "$PACOTE" ] && apt-cache show "$PACOTE" >/dev/null 2>&1 \
+        || falhar "Nenhum driver NVIDIA recomendado foi informado por ubuntu-drivers. Revise os repositórios e o hardware antes de continuar."
+    info "Driver recomendado por ubuntu-drivers: $PACOTE"
 fi
 
 echo
-info "Instalando: ${PACOTES[*]}"
-if ! sudo apt install -y "${PACOTES[@]}"; then
+info "Instalando: $PACOTE"
+if ! sudo apt install -y "$PACOTE"; then
     erro "A instalação falhou."
     info "Tente: sudo ubuntu-drivers install"
     falhar "Driver não instalado; sem ele o passthrough dinâmico (etapa 50) não funciona."
