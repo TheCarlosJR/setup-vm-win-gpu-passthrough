@@ -1,9 +1,10 @@
 # Windows 11 VM com GPU Passthrough no Pop!_OS: scripts de instalação
 
 Scripts de instalação e configuração da VM Windows 11 com GPU em passthrough
-(KVM/QEMU/libvirt + VFIO). Cada etapa é idempotente, faz backup datado antes de
-editar arquivo crítico, pede confirmação explícita nos passos destrutivos e traz
-um modo `--verificar` com critério objetivo de sucesso.
+(KVM/QEMU/libvirt + VFIO). As etapas que alteram estado persistente descrevem
+seu impacto, pedem confirmação nos passos destrutivos e, quando aplicável,
+oferecem backup, rollback ou um modo `--verificar`. Consulte as limitações de
+cada etapa antes de executá-la em um host de uso diário.
 
 ### Documentação
 
@@ -263,8 +264,13 @@ grep -rlU $'\r' --include='*.sh' . && echo "CORRIGIR os arquivos acima" || echo 
 # 3. Nenhum placeholder do manual esquecido (formato <MAIUSCULAS>)
 grep -rnE '<[A-Z_]{3,}>' etapas/ lib/ util/ | grep -v 'IP_FIXO_HOST' || echo "OK sem placeholders"
 
-# 4. (opcional) shellcheck, se instalado
-shellcheck lib/common.sh etapas/*.sh util/*.sh menu.sh || true
+# 4. Linters opcionais, quando instalados
+if command -v shellcheck >/dev/null; then
+  shellcheck lib/common.sh etapas/*.sh util/*.sh menu.sh
+fi
+if command -v pwsh >/dev/null; then
+  pwsh -NoProfile -Command 'Get-ChildItem windows -Filter *.ps1 | ForEach-Object { [void][scriptblock]::Create((Get-Content -Raw $_)); Write-Host "OK $($_.Name)" }'
+fi
 ```
 
 ### B. No Pop!_OS, etapa a etapa

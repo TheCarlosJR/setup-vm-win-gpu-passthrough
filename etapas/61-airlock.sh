@@ -256,6 +256,7 @@ verificar() {
 [ "${1:-}" = "--verificar" ] && verificar
 
 instalar_chave() {
+    local arquivo_chave="/etc/ssh/authorized_keys/$TRANSFER_USER" temporario fingerprint backup
     titulo "Chave pública do Windows -> /etc/ssh/authorized_keys/$TRANSFER_USER"
     cat <<'COMO'
 Dentro da VM (PowerShell), gere o par com windows/Gerar-Chave-Airlock.ps1
@@ -267,17 +268,24 @@ COMO
         aviso "Sem chave por enquanto. Instale depois com: 61-airlock.sh --instalar-chave"
         return 0
     fi
-    case "$LINHA" in
-        ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*)
-            echo "$LINHA" | sudo tee "/etc/ssh/authorized_keys/$TRANSFER_USER" >/dev/null
-            sudo chown root:root "/etc/ssh/authorized_keys/$TRANSFER_USER"
-            sudo chmod 644 "/etc/ssh/authorized_keys/$TRANSFER_USER"
-            ok "Chave instalada (arquivo sob controle do root, fora do alcance do $TRANSFER_USER)."
-            ;;
-        *)
-            falhar "Isso não parece uma chave pública OpenSSH válida."
-            ;;
-    esac
+    temporario="$(mktemp)"
+    chmod 600 "$temporario"
+    printf '%s\n' "$LINHA" > "$temporario"
+    if ! fingerprint="$(ssh-keygen -l -f "$temporario" 2>&1)"; then
+        rm -f "$temporario"
+        falhar "A chave pública não passou na validação do ssh-keygen."
+    fi
+    info "Fingerprint da chave recebida: $fingerprint"
+    if sudo test -s "$arquivo_chave"; then
+        backup="${arquivo_chave}.bak-$(date +%Y%m%d-%H%M%S)"
+        sudo cp -a "$arquivo_chave" "$backup"
+        sudo chmod 600 "$backup"
+        info "Chave anterior preservada em $backup (root-only)."
+    fi
+    sudo install -o root -g root -m 600 "$temporario" "${arquivo_chave}.novo"
+    sudo mv -f "${arquivo_chave}.novo" "$arquivo_chave"
+    rm -f "$temporario"
+    ok "Chave instalada atomicamente (arquivo sob controle do root, fora do alcance do $TRANSFER_USER)."
 }
 
 if [ "${1:-}" = "--instalar-chave" ]; then
@@ -288,8 +296,8 @@ if [ "${1:-}" = "--instalar-chave" ]; then
         || falhar "TRANSFER_USER='$TRANSFER_USER' não é um nome de usuário seguro."
     titulo "Troca da chave pública do airlock"
     info "Este submodo altera somente /etc/ssh/authorized_keys/$TRANSFER_USER; não exige reboot."
-    aviso "Ao colar uma chave, o arquivo inteiro será sobrescrito e a chave anterior deixará de autenticar."
-    info "ENTER preserva a chave atual; para recuperar uma troca incorreta, reinstale a chave por console ou acesso administrativo."
+    aviso "Ao colar uma chave, a chave anterior deixará de autenticar, mas será preservada em backup root-only."
+    info "ENTER preserva a chave atual; confira o fingerprint antes de confirmar a troca."
     sudo mkdir -p /etc/ssh/authorized_keys
     sudo chmod 755 /etc/ssh/authorized_keys
     instalar_chave
