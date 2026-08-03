@@ -7,8 +7,8 @@
 # 2. Cria os diretórios de destino no HD2 (sem acentos, como no manual).
 # 3. Adiciona os 5 bind mounts (Documentos, Downloads, Imagens, Músicas,
 #    Vídeos) apontando para o HD2.
-# 4. Migra o conteúdo existente com rsync (verificação dupla) e só apaga os
-#    originais após confirmação explícita digitando SIM.
+# 4. Migra o conteúdo existente com rsync, compara a árvore por checksum e só
+#    apaga os originais após confirmação explícita digitando SIM.
 #
 # Segurança: backup datado do fstab antes de qualquer edição; linhas
 # idempotentes (reexecutar não duplica); nofail em tudo.
@@ -40,7 +40,21 @@ resolver_dir_usuario() {
 
 escapar_fstab() { sed 's/ /\\040/g' <<< "$1"; }
 
+docs4_dispensado() {
+    [ "${HD2_DISPENSADO:-}" = "sim" ] || [ "${DOCS4_DISPENSADO:-}" = "sim" ]
+}
+
 verificar() {
+    if docs4_dispensado; then
+        if [ "${HD2_DISPENSADO:-}" = "sim" ] && [ -n "${UUID_HD2:-}" ]; then
+            v_falta "Configuração contraditória: HD2 dispensado, mas UUID_HD2 está definido."
+        else
+            v_ok "Docs4 dispensado explicitamente; nenhuma montagem ou migração é exigida."
+        fi
+        v_fim
+    fi
+    [ -n "${UUID_HD2:-}" ] \
+        || { v_falta "UUID_HD2 ausente e o HD2 não foi dispensado na etapa 02."; v_fim; }
     [ -n "${USUARIO_LINUX:-}" ] || { v_falta "USUARIO_LINUX não definido (etapa 02)."; v_fim; }
     if mountpoint -q "$DOCS4"; then
         v_ok "$DOCS4 montado."
@@ -60,7 +74,27 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+if docs4_dispensado; then
+    if [ "${HD2_DISPENSADO:-}" = "sim" ] && [ -n "${UUID_HD2:-}" ]; then
+        falhar "Configuração contraditória: HD2_DISPENSADO=sim e UUID_HD2 definido."
+    fi
+    titulo "Capítulo 11: Docs4 opcional"
+    info "Etapa dispensada explicitamente; nenhum fstab, bind mount ou arquivo será alterado."
+    exit 0
+fi
+
 exigir_nao_root
+
+titulo "Antes de continuar"
+info "Finalidade: montar o HD2 NTFS em $DOCS4, migrar cinco pastas pessoais e ativar bind mounts persistentes."
+info "Pré-requisitos: UUID/usuário corretos, HD2 conectado e já em NTFS, ntfs-3g e rsync, espaço suficiente e backup externo."
+aviso "A escolha da partição na etapa 3 apenas a identificou; não a formatou. Confirme que ela já é NTFS e corresponde ao HD2."
+aviso "Alterações: cria backup e 6 entradas gerenciadas em /etc/fstab, monta $DOCS4, cria diretórios, tenta ajustar proprietários, copia dados e ativa cinco binds."
+aviso "Se você confirmar SIM, os originais serão apagados sem lixeira; os testes finais criam e removem arquivos temporários."
+info "Recomendação: feche aplicativos que usam essas pastas, confira UUID/modelo/tamanho e valide dados críticos por checksum antes de SIM."
+aviso "Risco principal: destino incorreto ou exclusão prematura pode causar perda; os binds também podem ocultar originais mantidos no NVMe."
+info "Reboot/retorno: não exige reboot; mount -a aplica agora. Ao concluir, retorne ao menu; cancelar a exclusão mantém os originais, que os binds podem ocultar."
+
 exigir_sudo
 exigir_comando rsync
 exigir_conf UUID_HD2 USUARIO_LINUX
@@ -130,15 +164,24 @@ for i in "${!HD2_DIRS[@]}"; do
         continue
     fi
 
-    info "Migrando: $ORIGEM/ -> $ALVO/"
+    info "Origem (NVMe): $ORIGEM/"
+    info "Destino (HD2):  $ALVO/"
+    info "Copiando origem -> destino com rsync..."
     rsync -avh --progress "$ORIGEM/" "$ALVO/"
 
-    # Segunda passada (dry-run): nada pode restar pendente de cópia
-    PENDENTES="$(rsync -a --itemize-changes --dry-run "$ORIGEM/" "$ALVO/" | grep -c '^[<>]f' || true)"
-    if [ "${PENDENTES:-0}" -ne 0 ]; then
-        falhar "Verificação da cópia de $ORIGEM falhou ($PENDENTES arquivo(s) pendente(s)). Nada foi apagado."
+    # A exclusão exige comparação por conteúdo. --checksum evita que arquivos
+    # com tamanho e data iguais, mas bytes diferentes, sejam considerados iguais.
+    # Também consideramos qualquer saída itemizada como divergência: em NTFS,
+    # permissões/donos podem diferir legitimamente, portanto esses metadados não
+    # são apagados nem "corrigidos" por esta etapa.
+    if ! DIVERGENCIAS="$(rsync -a --checksum --itemize-changes --dry-run "$ORIGEM/" "$ALVO/")"; then
+        falhar "A comparação rsync por checksum falhou para $ORIGEM; nada foi apagado."
     fi
-    ok "Cópia íntegra: $ORIGEM ($(du -sh "$ORIGEM" 2>/dev/null | cut -f1))"
+    if [ -n "$DIVERGENCIAS" ]; then
+        printf '%s\n' "$DIVERGENCIAS" >&2
+        falhar "Comparação por checksum encontrou divergências entre $ORIGEM e $ALVO. Nada foi apagado."
+    fi
+    ok "Comparação rsync por checksum não encontrou divergências em $ORIGEM (origem: $(du -sh "$ORIGEM" 2>/dev/null | cut -f1))."
     MIGRADOS+=("$ORIGEM")
 done
 
@@ -146,7 +189,7 @@ if [ "${#MIGRADOS[@]}" -gt 0 ]; then
     echo
     echo "Diretórios migrados cujo conteúdo ORIGINAL (no NVMe) será apagado:"
     printf '  - %s\n' "${MIGRADOS[@]}"
-    if confirmar_digitando "SIM" "Ação DESTRUTIVA e sem lixeira. A cópia no HD2 já foi verificada (rsync 2x)."; then
+    if confirmar_digitando "SIM" "Ação DESTRUTIVA e sem lixeira. A comparação rsync por checksum não encontrou divergências. Em NTFS, permissões/donos podem não ser preservados como em um filesystem POSIX."; then
         for ORIGEM in "${MIGRADOS[@]}"; do
             find "$ORIGEM" -mindepth 1 -delete
             info "Limpo: $ORIGEM"
@@ -181,4 +224,10 @@ else
 fi
 
 echo
-ok "Docs4 concluído. Reversão: restaurar o backup do fstab e desmontar (Capítulo 11, 'Como desfazer')."
+titulo "Reversão mínima local"
+info "Backup: use o caminho /etc/fstab.bak-AAAAMMDD-HHMMSS exibido no início desta execução."
+info "1. Desmonte cada bind com 'sudo umount <destino>': ${DESTINOS[*]}"
+aviso "Se apagou os originais, após desmontar cada bind recopie de $DOCS4/<pasta>/ para o destino correspondente antes de desmontar o HD2."
+info "2. Desmonte o HD2: sudo umount '$DOCS4'"
+info "3. Restaure o fstab: sudo cp '/etc/fstab.bak-AAAAMMDD-HHMMSS' /etc/fstab; depois execute 'sudo mount -a'."
+ok "Docs4 concluído."

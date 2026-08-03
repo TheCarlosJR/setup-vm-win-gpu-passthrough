@@ -2,12 +2,13 @@
 # ============================================================================
 # etapas/61-airlock.sh - Capítulo 24: Compartilhamento Seguro (Airlock)
 # ============================================================================
-# Canal ÚNICO de troca de arquivos host<->VM: /mnt/docs4/airlock exposto por
-# SFTP com chroot, chave obrigatória, usuário dedicado sem shell e firewall
-# restrito ao IP fixo da VM. As pastas reais do HD2 nunca são expostas.
+# Canal recomendado de troca host<->VM, exposto por SFTP com chroot, chave
+# obrigatória, usuário sem shell e firewall restrito ao IP fixo da VM.
+# O HD2 é dispensável: sem AIRLOCK_DIR, o padrão é /mnt/docs4/airlock e requer
+# /mnt/docs4 montado; configure AIRLOCK_DIR em outro filesystem para não usá-lo.
 #
 #   1. Grupo/usuário dedicados (airlock-transfer / vmtransfer)
-#   2. Pastas: /mnt/docs4/airlock (HD2) + /srv/airlock/files (chroot, NVMe)
+#   2. Pasta de trânsito + /srv/airlock/files (chroot)
 #   3. Visão de serviço bindfs (fstab, noexec/nosuid/nodev)
 #   4. sshd endurecido global + Match User com chroot e internal-sftp
 #   5. Instalação da chave pública gerada DENTRO do Windows
@@ -20,8 +21,7 @@
 #   61-airlock.sh --instalar-chave somente instala/troca a chave pública
 #   61-airlock.sh --verificar      status
 #
-# Observação: a alternativa Samba do manual NÃO é instalada por este script
-# (o manual manda escolher UM método; o padrão é SFTP).
+# A alternativa Samba não é instalada; o airlock/SFTP é o método recomendado.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -46,6 +46,84 @@ UFW_REGRAS_IPS=()
 UFW_REGRAS_INVALIDAS=()
 REGRA_UFW_IFACE=""
 REGRA_UFW_IP=""
+AIRLOCK_TX_ATIVA=0
+AIRLOCK_TX_DIR=""
+AIRLOCK_USUARIO_NOVO=0
+AIRLOCK_GRUPO_NOVO=0
+AIRLOCK_MONTAGEM_INICIAL=0
+AIRLOCK_UFW_ATIVO_INICIAL=0
+
+airlock_salvar_arquivo() {
+    local nome="$1" caminho="$2"
+    if sudo test -e "$caminho"; then
+        printf 'presente\n' > "$AIRLOCK_TX_DIR/$nome.estado"
+        sudo cp -a -- "$caminho" "$AIRLOCK_TX_DIR/$nome"
+    else
+        printf 'ausente\n' > "$AIRLOCK_TX_DIR/$nome.estado"
+    fi
+}
+
+airlock_restaurar_arquivo() {
+    local nome="$1" caminho="$2"
+    if [ "$(<"$AIRLOCK_TX_DIR/$nome.estado")" = "presente" ]; then
+        sudo mkdir -p "$(dirname "$caminho")" || return 1
+        sudo cp -a -- "$AIRLOCK_TX_DIR/$nome" "$caminho"
+    else
+        sudo rm -f -- "$caminho"
+    fi
+}
+
+airlock_iniciar_transacao() {
+    AIRLOCK_TX_DIR="$(mktemp -d)"
+    chmod 700 "$AIRLOCK_TX_DIR"
+    HOOK_DIR="/etc/libvirt/hooks/qemu.d/$VM_NAME/prepare/begin"
+    HOOK_FILE="$HOOK_DIR/00-airlock.sh"
+    airlock_salvar_arquivo fstab "$FSTAB"
+    airlock_salvar_arquivo sshd-dropin "$SSHD_DROPIN"
+    airlock_salvar_arquivo chave "/etc/ssh/authorized_keys/$TRANSFER_USER"
+    airlock_salvar_arquivo hook "$HOOK_FILE"
+    if sudo test -d /etc/ufw; then
+        printf 'presente\n' > "$AIRLOCK_TX_DIR/ufw.estado"
+        sudo cp -a /etc/ufw "$AIRLOCK_TX_DIR/ufw"
+    else
+        printf 'ausente\n' > "$AIRLOCK_TX_DIR/ufw.estado"
+    fi
+    sudo ufw status 2>/dev/null | grep -q 'Status: active' && AIRLOCK_UFW_ATIVO_INICIAL=1 || true
+    getent group airlock-transfer >/dev/null && AIRLOCK_GRUPO_NOVO=0 || AIRLOCK_GRUPO_NOVO=1
+    getent passwd "$TRANSFER_USER" >/dev/null && AIRLOCK_USUARIO_NOVO=0 || AIRLOCK_USUARIO_NOVO=1
+    mountpoint -q "$AIRLOCK_BIND" && AIRLOCK_MONTAGEM_INICIAL=1 || true
+    AIRLOCK_TX_ATIVA=1
+}
+
+airlock_rollback() {
+    aviso "Falha detectada: restaurando o estado anterior do Airlock..."
+    if [ "$AIRLOCK_MONTAGEM_INICIAL" -eq 0 ] && mountpoint -q "$AIRLOCK_BIND"; then
+        sudo umount "$AIRLOCK_BIND" || aviso "Não foi possível desmontar $AIRLOCK_BIND automaticamente."
+    fi
+    airlock_restaurar_arquivo fstab "$FSTAB" || aviso "Não foi possível restaurar $FSTAB."
+    airlock_restaurar_arquivo sshd-dropin "$SSHD_DROPIN" || aviso "Não foi possível restaurar o drop-in do sshd."
+    airlock_restaurar_arquivo chave "/etc/ssh/authorized_keys/$TRANSFER_USER" || aviso "Não foi possível restaurar a chave anterior."
+    airlock_restaurar_arquivo hook "$HOOK_FILE" || aviso "Não foi possível restaurar o hook anterior."
+    if [ "$(<"$AIRLOCK_TX_DIR/ufw.estado")" = "presente" ]; then
+        sudo rm -rf /etc/ufw && sudo cp -a "$AIRLOCK_TX_DIR/ufw" /etc/ufw || aviso "Não foi possível restaurar os arquivos do UFW."
+    else
+        sudo rm -rf /etc/ufw || aviso "Não foi possível remover a configuração UFW criada."
+    fi
+    if [ "$AIRLOCK_UFW_ATIVO_INICIAL" -eq 1 ]; then sudo ufw --force enable || true; else sudo ufw --force disable || true; fi
+    if sudo sshd -t; then sudo systemctl reload ssh || aviso "sshd restaurado, mas o reload falhou."; else aviso "Configuração SSH restaurada ainda não passa em sshd -t; revise pelo console."; fi
+    [ "$AIRLOCK_USUARIO_NOVO" -eq 0 ] || sudo userdel "$TRANSFER_USER" 2>/dev/null || true
+    [ "$AIRLOCK_GRUPO_NOVO" -eq 0 ] || sudo groupdel airlock-transfer 2>/dev/null || true
+    aviso "Rollback do Airlock concluído; diretórios vazios criados podem permanecer."
+}
+
+airlock_finalizar() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [ "$AIRLOCK_TX_ATIVA" -eq 1 ] && [ "$status" -ne 0 ]; then airlock_rollback; fi
+    [ -z "$AIRLOCK_TX_DIR" ] || sudo rm -rf "$AIRLOCK_TX_DIR"
+    encerrar_sudo_keepalive
+    exit "$status"
+}
 
 parsear_regra_ufw_airlock() {
     local linha="$1"
@@ -208,6 +286,10 @@ if [ "${1:-}" = "--instalar-chave" ]; then
     exigir_conf TRANSFER_USER
     nome_usuario_valido "$TRANSFER_USER" \
         || falhar "TRANSFER_USER='$TRANSFER_USER' não é um nome de usuário seguro."
+    titulo "Troca da chave pública do airlock"
+    info "Este submodo altera somente /etc/ssh/authorized_keys/$TRANSFER_USER; não exige reboot."
+    aviso "Ao colar uma chave, o arquivo inteiro será sobrescrito e a chave anterior deixará de autenticar."
+    info "ENTER preserva a chave atual; para recuperar uma troca incorreta, reinstale a chave por console ou acesso administrativo."
     sudo mkdir -p /etc/ssh/authorized_keys
     sudo chmod 755 /etc/ssh/authorized_keys
     instalar_chave
@@ -227,6 +309,14 @@ ip link show "$AIRLOCK_REDE_IFACE" >/dev/null 2>&1 \
 validar_ips_interface_rede "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO" "$IP_FIXO_HOST" \
     || falhar "$REDE_IP_ERRO"
 
+# Dependências são instaladas antes da transação; as mutações do Airlock abaixo
+# passam a ter rollback do estado que o script gerencia.
+dpkg -s bindfs >/dev/null 2>&1 || { sudo apt update; sudo apt install -y bindfs; }
+dpkg -s openssh-server >/dev/null 2>&1 || { sudo apt update; sudo apt install -y openssh-server; }
+dpkg -s ufw >/dev/null 2>&1 || { sudo apt update; sudo apt install -y ufw; }
+airlock_iniciar_transacao
+trap airlock_finalizar EXIT INT TERM
+
 titulo "Capítulo 24: Airlock (modo: $REDE_MODO; interface: $AIRLOCK_REDE_IFACE; VM: $VM_NAME)"
 case "$AIRLOCK_TRANSITO" in
     /*) : ;;
@@ -240,6 +330,23 @@ if [ "$AIRLOCK_TRANSITO" = "$AIRLOCK_BIND" ] \
     falhar "Os dois caminhos não podem coincidir nem conter um ao outro (montagem sobre si mesma)."
 fi
 info "Trânsito: $AIRLOCK_TRANSITO  ->  visão exposta: $AIRLOCK_BIND"
+
+echo
+cat <<ORIENTACAO
+Airlock/SFTP é o canal recomendado; esta execução fará, nesta ordem:
+  1. conta: grupo airlock-transfer e usuário sem shell $TRANSFER_USER;
+  2. pastas: trânsito $AIRLOCK_TRANSITO e chroot/visão $AIRLOCK_BIND;
+  3. fstab/bindfs: backup do fstab, linha persistente e montagem da visão;
+  4. SSH: drop-in global $SSHD_DROPIN, chave dedicada e reload imediato;
+  5. UFW: regra SFTP para VM Windows $VM_IP_FIXO em $AIRLOCK_REDE_IFACE,
+     políticas globais e ativação opcional;
+  6. hook: /etc/libvirt/hooks/qemu.d/$VM_NAME/prepare/begin/00-airlock.sh.
+HD2 é dispensável: o padrão é /mnt/docs4/airlock; AIRLOCK_DIR pode apontar
+para outro filesystem. Se qualquer fase falhar ou for interrompida, o script
+restaura fstab, SSH/chave, UFW, hook e a conta/grupo que tenha criado. SSH/UFW
+podem ter efeito imediato; não há reboot do host, e o hook atua no próximo
+start da VM. Revise o acesso por console antes de continuar.
+ORIENTACAO
 
 # ----------------------------------------------------------------------------
 # 1. Grupo e usuário dedicados
@@ -274,7 +381,6 @@ ok "Trânsito: $AIRLOCK_TRANSITO | Base do chroot (root:root 755): $AIRLOCK_BASE
 # 3. Visão de serviço (bindfs)
 # ----------------------------------------------------------------------------
 titulo "3/7 Visão de serviço (bindfs)"
-dpkg -s bindfs >/dev/null 2>&1 || { sudo apt update; sudo apt install -y bindfs; }
 OPCOES_BINDFS="force-user=$TRANSFER_USER,force-group=airlock-transfer,perms=0770,chmod-ignore,chown-ignore,allow_other,noexec,nosuid,nodev,nofail"
 [ "$DEPENDE_DOCS4" -eq 1 ] && OPCOES_BINDFS="${OPCOES_BINDFS},x-systemd.requires=$(sed 's/ /\\040/g' <<< "$DOCS4")"
 fstab_backup
@@ -292,7 +398,6 @@ ok "Ponta a ponta confirmado: escrita do $TRANSFER_USER na visão chega a $AIRLO
 # 4. Servidor SSH endurecido
 # ----------------------------------------------------------------------------
 titulo "4/7 Servidor SSH"
-dpkg -s openssh-server >/dev/null 2>&1 || { sudo apt update; sudo apt install -y openssh-server; }
 sudo mkdir -p /etc/ssh/authorized_keys
 sudo chmod 755 /etc/ssh/authorized_keys
 
@@ -324,10 +429,9 @@ sudo sed -i \
     -e "s|@AIRLOCK_BASE@|$AIRLOCK_BASE|g" \
     "$SSHD_DROPIN"
 
-if ! sudo sshd -t; then
-    sudo rm -f "$SSHD_DROPIN"
-    falhar "sshd -t reprovou a configuração; drop-in removido, nada aplicado."
-fi
+sudo sshd -t || falhar "sshd -t reprovou a configuração; o rollback será executado."
+sudo sshd -T -C "user=$TRANSFER_USER,addr=$VM_IP_FIXO,host=airlock" >/dev/null \
+    || falhar "sshd -T -C reprovou a configuração efetiva do usuário Airlock; o rollback será executado."
 sudo systemctl enable --now ssh
 sudo systemctl reload ssh
 ok "sshd validado (sshd -t) e recarregado."
@@ -346,7 +450,9 @@ fi
 # 6. Firewall (ufw)
 # ----------------------------------------------------------------------------
 titulo "6/7 Firewall (ufw: $AIRLOCK_REDE_IFACE <- $VM_IP_FIXO)"
-dpkg -s ufw >/dev/null 2>&1 || { sudo apt update; sudo apt install -y ufw; }
+aviso "As regras e políticas UFW abaixo são globais. Se o UFW já estiver ativo, cada alteração terá efeito imediato."
+aviso "Se você administra por SSH, deixar o IP do administrador vazio pode bloquear o acesso quando deny incoming for aplicado."
+info "Informe um IPv4 administrativo estável/correto ou garanta acesso por console antes de prosseguir."
 
 # O comentário é a identidade da regra gerenciada. Captura e valida TODAS as
 # ocorrências antes de qualquer adição; uma ocorrência não parseável fecha o
@@ -360,29 +466,30 @@ if confirmar "Você acessa este host por SSH de OUTRO dispositivo (ex.: notebook
         ok "Regra anti-lockout criada para $IP_ADMIN."
     fi
 fi
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-
-for IDX_REGRA in "${!UFW_REGRAS_MARCADAS[@]}"; do
-    IFACE_ANTIGA="${UFW_REGRAS_IFACES[$IDX_REGRA]}"
-    IP_ANTIGO="${UFW_REGRAS_IPS[$IDX_REGRA]}"
-    if ! sudo ufw --force delete allow in on "$IFACE_ANTIGA" from "$IP_ANTIGO" \
-        to any port 22 proto tcp comment "$UFW_MARCADOR" >/dev/null; then
-        falhar "Falha ao remover regra UFW marcada em interface=$IFACE_ANTIGA, origem=$IP_ANTIGO; nenhuma regra nova foi adicionada."
-    fi
-done
-coletar_regras_ufw_airlock normal || falhar "$UFW_COLETA_ERRO"
-[ "${#UFW_REGRAS_MARCADAS[@]}" -eq 0 ] \
-    || falhar "Ainda existem ${#UFW_REGRAS_MARCADAS[@]} regras UFW marcadas após a remoção; adição recusada."
-ok "Cardinalidade UFW marcada confirmada em zero antes da adição."
-
-sudo ufw allow in on "$AIRLOCK_REDE_IFACE" from "$VM_IP_FIXO" \
-    to any port 22 proto tcp comment "$UFW_MARCADOR"
+TOTAL_EXATAS="$(contar_regras_ufw_airlock_exatas "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO")"
+if [ "$TOTAL_EXATAS" -eq 0 ]; then
+    sudo ufw allow in on "$AIRLOCK_REDE_IFACE" from "$VM_IP_FIXO" \
+        to any port 22 proto tcp comment "$UFW_MARCADOR"
+fi
 coletar_regras_ufw_airlock normal || falhar "$UFW_COLETA_ERRO"
 TOTAL_MARCADAS="${#UFW_REGRAS_MARCADAS[@]}"
 TOTAL_EXATAS="$(contar_regras_ufw_airlock_exatas "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO")"
-[ "$TOTAL_MARCADAS" -eq 1 ] && [ "$TOTAL_EXATAS" -eq 1 ] \
-    || falhar "Pós-condição UFW falhou: esperado marcado=1/exato=1 para $AIRLOCK_REDE_IFACE <- $VM_IP_FIXO porta 22/tcp; encontrado marcado=$TOTAL_MARCADAS/exato=$TOTAL_EXATAS."
+[ "$TOTAL_EXATAS" -eq 1 ] || falhar "A regra substituta UFW não pôde ser comprovada antes de remover regras antigas."
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+MANTEVE_EXATA=0
+for IDX_REGRA in "${!UFW_REGRAS_IFACES[@]}"; do
+    if [ "${UFW_REGRAS_IFACES[$IDX_REGRA]}" = "$AIRLOCK_REDE_IFACE" ] && [ "${UFW_REGRAS_IPS[$IDX_REGRA]}" = "$VM_IP_FIXO" ] && [ "$MANTEVE_EXATA" -eq 0 ]; then
+        MANTEVE_EXATA=1
+        continue
+    fi
+    sudo ufw --force delete allow in on "${UFW_REGRAS_IFACES[$IDX_REGRA]}" from "${UFW_REGRAS_IPS[$IDX_REGRA]}" \
+        to any port 22 proto tcp comment "$UFW_MARCADOR" >/dev/null || falhar "Falha ao remover regra UFW antiga; o rollback será executado."
+done
+coletar_regras_ufw_airlock normal || falhar "$UFW_COLETA_ERRO"
+TOTAL_MARCADAS="${#UFW_REGRAS_MARCADAS[@]}"
+TOTAL_EXATAS="$(contar_regras_ufw_airlock_exatas "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO")"
+[ "$TOTAL_MARCADAS" -eq 1 ] && [ "$TOTAL_EXATAS" -eq 1 ] || falhar "Pós-condição UFW falhou; o rollback será executado."
 ok "UFW confirmado com exatamente uma regra marcada e exata para interface/IP/porta/protocolo atuais."
 echo
 aviso "Política: tudo que não for liberado explicitamente será bloqueado na entrada."
@@ -395,12 +502,11 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 7. Hook 00-airlock.sh (antes do 01-gpu-para-vfio.sh, ordem alfabética)
+# 7. Hook 00-airlock.sh (antes do 01-gpu-preflight.sh, ordem alfabética)
 # ----------------------------------------------------------------------------
 titulo "7/7 Hook de criação automática"
-HOOK_DIR="/etc/libvirt/hooks/qemu.d/$VM_NAME/prepare/begin"
 sudo mkdir -p "$HOOK_DIR"
-sudo tee "$HOOK_DIR/00-airlock.sh" >/dev/null <<'HOOKAIR'
+sudo tee "$HOOK_FILE" >/dev/null <<'HOOKAIR'
 #!/bin/bash
 # 00-airlock.sh (gerado por etapas/61-airlock.sh)
 # Garante a pasta de transito e sua visao de servico antes da preparacao da GPU.
@@ -443,10 +549,10 @@ sudo sed -i \
     -e "s|@AIRLOCK_BIND@|$AIRLOCK_BIND|g" \
     -e "s|@DOCS4@|$DOCS4|g" \
     -e "s|@DEPENDE_DOCS4@|$DEPENDE_DOCS4|g" \
-    "$HOOK_DIR/00-airlock.sh"
-sudo chmod +x "$HOOK_DIR/00-airlock.sh"
-sudo chown root:root "$HOOK_DIR/00-airlock.sh"
-ok "Hook instalado: $HOOK_DIR/00-airlock.sh (roda ANTES do 01-gpu-para-vfio.sh)."
+    "$HOOK_FILE"
+sudo chmod +x "$HOOK_FILE"
+sudo chown root:root "$HOOK_FILE"
+ok "Hook instalado: $HOOK_FILE (roda ANTES do 01-gpu-preflight.sh)."
 
 # ----------------------------------------------------------------------------
 echo
