@@ -34,14 +34,16 @@ DM_SERVICE=""
 
 # --- Discos (Capítulos 5, 11 e 19) ------------------------------------------
 NVME_DEVICE=""                   # ex. de formato: /dev/nvme0n1
-UUID_HD2=""                      # <UUID_HD2> (obtido com blkid)
-HD2_DISCO_PAI=""                 # preenchido pela etapa 02: disco físico do HD2,
-                                 # usado para nunca oferecê-lo à VM por engano
-HD1_BY_ID_PATH=""                # disco inteiro entregue à VM (/dev/disk/by-id/...)
+UUID_HD2=""                      # partição NTFS opcional de documentos (blkid)
+HD2_DISCO_PAI=""                 # disco físico pai atual do HD2; protege-o da VM
+HD2_DISPENSADO=""                # "sim" quando você escolheu 0 (sem HD2 separado)
+DOCS4_DISPENSADO=""              # "sim" para a etapa 14 registrar Docs4 como pulado
+HD1_BY_ID_PATH=""                # disco INTEIRO entregue à VM (/dev/disk/by-id/...)
+                                 # ex.: o pai /dev/sdb, incluindo /dev/sdb1
                                  # VAZIO = nenhum: a VM usa somente o QCOW2
-HD1_DISPENSADO=""                # "sim" quando você escolheu NÃO usar disco físico
-                                 # (evita a etapa 02 reperguntar a cada execução)
-DOCS4_MONTAGEM="/mnt/docs4"      # onde o HD2 (documentos) é montado
+HD1_DISPENSADO=""                # "sim" quando você escolheu 0 (sem disco físico)
+                                 # evita a etapa 02 reperguntar a cada execução
+DOCS4_MONTAGEM="/mnt/docs4"      # onde o HD2 de documentos seria montado
 
 # --- VM (Capítulos 17 e 21) --------------------------------------------------
 QCOW2_PATH="/vm/Windows11.qcow2"

@@ -53,6 +53,16 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+titulo "Antes de continuar"
+info "Objetivo: preparar o armazenamento e definir/iniciar a VM do Windows 11 com UEFI, TPM, VirtIO e NAT temporária."
+info "Pré-requisitos: etapas 20, 21 (já em sessão nova) e 30 fase B concluídas, ISOs oficiais disponíveis e espaço suficiente no volume do QCOW2."
+info "Alterações: salva caminhos das ISOs; a cópia opcional para /vm/iso preserva os originais; adiciona '/vm/** rwk,' à abstração local do AppArmor e a recarrega; cria o QCOW2 dinâmico se ausente; ativa a rede default; virt-install define e inicia a VM."
+info "Recomendação: mantenha backup de qualquer QCOW2 existente, confirme o espaço livre e use somente ISOs obtidas dos canais oficiais."
+aviso "Riscos: a regra AppArmor concede ao QEMU leitura/escrita/bloqueio sob /vm; falta de espaço pode corromper o convidado; uma interrupção pode deixar disco, configuração ou definição parciais."
+info "VM existente: a etapa aborta antes dessas alterações. 'undefine --nvram' remove a definição e a NVRAM, mas não apaga o QCOW2 sem --remove-all-storage; o arquivo existente permanece e será reutilizado."
+aviso "virsh reset é um reset forçado, equivalente ao botão físico: só é aceitável no primeiro boot, enquanto não houver dados importantes; depois use desligamento/reinício normal do Windows."
+info "Retorno/reboot: não exige reboot do host e não há rollback automático; com a VM desligada, undefine remove apenas a definição/NVRAM, enquanto QCOW2, ISOs e a regra AppArmor exigem revisão manual separada."
+
 exigir_nao_root
 exigir_sudo
 exigir_comando virt-install qemu-img virsh xmlstarlet

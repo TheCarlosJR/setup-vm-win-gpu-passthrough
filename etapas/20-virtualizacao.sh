@@ -29,6 +29,15 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+titulo "Antes de continuar"
+info "Objetivo: instalar a pilha KVM/QEMU/libvirt usada para criar e executar a VM do Windows 11."
+info "Pré-requisitos: SVM/virtualização habilitada na BIOS, rede para o APT e a etapa 12 (pacotes base) concluída."
+info "Pacotes: qemu-kvm/qemu-utils virtualizam e gerenciam discos; libvirt-daemon-system/libvirt-clients fornecem libvirtd e virsh; virtinst/virt-manager criam e exibem a VM; OVMF e swtpm fornecem UEFI e TPM 2.0; bridge-utils apoia a rede posterior."
+info "Alterações: atualiza o índice do APT, instala esses pacotes, habilita/inicia libvirtd e instala cpu-checker somente se o comando kvm-ok estiver ausente."
+info "Recomendação: não interrompa o APT e só avance depois de confirmar KVM, OVMF e a conexão qemu:///system."
+aviso "Riscos: uma interrupção pode deixar pacotes ou o serviço incompletos; esta etapa não cria nem altera discos ou VMs."
+info "Retorno/reboot: não há rollback automático nem reboot obrigatório; antes de remover pacotes ou desabilitar libvirtd, confirme que nenhuma VM depende deles."
+
 exigir_nao_root
 exigir_sudo
 
@@ -36,13 +45,15 @@ titulo "Capítulo 13: Pilha de virtualização"
 sudo apt update
 sudo apt install -y "${PACOTES[@]}"
 
-info "Habilitando e iniciando o libvirtd..."
+info "Habilitando e iniciando o libvirtd, serviço que gerencia as VMs do modo sistema..."
 sudo systemctl enable --now libvirtd
 sudo systemctl status libvirtd --no-pager | head -n 5
 
 titulo "Verificações do capítulo"
 info "Aceleração KVM:"
+info "Resultado esperado do kvm-ok: /dev/kvm existe e 'KVM acceleration can be used'."
 if ! command -v kvm-ok >/dev/null 2>&1; then
+    info "kvm-ok não está disponível; instalando o pacote cpu-checker para executar a verificação."
     sudo apt install -y cpu-checker
 fi
 kvm-ok || aviso "kvm-ok reprovou: revise SVM na BIOS (etapa 01/Capítulo 12)."

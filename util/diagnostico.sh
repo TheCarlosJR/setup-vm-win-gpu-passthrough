@@ -1,15 +1,11 @@
 #!/bin/bash
 # ============================================================================
-# util/diagnostico.sh - Capítulo 28: bloco de diagnóstico geral
+# util/diagnostico.sh - coleta diagnóstica parcial do host e da VM
 # ============================================================================
-# Primeiro passo diante de QUALQUER problema: coleta o estado de todas as
-# camadas (VM, IOMMU, módulos, driver da GPU, libvirtd, AppArmor) e salva
-# um relatório datado em ~/inventario-hardware/.
-# Metodologia do manual: diagnosticar de baixo (firmware) para cima (guest).
-#
-# SEM "set -e" de propósito: um diagnóstico precisa terminar o relatório mesmo
-# quando comandos falham ou não encontram nada. É justamente o caso em que a
-# informação "está vazio" é a pista mais importante.
+# Reúne sinais do libvirt, IOMMU, módulos, GPU, memória, montagens e journals
+# em um relatório datado. Não corrige falhas nem certifica que o host está
+# saudável. Falhas de comandos individuais são mantidas no relatório sempre
+# que possível para não interromper a coleta.
 # ============================================================================
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -20,9 +16,19 @@ exigir_sudo
 mkdir -p "$HOME/inventario-hardware"
 ARQUIVO="$HOME/inventario-hardware/diagnostico-$(date +%Y%m%d-%H%M).txt"
 
+titulo "Diagnóstico parcial do host e da VM"
+info "Finalidade: reunir evidências locais para investigar VM, IOMMU, GPU, memória, montagens e serviços."
+info "Pré-requisitos: usuário comum com sudo; virsh, lspci e nvidia-smi enriquecem a coleta, mas ausências são registradas."
+aviso "Efeito/risco: grava $ARQUIVO e inclui cmdline, nomes/caminhos, dispositivos e logs potencialmente sensíveis."
+aviso "Uma segunda execução no mesmo minuto usa o mesmo nome; permissões do arquivo dependem do umask."
+info "Recomendação: mantenha o relatório local e revise-o integralmente antes de compartilhar."
+info "Não abrange: firmware/BIOS, XML/NVRAM/TPM completos, estado interno do Windows nem teste de restauração."
+info "Retorno/reboot: chegar ao fim não aprova a configuração; falhas pontuais podem constar no texto. Nenhum reboot é feito."
+
 secao() { echo; echo "== $* =="; }
 
-# roda "comando..." e, se falhar ou não imprimir nada, registra o motivo
+# Executa o comando e preserva sua saída; se ele falhar sem saída ou não
+# encontrar nada, registra uma indicação no relatório.
 coletar() {
     local saida status
     saida="$("$@" 2>&1)"
@@ -99,5 +105,8 @@ exige() {
 } | tee "$ARQUIVO"
 
 echo
-ok "Relatório salvo em: $ARQUIVO"
-info "Interprete com o Capítulo 28 (Code 43, reset bug, grupo IOMMU, AppArmor...)."
+info "Destino solicitado para o relatório: $ARQUIVO (confirme que o arquivo foi gravado e está legível)."
+aviso "Antes de compartilhar, faça ao menos esta triagem local; ela não detecta todo dado sensível:"
+printf '  less %q\n' "$ARQUIVO"
+printf "  grep -nEi 'senha|password|token|secret|chave|private|key|IP|MAC|UUID|serial|/home/' %q\n" "$ARQUIVO"
+info "Leia também o contexto das ocorrências e remova/redija somente na cópia que será compartilhada."

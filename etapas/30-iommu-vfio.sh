@@ -49,6 +49,17 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+titulo "Antes de continuar"
+info "Objetivo: habilitar IOMMU/VFIO no host e validar que o grupo PCI da GPU é seguro para passthrough dinâmico."
+info "Pré-requisitos: SVM e IOMMU habilitados na BIOS, configuração da etapa 02 completa e etapa 21 concluída já em uma sessão nova."
+info "Fases: a A altera boot/módulos e exige reboot; após reiniciar, execute novamente esta mesma etapa/opção para a fase B validar o kernel e registrar o grupo da GPU."
+info "Alterações: a fase A define amd_iommu=on iommu=pt, substitui /etc/modules-load.d/vfio.conf e regenera o initramfs; a B grava IOMMU_GROUP_GPU e o inventário em ~/inventario-hardware/."
+info "Recomendação: não interrompa a atualização do boot/initramfs e guarde a saída que identifica o backup real do GRUB."
+aviso "Riscos: parâmetros ou initramfs inválidos podem impedir o próximo boot; não reinicie se houver erro ou rollback não comprovado."
+info "Retorno no kernelstub: sudo kernelstub -d \"amd_iommu=on iommu=pt\"."
+info "Retorno no GRUB: use o caminho exato mostrado por 'Backup do GRUB preservado em:' para restaurar /etc/default/grub e rode sudo update-grub."
+info "Retorno comum: remova /etc/modules-load.d/vfio.conf, rode sudo update-initramfs -u -k all e reinicie; não há reboot automático na fase B."
+
 exigir_nao_root
 exigir_sudo
 exigir_comando lspci
@@ -84,9 +95,11 @@ MODULOS
     if [ "$BOOTLOADER" = "kernelstub" ]; then
         info "  sudo kernelstub -d \"amd_iommu=on iommu=pt\""
     else
-        info "  restaurar /etc/default/grub.bak-<data> e rodar sudo update-grub"
+        info "  restaure em /etc/default/grub o arquivo cujo caminho exato foi exibido acima por 'Backup do GRUB preservado em:'"
+        info "  sudo update-grub"
     fi
     info "  sudo rm /etc/modules-load.d/vfio.conf && sudo update-initramfs -u -k all"
+    info "Após o reboot, execute novamente esta mesma etapa/opção; ela entrará na fase B."
     pedir_reboot
     exit 0
 fi

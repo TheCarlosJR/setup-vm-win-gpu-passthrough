@@ -26,7 +26,7 @@ fi
 ETAPAS=(
     "00-inventario.sh|Inventário de hardware (Cap. 3)|auto|"
     "01-verificar-bios.sh|BIOS/UEFI: checklist e verificação (Cap. 12)|manual|"
-    "02-detectar-config.sh|Detectar/confirmar configuração central|auto|"
+    "02-detectar-config.sh|Configuração central interativa: GPU, discos, CPU/RAM e rede|auto|"
     "10-atualizar-sistema.sh|Atualizar sistema e firmware (Cap. 7)|auto|reboot"
     "11-driver-nvidia.sh|Driver NVIDIA no host (Cap. 8)|auto|reboot"
     "12-pacotes-base.sh|Pacotes base (Cap. 9)|auto|"
@@ -49,9 +49,9 @@ ETAPAS=(
 UTILS=(
     "diagnostico.sh|Diagnóstico geral (Cap. 28)"
     "listar-grupos-iommu.sh|Listar grupos IOMMU (Cap. 16)"
-    "snapshot-vm.sh|Snapshots da VM (Cap. 25)"
+    "snapshot-vm.sh|Gerenciar snapshots QCOW2 (retorno rápido; não são backup) (Cap. 25)"
     "backup-vm.sh|Backup real da VM no HD2 (Cap. 25)"
-    "atualizar-host.sh|Atualização segura do host (Cap. 26)"
+    "atualizar-host.sh|Atualizar host (snapshot se possível, full-upgrade, reboot e validação) (Cap. 26)"
     "recuperar-gpu.sh|EMERGÊNCIA: devolver a GPU ao Linux (Cap. 29)"
 )
 
@@ -72,7 +72,11 @@ status_etapa() {
 imprimir_lista() {
     echo
     echo "${C_NEGRITO}Windows 11 VM + GPU Passthrough (Pop!_OS): etapas${C_RESET}"
-    echo "Conf: ${CONF_ARQUIVO} $( [ -f "$CONF_ARQUIVO" ] && echo '(presente)' || echo '(AUSENTE: comece pela 02)')"
+    echo "Conf: ${CONF_ARQUIVO} $( [ -f "$CONF_ARQUIVO" ] && echo '(presente)' || echo '(AUSENTE: execute a opção 3)')"
+    echo "Execute como usuário normal; no modo interativo, sudo será solicitado quando necessário."
+    echo "A opção 3 é a configuração central interativa de GPU, discos, CPU/RAM e rede."
+    echo "O menu apenas consulta status e inicia o item escolhido; cada fluxo informa alterações e riscos."
+    echo "Recomendação: siga a ordem e, após <reboot>/<logout>, retorne ao menu antes de continuar."
     echo
     local i=1 entrada arquivo titulo tipo pos st simbolo
     for entrada in "${ETAPAS[@]}"; do
@@ -117,32 +121,67 @@ exigir_nao_root
 exigir_sudo
 STATUS_PRIVILEGIADO=1
 
+limpar_terminal_menu() {
+    # A saída da etapa permanece visível até o ENTER. A limpeza ocorre somente
+    # quando o menu vai ser redesenhado e nunca no modo não interativo --status.
+    if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] && command -v clear >/dev/null 2>&1; then
+        clear 2>/dev/null || true
+    fi
+}
+
+executar_no_menu() {
+    local caminho="$1" rc resposta
+    echo
+    bash "$caminho"
+    rc=$?
+    case "$rc" in
+        0) ok "Execução concluída." ;;
+        "$CODIGO_VOLTAR_MENU"|130)
+            info "Execução cancelada; voltando ao menu principal."
+            return 0
+            ;;
+        "$CODIGO_SAIR_MENU")
+            return "$CODIGO_SAIR_MENU"
+            ;;
+        *) erro "O comando terminou com status $rc. A saída acima foi preservada para diagnóstico." ;;
+    esac
+    echo
+    read -r -p "ENTER ou v para voltar ao menu; q para sair: " resposta || return 0
+    case "${resposta,,}" in
+        q|sair) return "$CODIGO_SAIR_MENU" ;;
+        *) return 0 ;;
+    esac
+}
+
 while :; do
+    limpar_terminal_menu
     imprimir_lista
     echo
-    read -r -p "Etapa (1-${#ETAPAS[@]}), utilitário (u1-u${#UTILS[@]}), r=recarregar, q=sair: " ESCOLHA
-    case "$ESCOLHA" in
-        q|Q) exit 0 ;;
-        r|R|"") continue ;;
+    read -r -p "Etapa (1-${#ETAPAS[@]}), utilitário (u1-u${#UTILS[@]}), r/v=recarregar, 0/q=sair: " ESCOLHA || exit 0
+    case "${ESCOLHA,,}" in
+        0|q|sair) exit 0 ;;
+        r|v|voltar|"") continue ;;
         u[0-9]*)
-            IDX="${ESCOLHA#u}"
-            if [ "$IDX" -ge 1 ] && [ "$IDX" -le "${#UTILS[@]}" ]; then
-                IFS='|' read -r ARQUIVO _ <<< "${UTILS[$((IDX-1))]}"
-                echo
-                bash "$PROJETO_DIR/util/$ARQUIVO" || true
-                echo
-                read -r -p "ENTER para voltar ao menu..." _
+            IDX="${ESCOLHA#?}"
+            if [[ "$IDX" =~ ^[0-9]+$ ]] && [ "$((10#$IDX))" -ge 1 ] && [ "$((10#$IDX))" -le "${#UTILS[@]}" ]; then
+                IFS='|' read -r ARQUIVO _ <<< "${UTILS[$((10#$IDX - 1))]}"
+                executar_no_menu "$PROJETO_DIR/util/$ARQUIVO" || {
+                    [ "$?" -eq "$CODIGO_SAIR_MENU" ] && exit 0
+                }
+            else
+                aviso "Utilitário inválido: '$ESCOLHA'."
             fi
             ;;
         [0-9]*)
-            if [ "$ESCOLHA" -ge 1 ] && [ "$ESCOLHA" -le "${#ETAPAS[@]}" ]; then
-                IFS='|' read -r ARQUIVO _ _ _ <<< "${ETAPAS[$((ESCOLHA-1))]}"
-                echo
-                bash "$PROJETO_DIR/etapas/$ARQUIVO" || true
-                echo
-                read -r -p "ENTER para voltar ao menu..." _
+            if [[ "$ESCOLHA" =~ ^[0-9]+$ ]] && [ "$((10#$ESCOLHA))" -ge 1 ] && [ "$((10#$ESCOLHA))" -le "${#ETAPAS[@]}" ]; then
+                IFS='|' read -r ARQUIVO _ _ _ <<< "${ETAPAS[$((10#$ESCOLHA - 1))]}"
+                executar_no_menu "$PROJETO_DIR/etapas/$ARQUIVO" || {
+                    [ "$?" -eq "$CODIGO_SAIR_MENU" ] && exit 0
+                }
+            else
+                aviso "Etapa inválida: '$ESCOLHA'."
             fi
             ;;
-        *) ;;
+        *) aviso "Opção inválida: '$ESCOLHA'." ;;
     esac
 done

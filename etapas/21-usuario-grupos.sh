@@ -25,6 +25,14 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+titulo "Antes de continuar"
+info "Objetivo: permitir que o usuário opere libvirt/KVM e que o processo libvirt-qemu grave os arquivos da VM em /vm."
+info "Pré-requisitos: conclua a opção 7 do menu (cria /vm) e a opção 9 (instala libvirt/KVM e cria o usuário libvirt-qemu); confira também USUARIO_LINUX."
+info "Alterações: acrescenta o usuário aos grupos libvirt e kvm, define /vm como root:libvirt-qemu com modo 770, habilita libvirtd/virtlogd e cria/remove um arquivo temporário de teste."
+info "Recomendação: execute esta etapa antes de criar a VM e confirme depois, em sessão nova, os comandos id e virsh sem sudo."
+aviso "Riscos: os grupos concedem controle sobre VMs/KVM; o modo 770 retira acesso a /vm de usuários fora do dono/grupo, e o estado anterior não é salvo."
+info "Retorno/reboot: não exige reboot, mas é obrigatório encerrar o menu e toda a sessão, fazer logout/login (ou reiniciar) e só então reabrir o menu; qualquer reversão de grupos/permissões é manual."
+
 exigir_nao_root
 exigir_sudo
 exigir_conf USUARIO_LINUX
@@ -35,7 +43,7 @@ info "Confirmando os nomes de usuário/grupo de sistema criados pelo libvirt:"
 getent passwd | grep -i libvirt || true
 getent group  | grep -i libvirt || true
 getent passwd libvirt-qemu >/dev/null \
-    || falhar "Usuário de sistema 'libvirt-qemu' não existe. A etapa 20 foi concluída?"
+    || falhar "Usuário de sistema 'libvirt-qemu' não existe. As opções 7 e 9 foram concluídas?"
 
 info "Adicionando $USUARIO_LINUX aos grupos libvirt e kvm..."
 sudo usermod -aG libvirt "$USUARIO_LINUX"
@@ -60,6 +68,6 @@ fi
 echo
 ok "Etapa concluída."
 aviso "IMPORTANTE: os novos grupos só valem em sessões NOVAS."
-aviso "Faça LOGOUT e LOGIN (ou reinicie) antes da etapa 30."
-info "Depois do login, confirme com: id   (deve listar libvirt e kvm)"
+aviso "Encerre este menu e faça LOGOUT e LOGIN de toda a sessão (ou reinicie) antes da etapa 30."
+info "Depois do login, reabra o menu e confirme com: id   (deve listar libvirt e kvm)"
 info "E teste sem sudo: virsh --connect qemu:///system list --all"

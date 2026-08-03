@@ -192,13 +192,18 @@ main() {
 
     local params
     params="$(param_isolamento)"
-    titulo "CPU isolation opcional"
+    titulo "Isolamento opcional de CPU"
+    aviso "Otimização opcional: aplique somente após medir um baseline e comprovar gargalo de latência/CPU."
+    info "A opção 3 da etapa 02 apenas registra o plano; a etapa 52 aplica o pinning, e esta etapa só isola CPUs já pinadas."
+    info "Fase 1: gravar isolcpus/nohz_full/rcu_nocbs, reiniciar o host e executar esta etapa novamente."
+    info "Fase 2: comprovar o isolamento; não exige novo reboot do host."
     info "CPUs online=[$CPU_LAYOUT_ONLINE] VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
-    aviso "Com isolamento ativo, CPUS_VM deixa de receber processos comuns do host mesmo com a VM desligada."
+    aviso "Com isolamento ativo, CPUS_VM deixa de atender processos comuns do host mesmo com a VM desligada."
+    aviso "Na etapa 52, HugePages também podem manter RAM indisponível ao host com a VM desligada."
 
     if ! kernel_parametros_persistentes_exatos "$params"; then
         aviso "Persistência atual divergente/duplicada: ${KERNEL_PERSISTENCIA_ERRO:-estado não exato}."
-        confirmar "Sanear por chave e definir isolcpus/nohz_full/rcu_nocbs como '$CPUS_VM' via $BOOTLOADER?" \
+        confirmar "Remover todas as ocorrências atuais de isolcpus, nohz_full e rcu_nocbs e gravar exatamente '$CPUS_VM' via $BOOTLOADER?" \
             || falhar "Cancelado sem alterações."
         kernel_param_add "$params"
         kernel_parametros_persistentes_exatos "$params" \
@@ -214,13 +219,15 @@ main() {
     fi
     isolamento_efetivo_exato \
         || falhar "A cmdline está presente, mas o efeito do kernel diverge: $ISOLAMENTO_ERRO"
-    ok "isolcpus/nohz_full estão efetivos e exatos; rcu_nocbs está ativo e único na cmdline."
+    ok "Fase 2 concluída: isolcpus/nohz_full estão efetivos e exatos; rcu_nocbs está ativo e único na cmdline."
+    info "Não há novo reboot do host nesta fase; --desfazer remove as três opções e exige reboot."
     info "Não há máscara RCU estável em todos os kernels; o suporte foi provado por CONFIG_RCU_NOCB_CPU=y."
     info "Reversão: bash etapas/53-cpu-isolation.sh --desfazer"
 
     echo
     titulo "Parte no Windows (MSI)"
-    info "Dentro da VM, execute como administrador: windows/Ativar-MSI-GPU.ps1"
+    aviso "windows/Ativar-MSI-GPU.ps1 altera o Registro do Windows; salve o trabalho antes de executá-lo."
+    info "Dentro da VM, execute o script como administrador e reinicie a VM para a alteração produzir efeito."
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

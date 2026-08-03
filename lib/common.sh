@@ -741,20 +741,57 @@ exigir_config_rede() {
 }
 
 # --- Interação ----------------------------------------------------------------
+# Códigos reservados para que uma etapa filha possa controlar o menu sem que
+# cancelamento seja confundido com falha técnica.
+CODIGO_VOLTAR_MENU=20
+CODIGO_SAIR_MENU=21
+
+cancelar_etapa() {
+    aviso "${*:-Operação cancelada; voltando ao menu principal.}" >&2
+    exit "$CODIGO_VOLTAR_MENU"
+}
+
 confirmar() {
-    # confirmar "Pergunta?" -> retorna 0 se sim. Padrão: NÃO.
-    local resposta
-    read -r -p "$1 [s/N] " resposta
-    [[ "$resposta" =~ ^[sS]([iI][mM])?$ ]]
+    # confirmar "Pergunta?" -> 0 se sim; padrão NÃO. v volta ao menu e q
+    # encerra o menu (ou apenas a etapa quando executada diretamente).
+    local resposta normalizada
+    read -r -p "$1 [s/N; v=voltar; q=sair] " resposta || return 1
+    normalizada="${resposta,,}"
+    case "$normalizada" in
+        s|sim) return 0 ;;
+        v|voltar)
+            aviso "Operação cancelada; voltando ao menu principal." >&2
+            exit "$CODIGO_VOLTAR_MENU"
+            ;;
+        q|sair)
+            aviso "Saída solicitada pelo usuário." >&2
+            exit "$CODIGO_SAIR_MENU"
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 confirmar_digitando() {
-    # confirmar_digitando PALAVRA "mensagem" -> exige digitar a PALAVRA exata
-    local palavra="$1" msg="$2" resposta
+    # confirmar_digitando PALAVRA "mensagem" -> exige a PALAVRA exata; também
+    # aceita v/voltar e q/sair como comandos de navegação.
+    local palavra="$1" msg="$2" resposta normalizada
     echo
     aviso "$msg"
-    read -r -p "Digite ${palavra} (maiúsculas) para confirmar; qualquer outra coisa cancela: " resposta
-    [ "$resposta" = "$palavra" ]
+    read -r -p "Digite ${palavra} para confirmar; v=voltar; q=sair; outra resposta cancela: " resposta \
+        || return 1
+    [ "$resposta" = "$palavra" ] && return 0
+    normalizada="${resposta,,}"
+    case "$normalizada" in
+        v|voltar)
+            aviso "Operação cancelada; voltando ao menu principal." >&2
+            exit "$CODIGO_VOLTAR_MENU"
+            ;;
+        q|sair)
+            aviso "Saída solicitada pelo usuário." >&2
+            exit "$CODIGO_SAIR_MENU"
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 perguntar() {
@@ -772,23 +809,34 @@ perguntar() {
 
 perguntar_inteiro() {
     # perguntar_inteiro "texto" PADRAO MIN MAX -> imprime um inteiro VÁLIDO.
-    # Repergunta em vez de deixar o script morrer com valor fora da faixa ou
-    # com texto no lugar de número (proteção de interface).
-    local texto="$1" padrao="${2:-}" min="$3" max="$4" resposta
+    # v/voltar retorna ao menu e q/sair encerra o menu. Entradas inválidas são
+    # reperguntadas em vez de derrubar o script.
+    local texto="$1" padrao="${2:-}" min="$3" max="$4" resposta normalizada
     while :; do
-        resposta="$(perguntar "$texto ($min-$max)" "$padrao")"
+        resposta="$(perguntar "$texto ($min-$max; v=voltar; q=sair)" "$padrao")"
+        normalizada="${resposta,,}"
+        case "$normalizada" in
+            v|voltar)
+                aviso "Seleção cancelada; voltando ao menu principal." >&2
+                return "$CODIGO_VOLTAR_MENU"
+                ;;
+            q|sair)
+                aviso "Saída solicitada pelo usuário." >&2
+                return "$CODIGO_SAIR_MENU"
+                ;;
+        esac
         if [[ "$resposta" =~ ^[0-9]+$ ]] && [ "$resposta" -ge "$min" ] && [ "$resposta" -le "$max" ]; then
             echo "$resposta"
             return 0
         fi
-        erro "Valor inválido: '${resposta}'. Informe um número inteiro entre $min e $max."
+        erro "Valor inválido: '${resposta}'. Informe um número entre $min e $max, v para voltar ou q para sair."
     done
 }
 
 escolher_da_lista() {
     # escolher_da_lista "pergunta" sim|nao item1 item2 ...
     # Lista os itens numerados (em stderr) e imprime no stdout o ÍNDICE
-    # escolhido: 1..N, ou 0 quando "nenhum" é permitido e o usuário escolhe 0.
+    # escolhido: 1..N, ou 0 quando o chamador permite não selecionar item.
     local pergunta="$1" permitir_nenhum="$2"
     shift 2
     local itens=("$@") i min=1 padrao=""
@@ -796,9 +844,10 @@ escolher_da_lista() {
         printf '  %d) %s\n' "$((i + 1))" "${itens[$i]}" >&2
     done
     if [ "$permitir_nenhum" = "sim" ]; then
-        printf '  0) nenhum\n' >&2
+        printf '  0) não selecionar item\n' >&2
         min=0
     fi
+    printf '  v) voltar ao menu principal\n  q) sair\n' >&2
     [ "${#itens[@]}" -eq 1 ] && [ "$min" -eq 1 ] && padrao=1
     perguntar_inteiro "$pergunta" "$padrao" "$min" "${#itens[@]}"
 }
@@ -851,9 +900,10 @@ disco_raiz() {
 DISCO_USO_ERRO=""
 disco_em_uso_pelo_host() {
     # Retornos: 0=em uso/montado, 1=inspeção concluída e livre, 2=erro de
-    # inspeção. Consumidores destrutivos devem tratar qualquer valor >1 como
-    # bloqueio, nunca como "livre".
-    local disco="$1" raizes raiz real saida
+    # inspeção. Além de mountpoints, bloqueia swap, device-mapper/LVM/MD e
+    # qualquer holder ativo no disco ou em suas partições.
+    local disco="$1" raizes raiz real saida caminho tipo nome holder swap swap_real no_real
+    local -a nos=()
     DISCO_USO_ERRO=""
     real="$(readlink -f -- "$disco" 2>/dev/null)" \
         || { DISCO_USO_ERRO="Não foi possível resolver $disco."; return 2; }
@@ -865,10 +915,52 @@ disco_em_uso_pelo_host() {
             || { DISCO_USO_ERRO="Não foi possível resolver um ancestral físico da raiz."; return 2; }
         [ "$real" != "$raiz" ] || return 0
     done <<< "$raizes"
-    saida="$(lsblk -nlo NAME,MOUNTPOINTS -- "$real" 2>/dev/null)" \
+
+    saida="$(lsblk -nrpo PATH,MOUNTPOINTS -- "$real" 2>/dev/null)" \
         || { DISCO_USO_ERRO="lsblk falhou ao inspecionar montagens de $real."; return 2; }
-    if awk 'NF>1 && $2!="" {encontrado=1} END{exit !encontrado}' <<< "$saida"; then
+    if awk 'NF > 1 && $2 != "" {encontrado=1} END {exit !encontrado}' <<< "$saida"; then
         return 0
+    fi
+
+    saida="$(lsblk -nrpo PATH,TYPE -- "$real" 2>/dev/null)" \
+        || { DISCO_USO_ERRO="lsblk falhou ao inspecionar consumidores de $real."; return 2; }
+    while read -r caminho tipo; do
+        [ -n "$caminho" ] && [ -n "$tipo" ] \
+            || { DISCO_USO_ERRO="Topologia de bloco incompleta ao inspecionar $real."; return 2; }
+        nos+=("$caminho")
+        case "$tipo" in
+            disk|part) ;;
+            *) return 0 ;; # crypt, lvm, raid, multipath e similares
+        esac
+    done <<< "$saida"
+    [ "${#nos[@]}" -gt 0 ] \
+        || { DISCO_USO_ERRO="Nenhum nó de bloco foi enumerado para $real."; return 2; }
+
+    for caminho in "${nos[@]}"; do
+        nome="${caminho##*/}"
+        [ -d "/sys/class/block/$nome/holders" ] \
+            || { DISCO_USO_ERRO="Não foi possível inspecionar holders de $caminho."; return 2; }
+        for holder in "/sys/class/block/$nome/holders/"*; do
+            [ -e "$holder" ] || continue
+            return 0
+        done
+    done
+
+    if [ -r /proc/swaps ]; then
+        while read -r swap _; do
+            [ "$swap" != "Filename" ] || continue
+            [ -n "$swap" ] || continue
+            swap_real="$(readlink -f -- "$swap" 2>/dev/null || true)"
+            [ -n "$swap_real" ] || continue
+            for caminho in "${nos[@]}"; do
+                no_real="$(readlink -f -- "$caminho" 2>/dev/null || true)"
+                [ -n "$no_real" ] || continue
+                [ "$swap_real" != "$no_real" ] || return 0
+            done
+        done < /proc/swaps
+    else
+        DISCO_USO_ERRO="Não foi possível ler /proc/swaps."
+        return 2
     fi
     return 1
 }

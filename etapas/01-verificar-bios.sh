@@ -18,9 +18,9 @@ verificar() {
         v_falta "Flag 'svm' ausente: habilite SVM Mode na BIOS."
     fi
     if [ -d /sys/firmware/efi ]; then
-        v_ok "Sistema inicializado em modo UEFI (CSM desabilitado)."
+        v_ok "Sistema inicializado em modo UEFI."
     else
-        v_falta "Sistema em modo Legacy/BIOS: desabilite o CSM na BIOS."
+        v_falta "Sistema em Legacy/BIOS: confirme ou converta a instalação para UEFI antes de desativar o CSM."
     fi
     if [ -e /dev/kvm ]; then
         v_ok "/dev/kvm existe (SVM ativo e módulo KVM carregado)."
@@ -35,12 +35,18 @@ exigir_nao_root
 exigir_sudo
 
 titulo "Capítulo 12: BIOS/UEFI (ASUS TUF Gaming B550-Plus WiFi II)"
+info "Finalidade: orientar a configuração manual da virtualização e verificar do Linux o que for observável."
+info "Pré-requisitos: acesso à BIOS/UEFI, senha sudo e registro dos valores atuais antes de alterá-los."
+info "Este script apenas orienta e lê o estado atual; não modifica nem reinicia a BIOS/UEFI."
+aviso "Os caminhos ASUS abaixo são referências: nomes e posições variam conforme placa e versão do firmware."
+aviso "RISCO: se o Linux foi instalado em Legacy, desativar o CSM pode impedir a inicialização do host."
+info "Recomendação: confirme ou converta o boot do Linux para UEFI antes de desativar o CSM."
 
 cat <<'CHECKLIST'
 Esta etapa é MANUAL. Reinicie, pressione Del durante o logotipo ASUS,
-entre no Advanced Mode (F7) e aplique a tabela-resumo do manual:
+entre no Advanced Mode (F7) e localize as opções equivalentes:
 
-  | Opção                  | Menu (típico)                                        | Valor final |
+  | Opção                  | Menu (referência ASUS)                               | Valor final |
   |------------------------|------------------------------------------------------|-------------|
   | SVM Mode               | Advanced > CPU Configuration (ou AMD CBS > CPU ...)  | Enabled     |
   | IOMMU                  | Advanced > AMD CBS > NBIO Common Options             | Enabled     |
@@ -49,7 +55,8 @@ entre no Advanced Mode (F7) e aplique a tabela-resumo do manual:
   | CSM                    | Boot                                                 | Disabled    |
   | Secure Boot > OS Type  | Boot > Secure Boot                                   | Other OS    |
 
-Salve com F10 (Save Changes and Reset).
+Salve com F10 (Save Changes and Reset). O firmware reiniciará o host; quando o
+Linux voltar, execute esta etapa novamente para validar e depois retorne ao menu.
 
 Observações do manual:
   - Nomes de menu variam entre versões de firmware; procure termos similares.
@@ -73,7 +80,7 @@ echo "2) Modo de firmware:"
 if [ -d /sys/firmware/efi ]; then
     ok "Modo UEFI."
 else
-    aviso "Modo Legacy/BIOS: desabilite o CSM (e revise o Capítulo 6 se o SO foi instalado em Legacy)."
+    aviso "Modo Legacy/BIOS: não desative o CSM antes de converter ou reinstalar o boot do Linux em UEFI."
 fi
 
 echo "3) Mensagens AMD-Vi/IOMMU no kernel:"
@@ -91,4 +98,5 @@ else
 fi
 
 echo
-info "Se algo acima falhou, ajuste a BIOS e rode este script novamente."
+info "Se algo acima falhou, ajuste a BIOS, salve e aguarde o reboot; então rode este script novamente."
+info "Se tudo estiver correto, volte ao menu. Este script não reinicia o host por conta própria."

@@ -604,7 +604,7 @@ verificar() {
             v_falta "Fonte da NIC da VM não é bridge=$REDE_BRIDGE."
         fi
         if validar_ips_interface_rede "$REDE_BRIDGE" "${VM_IP_FIXO:-}" "${IP_FIXO_HOST:-}"; then
-            v_ok "IPs bridge coerentes: VM=$VM_IP_FIXO, host=$IP_FIXO_HOST, mesma sub-rede de $REDE_BRIDGE."
+            v_ok "Endereços da bridge coerentes: VM Windows=$VM_IP_FIXO, host Linux=$IP_FIXO_HOST, na mesma sub-rede de $REDE_BRIDGE."
         else
             v_falta "$REDE_IP_ERRO"
         fi
@@ -692,11 +692,11 @@ verificar() {
             v_falta "Fonte da NIC da VM não é network=$REDE_LIBVIRT."
         fi
         [ "${VM_IP_FIXO:-}" = "$NAT_VM_IP" ] \
-            && v_ok "VM_IP_FIXO=$VM_IP_FIXO (reserva DHCP libvirt)." \
-            || v_falta "VM_IP_FIXO deveria ser $NAT_VM_IP."
+            && v_ok "IP da VM Windows=$VM_IP_FIXO (reserva DHCP libvirt)." \
+            || v_falta "O IP da VM Windows deveria ser $NAT_VM_IP."
         [ "${IP_FIXO_HOST:-}" = "$NAT_GATEWAY" ] \
-            && v_ok "IP_FIXO_HOST=$IP_FIXO_HOST (gateway virtual do host)." \
-            || v_falta "IP_FIXO_HOST deveria ser $NAT_GATEWAY."
+            && v_ok "Gateway virtual do host=$IP_FIXO_HOST." \
+            || v_falta "O gateway virtual do host deveria ser $NAT_GATEWAY."
     fi
     v_fim
 }
@@ -718,6 +718,22 @@ if [ "$REDE_MODO" = "nat" ]; then
         || falhar "INTERFACE_FISICA=$INTERFACE_FISICA, mas a rota IPv4 efetiva usa $UPLINK_IPV4_EFETIVO. Torne o adaptador selecionado a rota padrão ou desconecte/ajuste a métrica do outro e execute novamente; nenhuma alteração foi feita."
     ok "Trava NAT: $INTERFACE_FISICA é o uplink IPv4 efetivo (consulta local; nenhum pacote enviado)."
 fi
+
+titulo "Orientação antes das alterações de rede"
+cat <<ORIENTACAO
+Finalidade: conectar a NIC persistente da VM pelo modo selecionado: $REDE_MODO.
+  bridge: põe a VM diretamente na LAN; exige Ethernet e altera o Netplan do host.
+  NAT: mantém a VM em rede privada atrás do libvirt; aceita Ethernet/Wi-Fi e não altera Netplan.
+Endereços: VM_IP_FIXO é o IP da VM Windows; IP_FIXO_HOST é o IP do host na
+bridge (modo bridge) ou o gateway virtual do host acessível pela VM (modo NAT).
+Risco: no modo bridge, mover $INTERFACE_FISICA para $REDE_BRIDGE pode derrubar
+rede e SSH imediatamente; prefira console local e uma janela de manutenção.
+Recuperação: antes do commit, falha/sinal aciona o rollback do estado capturado.
+Na bridge, netplan try volta em cerca de 120 s sem confirmação; se necessário,
+use o console local para restaurar o backup datado anunciado e rode netplan apply.
+No modo bridge, IP vazio deixa reservas, --verificar e a etapa 61 pendentes.
+Não há reboot do host; a NIC persistente será usada no próximo start da VM.
+ORIENTACAO
 
 TMP_DIR="$(mktemp -d)"
 trap 'tratar_saida $?' EXIT
@@ -992,15 +1008,15 @@ NETPLAN
     ip link show "$REDE_BRIDGE" | awk '/link\/ether/{print $2; achou=1} END{if (!achou) print "não encontrado"}'
     cat <<INSTRUCOES
 No roteador:
-  1. reserve um IP da LAN para o MAC da VM -> VM_IP_FIXO;
-  2. reserve outro IP para o MAC de $REDE_BRIDGE -> IP_FIXO_HOST.
-A etapa 61 restringe o airlock ao par interface=$REDE_BRIDGE e IP da VM.
+  1. reserve um endereço da LAN para o MAC da VM -> IP da VM Windows (VM_IP_FIXO);
+  2. reserve outro para o MAC de $REDE_BRIDGE -> IP do host Linux na bridge (IP_FIXO_HOST).
+A etapa 61 restringe o airlock à interface $REDE_BRIDGE e ao IP da VM Windows.
 INSTRUCOES
-    if resposta="$(perguntar_ipv4_opcional 'IP reservado para a VM' "${VM_IP_FIXO:-}")"; then
+    if resposta="$(perguntar_ipv4_opcional 'IP reservado para a VM Windows' "${VM_IP_FIXO:-}")"; then
         salvar_conf_transacao VM_IP_FIXO "$resposta"
     fi
     host_atual="$(ip -4 -o addr show dev "$REDE_BRIDGE" 2>/dev/null | awk 'NR==1 {sub(/\/.*/, "", $4); print $4}')"
-    if resposta="$(perguntar_ipv4_opcional "IP reservado para o host/$REDE_BRIDGE" "${IP_FIXO_HOST:-$host_atual}")"; then
+    if resposta="$(perguntar_ipv4_opcional "IP reservado para o host Linux em $REDE_BRIDGE" "${IP_FIXO_HOST:-$host_atual}")"; then
         salvar_conf_transacao IP_FIXO_HOST "$resposta"
     fi
     if [ -n "${VM_IP_FIXO:-}" ] && [ -n "${IP_FIXO_HOST:-}" ]; then
@@ -1008,9 +1024,10 @@ INSTRUCOES
             || falhar "$REDE_IP_ERRO Corrija as reservas/renove o DHCP e execute a etapa novamente."
         ok "Reservas coerentes com o IPv4 efetivo de $REDE_BRIDGE."
     else
-        aviso "IPs da bridge ainda incompletos; o --verificar e a etapa 61 permanecerão pendentes."
+        aviso "Endereços da bridge incompletos: a rede pode estar aplicada, mas a etapa 60 permanece pendente."
+        aviso "Preencha o IP da VM Windows e o IP do host Linux, renove o DHCP e rode --verificar antes da etapa 61."
     fi
-    info "No Windows, 'ipconfig' deve mostrar VM_IP_FIXO na mesma sub-rede da LAN."
+    info "No Windows, 'ipconfig' deve mostrar o IP da VM Windows na mesma sub-rede da LAN."
 }
 
 netmask_para_prefixo() {
@@ -1489,9 +1506,9 @@ XML
     salvar_conf_transacao REDE_NAT_CIDR "$REDE_NAT_CIDR"
     salvar_conf_transacao VM_IP_FIXO "$NAT_VM_IP"
     salvar_conf_transacao IP_FIXO_HOST "$NAT_GATEWAY"
-    ok "Reserva DHCP criada automaticamente: $VM_NIC_MAC -> $VM_IP_FIXO."
-    ok "Gateway virtual do host gravado em IP_FIXO_HOST=$IP_FIXO_HOST."
-    info "Ao iniciar/renovar DHCP no Windows, ele usará $VM_IP_FIXO; o airlock ficará em $IP_FIXO_HOST."
+    ok "Reserva DHCP automática: $VM_NIC_MAC -> IP da VM Windows $VM_IP_FIXO."
+    ok "Gateway virtual do host acessível pela VM: $IP_FIXO_HOST."
+    info "Ao iniciar/renovar DHCP no Windows, a VM usará $VM_IP_FIXO e acessará o airlock no host em $IP_FIXO_HOST."
 }
 
 garantir_vm_nic_mac
@@ -1503,4 +1520,5 @@ esac
 commit_transacao
 
 echo
-ok "Etapa 60 concluída: modo=$REDE_MODO, uplink=$INTERFACE_FISICA, NIC=$VM_NIC_MAC."
+ok "Alterações da etapa 60 aplicadas: modo=$REDE_MODO, uplink=$INTERFACE_FISICA, NIC=$VM_NIC_MAC."
+info "A etapa só fica pronta para o airlock quando os endereços da VM Windows e do host estão preenchidos e --verificar aprova."

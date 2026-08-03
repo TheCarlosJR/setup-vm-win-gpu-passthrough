@@ -1,10 +1,22 @@
 #!/bin/bash
 # ============================================================================
-# etapas/50-hooks-gpu-hd1.sh - Capítulo 19: GPU dinâmica + HD1 físico
+# etapas/50-hooks-gpu-hd1.sh - Capítulo 19: GPU dinâmica + HD1 opcional
 # ============================================================================
 # O libvirt (hostdev managed='yes') é a única autoridade para detach/reattach
 # PCI. Os hooks apenas fazem preflight, liberam/restauram a sessão gráfica e
 # conferem as pós-condições. Nenhum hook escreve em bind/unbind/new_id.
+# O HD1 físico é opcional: HD1_DISPENSADO=sim mantém a VM somente no QCOW2.
+#
+# Uso:
+#   50-hooks-gpu-hd1.sh                         instala/atualiza hooks e XML
+#   50-hooks-gpu-hd1.sh --verificar             verifica sem alterar
+#   50-hooks-gpu-hd1.sh --renderizar-hooks DIR_EXISTENTE  renderiza/valida
+#   50-hooks-gpu-hd1.sh [--remover-video] [--anti-code43]
+#       aplica o fluxo normal e, ao final, os submodos solicitados.
+#
+# Falha ou cancelamento durante a transação restaura hooks/XML automaticamente.
+# Recuperar a GPU no host não desfaz a configuração persistente; após sucesso,
+# a reversão exige restaurar os backups de XML/hooks em janela de manutenção.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -95,8 +107,12 @@ verificar() {
         else
             v_falta "Áudio da GPU ausente, duplicado ou sem managed='yes' no XML."
         fi
-        if [ -z "${HD1_BY_ID_PATH:-}" ]; then
-            v_ok "Fluxo sem disco físico dedicado."
+        if [ -n "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
+            v_falta "Configuração contraditória: HD1 definido e dispensado ao mesmo tempo."
+        elif [ -z "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
+            v_ok "Fluxo sem disco físico dedicado (opção 0 registrada)."
+        elif [ -z "${HD1_BY_ID_PATH:-}" ]; then
+            v_falta "Uso do HD1 ainda não decidido na etapa 02."
         elif disco_estado_xml "$HD1_BY_ID_PATH" \
              && [ "$DISCO_XML_SOURCE" = 1 ] && [ "$DISCO_XML_EXATO" = 1 ]; then
             if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" "${HD2_DISCO_PAI:-}"; then
@@ -126,12 +142,16 @@ validar_config_hooks() {
         exigir_conf GPU_AUDIO_VENDOR_DEVICE_ID
         pci_vendor_device_valido "$GPU_AUDIO_VENDOR_DEVICE_ID" || falhar "GPU_AUDIO_VENDOR_DEVICE_ID inválido."
     fi
-    if [ -n "${HD1_BY_ID_PATH:-}" ]; then
+    if [ -n "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
+        falhar "Configuração contraditória: HD1_BY_ID_PATH definido e HD1_DISPENSADO=sim."
+    elif [ -n "${HD1_BY_ID_PATH:-}" ]; then
         caminho_absoluto_seguro "$HD1_BY_ID_PATH" || falhar "HD1_BY_ID_PATH inseguro."
         exigir_conf NVME_DEVICE
         if [ -n "${UUID_HD2:-}" ]; then
             exigir_conf HD2_DISCO_PAI
         fi
+    elif [ "${HD1_DISPENSADO:-}" != "sim" ]; then
+        falhar "Uso do disco físico adicional ainda não foi decidido. Rode a etapa 02 e escolha um disco ou a opção 0."
     fi
 }
 
@@ -701,6 +721,36 @@ if [ -n "${HD1_BY_ID_PATH:-}" ]; then
         falhar "O alvo vdb já pertence a outro disco no XML; não será substituído."
     fi
 fi
+
+echo
+cat <<'ORIENTACAO'
+Resumo antes de aplicar:
+  - finalidade: entregar GPU/áudio à VM com hooks transacionais do libvirt;
+  - pré-requisitos: VM desligada, IOMMU/preflights aprovados e acesso por TTY;
+  - HD1: totalmente opcional; a opção 0 mantém somente o QCOW2;
+  - alterações: hooks do host e XML persistente; não exige reboot do host;
+  - recomendação/risco: valide primeiro o Windows no QCOW2 e tenha backup do HD1;
+  - retorno: falha ou cancelamento restaura a transação; se houver HD1, cancelar
+    a segunda confirmação ANEXAR também restaura automaticamente hooks e XML.
+ORIENTACAO
+
+titulo "Confirmação antes de alterar hooks e XML"
+info "Todos os preflights terminaram. Até este ponto, hooks e XML da VM não foram alterados."
+info "A etapa instalará/atualizará hooks do libvirt e anexará GPU/áudio ao XML persistente da VM."
+if [ -n "${HD1_BY_ID_PATH:-}" ]; then
+    echo "Disco físico que também será autorizado:"
+    lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL "$ALVO_HD1"
+    aviso "PERDA DE DADOS: o Windows terá escrita no DISCO INTEIRO acima e em todas as suas partições."
+    aviso "O script não o formata, mas inicializar, reparticionar, formatar ou instalar o Windows"
+    aviso "nesse disco pode destruir todos os dados. Confirme que existe backup verificado."
+    aviso "Conclua antes a instalação do Windows no QCOW2 e nunca selecione este HD físico como destino do instalador."
+else
+    info "Opção 0 registrada: nenhum disco físico será anexado; a VM permanecerá somente com o QCOW2."
+fi
+confirmar_digitando APLICAR \
+    "Aplicar agora as alterações de hooks e XML descritas acima?" \
+    || cancelar_etapa "Aplicação cancelada antes da primeira alteração persistente."
+
 XML_ANTES="$(mktemp)" || falhar "Não foi possível criar backup temporário do XML."
 $VIRSH dumpxml --inactive "$VM_NAME" > "$XML_ANTES" || falhar "Não foi possível capturar XML original."
 xml_backup "$VM_NAME"
@@ -994,8 +1044,13 @@ anexar_hd1() {
         return 0
     fi
     [ "$DISCO_XML_SOURCE" = 0 ] && [ "$DISCO_XML_VDB" = 0 ] || return 1
-    confirmar_digitando ANEXAR "O disco inteiro $HD1_BY_ID_PATH ($ALVO_HD1, $HD1_IDENTIDADE) será entregue à VM." \
-        || return 1
+    echo "Revisão final do disco antes do attach:"
+    lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL "$ALVO_HD1" || return 1
+    aviso "PERDA DE DADOS: este attach concede ao Windows escrita no disco inteiro e em todas as partições."
+    aviso "Não inicialize, reparticione nem formate o disco no Windows se deseja preservar os dados existentes."
+    confirmar_digitando ANEXAR \
+        "Entregar $HD1_BY_ID_PATH ($ALVO_HD1, $HD1_IDENTIDADE) à VM?" \
+        || return "$CODIGO_VOLTAR_MENU"
     arquivo="$(mktemp)" || return 1
     cat > "$arquivo" <<XML
 <disk type='block' device='disk'>
@@ -1013,7 +1068,14 @@ XML
     disco_estado_xml "$HD1_BY_ID_PATH" \
         && [ "$DISCO_XML_SOURCE" = 1 ] && [ "$DISCO_XML_EXATO" = 1 ]
 }
-if ! anexar_hd1; then
+if anexar_hd1; then
+    :
+else
+    ANEXAR_RC=$?
+    if [ "$ANEXAR_RC" -eq "$CODIGO_VOLTAR_MENU" ]; then
+        aviso "Attach cancelado; a transação restaurará automaticamente hooks e XML anteriores."
+        exit "$CODIGO_VOLTAR_MENU"
+    fi
     falhar "HD1 não foi anexado com segurança; a transação restaurará XML e hooks."
 fi
 exigir_vm_desligada "$VM_NAME"
@@ -1058,6 +1120,16 @@ if [ "${1:-}" = "--anti-code43" ] || [ "${2:-}" = "--anti-code43" ]; then
     rm -f -- "$TMPX"
     ok "Ocultação de hypervisor aplicada."
 fi
+
+cat <<'RECUPERACAO'
+
+Recuperação e reversão:
+  - falha/sinal ou cancelamento de ANEXAR durante a transação: rollback automático;
+  - GPU não restaurada ao host: use um TTY e execute bash util/recuperar-gpu.sh;
+  - após sucesso não há --desfazer: restaure o backup XML informado e, se
+    necessário, os hooks em /etc/libvirt/hooks/.vm-passthrough-backups/.
+  O utilitário de recuperação da GPU não desfaz o XML nem os hooks persistentes.
+RECUPERACAO
 
 cat <<TESTE
 

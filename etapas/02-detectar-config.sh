@@ -32,7 +32,7 @@ verificar() {
     local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0 topologia ram_max
     local cpu_completa=1 memoria_completa=1
     for var in USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID \
-               UUID_HD2 CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS \
+               CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS \
                VM_RAM_MB HUGEPAGES_1G DM_SERVICE; do
         if [ -n "${!var:-}" ]; then
             v_ok "$var=${!var}"
@@ -48,9 +48,9 @@ verificar() {
         topologia="$(cpu_topologia_csv)" || topologia=""
         if [ -n "$topologia" ] \
            && validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$topologia"; then
-            v_ok "Partição CPU cobre exatamente as CPUs online por socket/core."
+            v_ok "Plano de pinning de CPU cobre exatamente as CPUs online por socket/core."
         else
-            v_falta "Configuração relacional de CPU inválida: ${CPU_LAYOUT_ERRO:-topologia indisponível}."
+            v_falta "Plano relacional de CPU inválido: ${CPU_LAYOUT_ERRO:-topologia indisponível}."
         fi
     fi
     if [ "$memoria_completa" -eq 1 ]; then
@@ -103,13 +103,38 @@ verificar() {
     else
         v_ok "GPU sem função de áudio HDMI em passthrough (escolha registrada)."
     fi
-    # Disco físico da VM: opcional por decisão do usuário
-    if [ -n "${HD1_BY_ID_PATH:-}" ]; then
-        v_ok "HD1_BY_ID_PATH=$HD1_BY_ID_PATH"
+    # HD2 de documentos: opcional, mas a decisão precisa ser explícita e
+    # relacionalmente consistente.
+    if [ -n "${UUID_HD2:-}" ] && [ "${HD2_DISPENSADO:-}" = "sim" ]; then
+        v_falta "Configuração contraditória: UUID_HD2 definido e HD2_DISPENSADO=sim."
+    elif [ -n "${UUID_HD2:-}" ]; then
+        if [ -n "${HD2_DISCO_PAI:-}" ]; then
+            v_ok "HD2 de documentos: UUID=$UUID_HD2; disco pai=$HD2_DISCO_PAI."
+        else
+            v_falta "UUID_HD2 definido sem HD2_DISCO_PAI; rode --redetectar."
+        fi
+    elif [ "${HD2_DISPENSADO:-}" = "sim" ]; then
+        if [ -z "${HD2_DISCO_PAI:-}" ]; then
+            v_ok "Sem HD2 de documentos (escolha registrada)."
+        else
+            v_falta "HD2 dispensado, mas HD2_DISCO_PAI ainda está definido."
+        fi
+    else
+        v_falta "HD2 de documentos ainda não decidido (UUID ou opção 0)."
+    fi
+    # Disco físico da VM: opcional por decisão do usuário.
+    if [ -n "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
+        v_falta "Configuração contraditória: HD1_BY_ID_PATH definido e HD1_DISPENSADO=sim."
+    elif [ -n "${HD1_BY_ID_PATH:-}" ]; then
+        if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" "${HD2_DISCO_PAI:-}"; then
+            v_ok "HD1 válido, livre e exclusivo da VM: $HD1_BY_ID_PATH -> $DISCO_VM_ALVO."
+        else
+            v_falta "HD1 inválido ou inseguro no estado atual: $DISCO_VM_ERRO"
+        fi
     elif [ "${HD1_DISPENSADO:-}" = "sim" ]; then
         v_ok "Sem disco físico dedicado à VM (escolha registrada)."
     else
-        v_falta "Disco da VM ainda não decidido (caminho ou 'nenhum')."
+        v_falta "Disco da VM ainda não decidido (caminho ou opção 0)."
     fi
     v_fim
 }
@@ -128,6 +153,13 @@ ja_definido() {
 }
 
 titulo "Detecção de configuração (grava em $CONF_ARQUIVO)"
+info "Finalidade: configurar interativamente GPU, discos, plano de CPU/RAM, rede e complementos."
+info "Pré-requisitos: execute como usuário normal com sudo; mantenha GPU, discos e rede que serão usados conectados."
+info "Alteração desta etapa: cria ou atualiza apenas o arquivo central passthrough.conf."
+aviso "As respostas são salvas por bloco à medida que o fluxo avança; cancelar não desfaz blocos anteriores."
+info "Use --redetectar para rever decisões salvas. Nada é formatado, montado, anexado à VM ou aplicado ao kernel aqui."
+aviso "Risco: uma identificação errada pode orientar etapas posteriores; confira modelos, seriais, IDs e o resumo final."
+info "Recomendação: mantenha o inventário da opção 1 à mão. Não exige reboot; ao concluir, volte ao menu."
 [ -f "$CONF_ARQUIVO" ] || { cp "$PROJETO_DIR/passthrough.conf.example" "$CONF_ARQUIVO"; info "Conf criado a partir do modelo."; }
 
 # ----------------------------------------------------------------------------
@@ -211,7 +243,7 @@ else
         info "Há mais de uma saída de vídeo: o host pode continuar com o desktop ativo em outra GPU."
         aviso "Os hooks da etapa 50 param o gerenciador de exibição de todo jeito (desenho do"
         aviso "manual, feito para GPU única). Se quiser manter o desktop vivo, edite depois"
-        aviso "/etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/01-gpu-para-vfio.sh e remova o systemctl stop."
+        aviso "/etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/01-gpu-preflight.sh e remova o systemctl stop."
     fi
 
     if [ "${#CANDIDATAS[@]}" -gt 1 ]; then
@@ -277,12 +309,13 @@ fi
 # 5. Discos (Capítulos 5, 11 e 19)
 # ----------------------------------------------------------------------------
 titulo "5/8 Discos"
+info "O disco físico que contém a montagem '/' será apenas registrado e protegido das escolhas da VM."
 DISCO_RAIZ="$(disco_raiz || true)"
 if [ -n "$DISCO_RAIZ" ]; then
-    ok "Disco da RAIZ do Linux: $DISCO_RAIZ (protegido: nunca será oferecido à VM)"
+    ok "Disco físico que contém '/': $DISCO_RAIZ (somente registrado e protegido; não será alterado nem oferecido à VM)"
 else
-    aviso "Não consegui identificar o disco da raiz automaticamente."
-    aviso "As travas automáticas ficam mais fracas: confira modelo/serial com muito cuidado."
+    aviso "Não consegui identificar o disco físico que contém '/'."
+    aviso "As travas automáticas ficam mais fracas: confira modelo/serial com muito cuidado; nada será alterado nesta escolha."
 fi
 echo "Visão geral (compare com o inventário da etapa 00):"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL,TRAN
@@ -290,78 +323,137 @@ echo
 
 # 5a. Disco do sistema
 if ja_definido NVME_DEVICE; then
-    info "NVME_DEVICE (disco do sistema) já definido: $NVME_DEVICE"
+    info "Disco físico que contém '/' já registrado e protegido: $NVME_DEVICE"
 else
     if [ -n "$DISCO_RAIZ" ]; then
         salvar_conf NVME_DEVICE "$DISCO_RAIZ"
-        ok "Disco do sistema: $NVME_DEVICE (detectado pela montagem de /)"
+        ok "Disco físico que contém '/' registrado e protegido: $NVME_DEVICE"
     else
         mapfile -t DISCOS < <(lsblk -dn -o NAME,SIZE,MODEL | awk '{print "/dev/"$0}')
         [ "${#DISCOS[@]}" -gt 0 ] || falhar "Nenhum disco listado por lsblk."
-        echo "Qual disco contém o sistema (raiz do Linux)?"
+        echo "Qual disco físico contém a montagem '/' do Linux?"
         IDX="$(escolher_da_lista 'Disco do sistema (número)' nao "${DISCOS[@]}")"
         salvar_conf NVME_DEVICE "$(awk '{print $1}' <<< "${DISCOS[$((IDX - 1))]}")"
     fi
 fi
 
-# 5b. HD2 (partição NTFS montada em /mnt/docs4) - identificado por UUID
+# 5b. HD2 de documentos do Linux (opcional) - identificado por UUID
 if ja_definido UUID_HD2; then
-    info "UUID_HD2 já definido: $UUID_HD2"
+    [ "${HD2_DISPENSADO:-}" != "sim" ] \
+        || falhar "Configuração contraditória: UUID_HD2 definido e HD2_DISPENSADO=sim. Rode --redetectar."
+    DEV_HD2_ATUAL="$({ sudo blkid -t "UUID=$UUID_HD2" -o device 2>/dev/null || true; } | head -n1)"
+    [ -n "$DEV_HD2_ATUAL" ] && [ -b "$DEV_HD2_ATUAL" ] \
+        || falhar "O UUID persistido do HD2 ($UUID_HD2) não resolve para uma partição atual. Rode --redetectar."
+    HD2_PAI_ATUAL="$(disco_de "$DEV_HD2_ATUAL" 2>/dev/null || true)"
+    [ -n "$HD2_PAI_ATUAL" ] \
+        || falhar "Não foi possível identificar o disco pai atual de $DEV_HD2_ATUAL."
+    HD1_ATUAL_ALVO="$(readlink -f -- "${HD1_BY_ID_PATH:-}" 2>/dev/null || true)"
+    if [ -n "$HD1_ATUAL_ALVO" ] && [ "$HD1_ATUAL_ALVO" = "$HD2_PAI_ATUAL" ]; then
+        aviso "O HD2 atual coincide com o HD1 anteriormente salvo; a decisão insegura do HD1 será limpa."
+        salvar_conf_lote HD2_DISCO_PAI "$HD2_PAI_ATUAL" HD1_BY_ID_PATH "" HD1_DISPENSADO ""
+    elif [ "${HD2_DISCO_PAI:-}" != "$HD2_PAI_ATUAL" ]; then
+        aviso "O nome do disco pai do HD2 mudou: ${HD2_DISCO_PAI:-não registrado} -> $HD2_PAI_ATUAL."
+        salvar_conf HD2_DISCO_PAI "$HD2_PAI_ATUAL"
+    fi
+    info "HD2 de documentos já definido: $DEV_HD2_ATUAL (UUID=$UUID_HD2; pai=$HD2_DISCO_PAI)"
+elif [ "$REDETECTAR" -eq 0 ] && [ "${HD2_DISPENSADO:-}" = "sim" ]; then
+    info "Sem HD2/Docs4 do host (dispensa salva; use --redetectar para rever)."
 else
-    echo "Partições NTFS encontradas (candidatas a HD2, o disco de DOCUMENTOS do Linux):"
+    titulo "HD2/Docs4 do host (partição NTFS opcional; não vai para o Windows)"
+    cat <<'EXPLICA_HD2'
+Este primeiro seletor registra, opcionalmente, uma PARTIÇÃO NTFS usada pelo host
+como Docs4 em /mnt/docs4. Ela não será entregue ao Windows; o seletor do disco
+físico adicional da VM aparece logo depois.
+
+Esta escolha apenas registra o UUID e o disco pai: nada é formatado, montado ou
+migrado agora. A etapa 14 fará a montagem, a migração e os binds de Docs4.
+Somente partições NTFS aparecem porque essa etapa usa ntfs-3g; uma partição ext4
+como /dev/sdb1 não é candidata neste seletor.
+
+Digite 0 para dispensar HD2/Docs4. A dispensa fica salva e será reutilizada até
+você executar esta etapa com --redetectar.
+EXPLICA_HD2
     mapfile -t NTFS_DEVS < <({ sudo blkid -t TYPE=ntfs -o device 2>/dev/null || true; \
                                sudo blkid -t TYPE=ntfs3 -o device 2>/dev/null || true; } | sort -u)
-    if [ "${#NTFS_DEVS[@]}" -eq 0 ]; then
-        erro "Nenhuma partição NTFS encontrada. O HD2 é o disco onde ficam seus documentos"
-        erro "e a pasta de transferência (airlock) do Capítulo 24."
-        falhar "Conecte/formate o HD2 (NTFS) e rode esta etapa de novo."
-    fi
     DESCRICOES=()
     for d in "${NTFS_DEVS[@]}"; do
         TAM="$(lsblk -no SIZE "$d" 2>/dev/null | head -n1 | tr -d ' ')"
         DISCO_PAI="$(disco_de "$d" 2>/dev/null || echo '?')"
         MODELO="$(lsblk -dno MODEL "$DISCO_PAI" 2>/dev/null | head -n1 | sed 's/ *$//')"
+        UUID_CANDIDATO="$(sudo blkid -s UUID -o value "$d" 2>/dev/null || true)"
         MARCA=""
         [ -n "$DISCO_RAIZ" ] && [ "$DISCO_PAI" = "$DISCO_RAIZ" ] && MARCA="  <-- MESMO DISCO DO SISTEMA"
-        DESCRICOES+=("$d  (${TAM:-?}; disco $DISCO_PAI ${MODELO:-?})  UUID=$(sudo blkid -s UUID -o value "$d")${MARCA}")
+        DESCRICOES+=("$d  (${TAM:-?}; disco $DISCO_PAI ${MODELO:-?})  UUID=${UUID_CANDIDATO:-?}${MARCA}")
     done
-    aviso "HD2 é o disco de documentos do LINUX, NUNCA o disco que você vai entregar à VM."
-    IDX="$(escolher_da_lista 'Partição do HD2 (número)' nao "${DESCRICOES[@]}")"
-    DEV_HD2="${NTFS_DEVS[$((IDX - 1))]}"
-    UUID_ESCOLHIDO="$(sudo blkid -s UUID -o value "$DEV_HD2")"
-    [ -n "$UUID_ESCOLHIDO" ] || falhar "Não consegui ler o UUID de $DEV_HD2."
-    HD2_DISCO_PAI="$(disco_de "$DEV_HD2" || echo '')"
-    if [ -n "$DISCO_RAIZ" ] && [ "$HD2_DISCO_PAI" = "$DISCO_RAIZ" ]; then
-        aviso "Essa partição está no MESMO disco do sistema: você perde a separação física"
-        aviso "entre sistema e documentos (uma falha do disco leva os dois)."
-        confirmar "Seguir mesmo assim?" || falhar "Cancelado."
+    if [ "${#DESCRICOES[@]}" -eq 0 ]; then
+        aviso "Nenhuma partição NTFS foi encontrada; a opção 0 continua disponível."
+    else
+        echo "Partições NTFS candidatas ao HD2 de documentos:"
     fi
-    confirmar "Confirmar HD2 = $DEV_HD2 (UUID=$UUID_ESCOLHIDO)?" || falhar "Cancelado."
-    salvar_conf UUID_HD2 "$UUID_ESCOLHIDO"
-    salvar_conf HD2_DISCO_PAI "$HD2_DISCO_PAI"
+    aviso "Para escolher o disco físico da VM, use 0 aqui e continue para o próximo seletor."
+    IDX="$(escolher_da_lista 'HD2 de documentos (número, ou 0 para não usar)' sim "${DESCRICOES[@]}")"
+    if [ "$IDX" -eq 0 ]; then
+        info "HD2/Docs4 dispensado; a decisão fica salva até você usar --redetectar."
+        info "Os arquivos permanecem nos caminhos atuais do host; nada foi formatado, montado ou migrado."
+        aviso "O airlock padrão /mnt/docs4/airlock depende de /mnt/docs4; informe outro AIRLOCK_DIR na seção 8."
+        salvar_conf_lote \
+            UUID_HD2 "" HD2_DISCO_PAI "" HD2_DISPENSADO "sim" DOCS4_DISPENSADO "sim"
+    else
+        DEV_HD2="${NTFS_DEVS[$((IDX - 1))]}"
+        UUID_ESCOLHIDO="$(sudo blkid -s UUID -o value "$DEV_HD2")"
+        [ -n "$UUID_ESCOLHIDO" ] || falhar "Não consegui ler o UUID de $DEV_HD2."
+        HD2_DISCO_PAI="$(disco_de "$DEV_HD2" || echo '')"
+        [ -n "$HD2_DISCO_PAI" ] || falhar "Não consegui identificar o disco pai de $DEV_HD2."
+        if [ -n "$DISCO_RAIZ" ] && [ "$HD2_DISCO_PAI" = "$DISCO_RAIZ" ]; then
+            aviso "Essa partição está no MESMO disco do sistema: você perde a separação física"
+            aviso "entre sistema e documentos (uma falha do disco leva os dois)."
+            confirmar "Seguir mesmo assim?" \
+                || cancelar_etapa "Escolha do HD2 cancelada; nenhuma decisão de armazenamento foi salva."
+        fi
+        confirmar "Confirmar HD2 de documentos = $DEV_HD2 (UUID=$UUID_ESCOLHIDO)?" \
+            || cancelar_etapa "Escolha do HD2 cancelada; nenhuma decisão de armazenamento foi salva."
+        HD1_ANTIGO_ALVO="$(readlink -f -- "${HD1_BY_ID_PATH:-}" 2>/dev/null || true)"
+        if [ -n "$HD1_ANTIGO_ALVO" ] && [ "$HD1_ANTIGO_ALVO" = "$HD2_DISCO_PAI" ]; then
+            aviso "O novo HD2 ocupa o mesmo disco do HD1 anteriormente salvo."
+            aviso "A decisão antiga do HD1 será invalidada no MESMO update para impedir sobreposição."
+            salvar_conf_lote \
+                UUID_HD2 "$UUID_ESCOLHIDO" HD2_DISCO_PAI "$HD2_DISCO_PAI" \
+                HD2_DISPENSADO "" DOCS4_DISPENSADO "" \
+                HD1_BY_ID_PATH "" HD1_DISPENSADO ""
+        else
+            salvar_conf_lote \
+                UUID_HD2 "$UUID_ESCOLHIDO" HD2_DISCO_PAI "$HD2_DISCO_PAI" \
+                HD2_DISPENSADO "" DOCS4_DISPENSADO ""
+        fi
+    fi
 fi
 
-# 5c. Disco físico exclusivo da VM (HD1) - opcional
+# 5c. Disco físico inteiro e exclusivo da VM (HD1) - opcional
 if ja_definido HD1_BY_ID_PATH; then
+    [ "${HD1_DISPENSADO:-}" != "sim" ] \
+        || falhar "Configuração contraditória: HD1_BY_ID_PATH definido e HD1_DISPENSADO=sim. Rode --redetectar."
     info "HD1_BY_ID_PATH já definido: $HD1_BY_ID_PATH"
 elif [ "$REDETECTAR" -eq 0 ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
-    info "Sem disco físico dedicado à VM (escolha registrada anteriormente)."
+    info "Sem disco físico adicional da VM (dispensa salva; use --redetectar para rever)."
 else
-    titulo "Disco físico exclusivo da VM (opcional)"
-    cat <<'EXPLICA'
-Um disco inteiro pode ser entregue à VM (útil para biblioteca de jogos: o
-Windows enxerga o disco real, sem camada de arquivo). É OPCIONAL: sem ele a
-VM funciona apenas com o disco virtual QCOW2, que também pode ser ampliado.
+    titulo "Segundo disco físico pai inteiro da VM (HD1 opcional)"
+    cat <<'EXPLICA_HD1'
+A VM já possui seu disco de sistema no arquivo QCOW2 do host. Opcionalmente,
+um SEGUNDO DISCO FÍSICO PAI INTEIRO pode ser destinado ao Windows, por exemplo
+para uma biblioteca de jogos.
 
-O disco escolhido passa a ser propriedade da VM: NÃO o monte no host enquanto
-a VM estiver ligada, sob risco de corromper o sistema de arquivos.
-EXPLICA
-    # Candidatos: discos inteiros por caminho estável, já excluindo raiz e HD2
-    mapfile -t BYIDS < <(find /dev/disk/by-id -maxdepth 1 \( -name 'ata-*' -o -name 'nvme-*' -o -name 'usb-*' \) \
-                              ! -name '*-part*' ! -name 'nvme-eui.*' -type l 2>/dev/null | sort)
-    if [ "${#BYIDS[@]}" -eq 0 ]; then
-        mapfile -t BYIDS < <(find /dev/disk/by-id -maxdepth 1 ! -name '*-part*' ! -name 'wwn-*' -type l 2>/dev/null | sort)
-    fi
+Esta escolha apenas registra um identificador persistente /dev/disk/by-id/ do
+disco pai: nada é anexado à VM ou formatado agora. A etapa 50 fará a anexação.
+Partições como /dev/sdb1 aparecem só para reconhecimento; selecionar /dev/sdb
+registra o pai inteiro, com TODAS as partições. Disco montado ou em uso no host
+permanece bloqueado até ser totalmente liberado.
+
+Digite 0 para manter somente o QCOW2. A dispensa fica salva e será reutilizada
+até você executar esta etapa com --redetectar.
+EXPLICA_HD1
+    # Todos os aliases persistentes de discos inteiros são considerados. A
+    # deduplicação abaixo escolhe um único alias por alvo físico.
+    mapfile -t BYIDS < <(find /dev/disk/by-id -maxdepth 1 ! -name '*-part*' -type l 2>/dev/null | sort)
 
     CANDIDATOS=(); DESCRICOES=()
     for b in "${BYIDS[@]}"; do
@@ -370,17 +462,21 @@ EXPLICA
         [ "$(lsblk -dno TYPE "$ALVO" 2>/dev/null | tr -d ' ')" = "disk" ] || continue
         [ -n "$DISCO_RAIZ" ] && [ "$ALVO" = "$DISCO_RAIZ" ] && continue
         [ -n "${HD2_DISCO_PAI:-}" ] && [ "$ALVO" = "$HD2_DISCO_PAI" ] && continue
-        # evita listar o mesmo disco duas vezes (by-id costuma ter apelidos)
+        # Evita listar o mesmo disco várias vezes (ata-, nvme-, scsi-, wwn-...).
         JA=0
-        for c in ${CANDIDATOS[@]+"${CANDIDATOS[@]}"}; do
+        for c in "${CANDIDATOS[@]}"; do
             [ "$(readlink -f "$c")" = "$ALVO" ] && JA=1
         done
         [ "$JA" -eq 1 ] && continue
         TAM="$(lsblk -dno SIZE "$ALVO" 2>/dev/null | tr -d ' ')"
         MODELO="$(lsblk -dno MODEL "$ALVO" 2>/dev/null | sed 's/ *$//')"
+        SERIAL="$(lsblk -dno SERIAL "$ALVO" 2>/dev/null | sed 's/ *$//')"
+        PARTICOES="$({ lsblk -lnpo PATH,TYPE -- "$ALVO" 2>/dev/null || true; } \
+            | awk '$2 == "part" {lista=lista separador $1; separador=", "} END {print lista}')"
+        [ -n "$PARTICOES" ] || PARTICOES="nenhuma"
         MONTADO=""
         if disco_em_uso_pelo_host "$ALVO"; then
-            MONTADO="  [MONTADO NO HOST]"
+            MONTADO="  [INDISPONÍVEL: MONTADO/EM USO NO HOST]"
         else
             USO_STATUS=$?
             if [ "$USO_STATUS" -ne 1 ]; then
@@ -389,56 +485,62 @@ EXPLICA
             fi
         fi
         CANDIDATOS+=("$b")
-        DESCRICOES+=("$(basename "$b")  ->  $ALVO  (${TAM:-?}; ${MODELO:-?})${MONTADO}")
+        DESCRICOES+=("$(basename "$b") -> $ALVO (${TAM:-?}; ${MODELO:-?}; serial ${SERIAL:-?}; partições: $PARTICOES)${MONTADO}")
     done
 
     if [ "${#CANDIDATOS[@]}" -eq 0 ]; then
-        info "Nenhum disco elegível além do sistema e do HD2. A VM usará somente o QCOW2."
-        salvar_conf HD1_BY_ID_PATH ""
-        salvar_conf HD1_DISPENSADO "sim"
+        aviso "Nenhum disco físico elegível foi detectado além dos discos protegidos."
     else
-        echo "Discos elegíveis (raiz do Linux e HD2 já foram excluídos da lista):"
+        echo "Discos detectados (a opção representa o disco pai inteiro):"
+        aviso "Localize /dev/sdb1, por exemplo, no campo 'partições' e escolha o /dev/sdb pai correspondente."
         aviso "Confira modelo, serial e TAMANHO contra o inventário da etapa 00 antes de escolher."
-        IDX="$(escolher_da_lista 'Disco para a VM (número, ou 0 para nenhum)' sim "${DESCRICOES[@]}")"
-        if [ "$IDX" -eq 0 ]; then
-            info "Nenhum disco físico dedicado. A VM usará somente o QCOW2."
-            salvar_conf HD1_BY_ID_PATH ""
-            salvar_conf HD1_DISPENSADO "sim"
-        else
-            HD1="${CANDIDATOS[$((IDX - 1))]}"
-            HD1_ALVO="$(readlink -f "$HD1")"
-            # Travas finais, mesmo com a lista já filtrada
-            [ -n "$DISCO_RAIZ" ] && [ "$HD1_ALVO" = "$DISCO_RAIZ" ] \
-                && falhar "O caminho escolhido aponta para o disco da RAIZ do Linux. Abortado."
-            [ "$HD1_ALVO" = "${NVME_DEVICE:-}" ] \
-                && falhar "O caminho escolhido aponta para o disco do sistema. Abortado."
-            if [ -n "${HD2_DISCO_PAI:-}" ] && [ "$HD1_ALVO" = "$HD2_DISCO_PAI" ]; then
-                falhar "O caminho escolhido aponta para o disco do HD2 (documentos). Abortado."
-            fi
-            if disco_em_uso_pelo_host "$HD1_ALVO"; then
-                erro "Esse disco tem partição MONTADA no host agora:"
-                lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINTS "$HD1_ALVO"
-                falhar "Desmonte tudo dele (e remova do fstab) antes de entregá-lo à VM."
-            else
-                USO_STATUS=$?
-                [ "$USO_STATUS" -eq 1 ] \
-                    || falhar "Não foi possível provar que o disco está livre: ${DISCO_USO_ERRO:-erro de inspeção}."
-            fi
-            echo "Disco escolhido:"
-            lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL "$HD1_ALVO"
-            aviso "Todo o conteúdo deste disco passa a ser gerenciado pelo Windows."
-            aviso "Se ele JÁ TEM dados, não formate nada dentro do Windows."
-            confirmar "Confirmar $HD1 ($HD1_ALVO) como disco da VM?" || falhar "Cancelado."
-            salvar_conf HD1_BY_ID_PATH "$HD1"
-            salvar_conf HD1_DISPENSADO ""
+    fi
+    info "A opção 0 sempre mantém a VM somente com o disco virtual QCOW2."
+    IDX="$(escolher_da_lista 'Disco físico adicional da VM (número, ou 0 para nenhum)' sim "${DESCRICOES[@]}")"
+    if [ "$IDX" -eq 0 ]; then
+        info "Nenhum disco físico adicional; a VM manterá somente o QCOW2."
+        info "A dispensa fica salva até você executar esta etapa com --redetectar."
+        salvar_conf_lote HD1_BY_ID_PATH "" HD1_DISPENSADO "sim"
+    else
+        HD1="${CANDIDATOS[$((IDX - 1))]}"
+        HD1_ALVO="$(readlink -f "$HD1")"
+        # Travas finais, mesmo com a lista já filtrada.
+        [ -n "$DISCO_RAIZ" ] && [ "$HD1_ALVO" = "$DISCO_RAIZ" ] \
+            && falhar "O caminho escolhido aponta para o disco da RAIZ do Linux. Abortado."
+        SISTEMA_REAL="$(readlink -f -- "${NVME_DEVICE:-}" 2>/dev/null || true)"
+        [ -n "$SISTEMA_REAL" ] && [ "$HD1_ALVO" = "$SISTEMA_REAL" ] \
+            && falhar "O caminho escolhido aponta para o disco do sistema. Abortado."
+        HD2_REAL="$(readlink -f -- "${HD2_DISCO_PAI:-}" 2>/dev/null || true)"
+        if [ -n "$HD2_REAL" ] && [ "$HD1_ALVO" = "$HD2_REAL" ]; then
+            falhar "O caminho escolhido aponta para o disco do HD2 de documentos. Abortado."
         fi
+        if disco_em_uso_pelo_host "$HD1_ALVO"; then
+            erro "Esse disco tem partição montada ou em uso no host agora:"
+            lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS "$HD1_ALVO"
+            falhar "Desmonte tudo dele (e remova montagens automáticas) antes de entregá-lo à VM."
+        else
+            USO_STATUS=$?
+            [ "$USO_STATUS" -eq 1 ] \
+                || falhar "Não foi possível provar que o disco está livre: ${DISCO_USO_ERRO:-erro de inspeção}."
+        fi
+        echo "Disco inteiro escolhido (incluindo todas as partições abaixo):"
+        lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL "$HD1_ALVO"
+        aviso "PERDA DE DADOS: o Windows receberá acesso de escrita ao DISCO INTEIRO $HD1_ALVO."
+        aviso "O script não formata o disco, mas inicializar, reparticionar, formatar ou instalar"
+        aviso "o Windows nele pode destruir TODAS as partições e arquivos, inclusive os de /dev/sdb1."
+        aviso "Só prossiga após conferir modelo/serial e possuir backup verificado dos dados importantes."
+        confirmar_digitando AUTORIZAR \
+            "Autorizar $HD1 ($HD1_ALVO) como disco físico adicional da VM?" \
+            || cancelar_etapa "Disco não autorizado; a decisão de HD1 não foi salva."
+        salvar_conf_lote HD1_BY_ID_PATH "$HD1" HD1_DISPENSADO ""
     fi
 fi
 
 # ----------------------------------------------------------------------------
-# 6. CPU: topologia e pinning (Capítulo 21)
+# 6. CPU: topologia e plano de pinning (Capítulo 21)
 # ----------------------------------------------------------------------------
-titulo "6/8 CPU (topologia parseável por socket/core)"
+titulo "6/8 CPU: plano de pinning por socket/core"
+info "Esta seção apenas calcula e grava o plano; o pinning será aplicado pela etapa 52."
 TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
     || falhar "lscpu não conseguiu fornecer CPU,CORE,SOCKET,NODE,ONLINE em formato parseável."
 [ -n "$TOPOLOGIA_CPU" ] || falhar "A topologia parseável de CPU está vazia."
@@ -448,10 +550,10 @@ if ja_definido CPUS_VM && ja_definido CPUS_HOST \
    && ja_definido VM_VCPUS && ja_definido VM_CORES && ja_definido VM_THREADS; then
     if validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU"; then
         CPU_EXISTENTE_VALIDA=1
-        info "Pinning já definido e validado: VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
+        info "Plano de pinning já definido e validado: VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
     else
-        aviso "O mapa CPU persistido não corresponde mais ao host: $CPU_LAYOUT_ERRO"
-        aviso "Ele será redetectado antes de qualquer etapa de pinning/isolamento."
+        aviso "O plano de CPU persistido não corresponde mais ao host: $CPU_LAYOUT_ERRO"
+        aviso "Ele será redetectado antes de o pinning/isolamento ser aplicado pelas etapas próprias."
     fi
 fi
 
@@ -518,10 +620,10 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
     validar_layout_cpu "$LISTA_VM" "$LISTA_HOST" "$VCPUS_TOTAL" "$NUC_VM" "$THREADS_POR_NUCLEO" "$TOPOLOGIA_CPU" \
         || falhar "A proposta gerada falhou na validação interna: $CPU_LAYOUT_ERRO"
 
-    echo "Proposta de alocação por core físico completo:"
+    echo "Plano de pinning proposto por core físico completo:"
     echo "  VM   ($NUC_VM cores, $VCPUS_TOTAL vCPUs): $LISTA_VM"
     echo "  HOST ($((TOTAL_NUCLEOS - NUC_VM)) cores): $LISTA_HOST"
-    confirmar "Confirmar este mapa?" || falhar "Cancelado sem alterar o mapa CPU."
+    confirmar "Confirmar este plano de pinning?" || falhar "Cancelado sem alterar o plano de CPU."
 
     salvar_conf_lote \
         CPUS_VM "$LISTA_VM" \
@@ -530,7 +632,8 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
         VM_THREADS "$THREADS_POR_NUCLEO" \
         VM_VCPUS "$VCPUS_TOTAL"
     validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU" \
-        || falhar "O mapa salvo não passou na validação final: $CPU_LAYOUT_ERRO"
+        || falhar "O plano salvo não passou na validação final: $CPU_LAYOUT_ERRO"
+    ok "Plano de pinning salvo; nenhum pinning foi aplicado nesta etapa."
 fi
 
 # ----------------------------------------------------------------------------
@@ -693,11 +796,13 @@ DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
 if ! ja_definido TRANSFER_USER; then
     salvar_conf TRANSFER_USER "$(perguntar 'Usuário de transferência do airlock' 'vmtransfer')"
 fi
+info "Airlock é o canal previsto e recomendado para troca de arquivos entre host e VM (Capítulo 24)."
+info "É uma zona de trânsito: nada permanente, fora do backup e montada sem execução."
+aviso "Essa é uma política recomendada, não uma garantia técnica de que outros canais sejam impossíveis."
 if ja_definido AIRLOCK_DIR; then
     info "AIRLOCK_DIR já definido: $AIRLOCK_DIR"
 else
-    info "Airlock é o ÚNICO canal de troca de arquivos entre host e VM (Capítulo 24)."
-    info "É uma zona de trânsito: nada permanente, fora do backup, montada sem execução."
+    info "O padrão /mnt/docs4/airlock depende de HD2/Docs4; se você o dispensou, informe outro caminho."
     CAMINHO="$(perguntar 'Pasta de trânsito do airlock' "$DOCS4/airlock")"
     case "$CAMINHO" in
         /*) : ;;

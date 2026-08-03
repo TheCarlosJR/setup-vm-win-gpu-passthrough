@@ -9,6 +9,8 @@
 # Uso:
 #   51-usb-passthrough.sh             adiciona dispositivos (interativo)
 #   51-usb-passthrough.sh --remover   remove dispositivos anexados
+#   51-usb-passthrough.sh --verificar verifica o XML sem alterar
+# Adição e remoção são persistentes e valem no próximo boot da VM.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -32,6 +34,13 @@ exigir_nao_root
 exigir_sudo
 exigir_comando lsusb xmlstarlet
 exigir_conf VM_NAME
+
+echo
+info "Finalidade: adicionar ou remover USBs no XML persistente da VM, sem reiniciar o host."
+info "Pré-requisitos: identifique o dispositivo e mantenha teclado/receptor de emergência no host."
+aviso "A seleção usa apenas vendor:product: unidades idênticas têm o mesmo par e qualquer uma pode ser capturada pela VM."
+aviso "Desconecte unidades idênticas que não devam ir para a VM antes do próximo boot."
+info "Tanto a adição quanto a remoção passam a valer no próximo boot da VM, não na sessão já em execução."
 
 listar_usb_xml() {
     $VIRSH dumpxml --inactive "$VM_NAME" \
@@ -62,7 +71,7 @@ if [ "${1:-}" = "--remover" ]; then
 XML
     $VIRSH detach-device "$VM_NAME" "$TMP" --config
     rm -f "$TMP"
-    ok "Removido: $VEND:$PROD"
+    ok "Removido da configuração persistente: $VEND:$PROD (vale no próximo boot da VM)."
     exit 0
 fi
 
@@ -71,7 +80,8 @@ mapfile -t LINHAS < <(lsusb)
 [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
 echo
 aviso "O dispositivo escolhido fica EXCLUSIVO da VM enquanto ela estiver ligada."
-aviso "Nunca passe o ÚNICO teclado do host: ele é necessário para o TTY de emergência (Capítulo 29)."
+aviso "Mantenha um segundo teclado/receptor fisicamente no host e teste o TTY de emergência."
+aviso "Nunca passe o único teclado do host; ele é necessário para recuperação local (Capítulo 29)."
 
 while :; do
     echo

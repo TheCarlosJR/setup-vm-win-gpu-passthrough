@@ -2,10 +2,11 @@
 # ============================================================================
 # etapas/00-inventario.sh - Capítulo 3: Inventário de Hardware
 # ============================================================================
-# Levanta a identificação completa do hardware e grava em um arquivo datado
-# em ~/inventario-hardware/. Somente leitura: nada é alterado no sistema.
+# Levanta a identificação completa do hardware e grava um arquivo datado em
+# ~/inventario-hardware/. A coleta não reconfigura o hardware; se necessário,
+# o script instala dmidecode e sempre cria/atualiza o relatório local.
 #
-# Por que pede senha de administrador logo no início, mesmo sendo só leitura:
+# Por que pede senha de administrador logo no início:
 #   - dmidecode lê a tabela SMBIOS/DMI (memória, placa-mãe, firmware) e exige root;
 #   - dmesg é restrito a root no Pop!_OS (kernel.dmesg_restrict=1), então o bloco
 #     de IOMMU/DMAR sairia VAZIO sem sudo (o manual traz esse comando sem sudo,
@@ -30,6 +31,12 @@ exigir_nao_root
 exigir_sudo
 
 titulo "Capítulo 3: Inventário de Hardware"
+info "Finalidade: registrar CPU, RAM, firmware, PCI, discos e IOMMU para conferir as próximas etapas."
+info "Pré-requisito: execute como usuário normal com acesso sudo e mantenha o hardware conectado."
+aviso "Alterações: pode atualizar o índice APT e instalar dmidecode; grava um relatório datado em ~/inventario-hardware/."
+info "A coleta não altera hardware, BIOS/UEFI, firmware, partições nem configuração dos dispositivos."
+aviso "Risco: o relatório contém modelos, seriais e IDs do equipamento; guarde-o em local confiável."
+info "Não exige reboot; ao terminar, volte ao menu para continuar."
 
 # dmidecode pode não existir antes da etapa 12 (pacotes base); resolve aqui.
 if ! command -v dmidecode >/dev/null 2>&1; then

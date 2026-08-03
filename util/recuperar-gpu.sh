@@ -2,9 +2,11 @@
 # ============================================================================
 # util/recuperar-gpu.sh - recuperação emergencial da GPU após release falho
 # ============================================================================
-# Só opera com a VM comprovadamente desligada. Não arranca dispositivos de um
-# driver saudável ou desconhecido: usa nodedev-reattach para vfio-pci e apenas
-# solicita probe quando o dispositivo já está sem driver.
+# Uso:
+#   recuperar-gpu.sh
+#   recuperar-gpu.sh --assumir-dm-ativo  # somente sem state file e após revisão
+# Exige a VM comprovadamente desligada, valida o grupo/identidade PCI e recusa
+# drivers inesperados antes de tentar reattach/probe e restaurar o display.
 # ============================================================================
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -29,6 +31,17 @@ STATE_FILE="/run/libvirt-gpu-passthrough/${VM_NAME}.state"
 LOCK_DIR="/run/libvirt-gpu-locks"
 LOCK_FILE="$LOCK_DIR/${VM_NAME}.lock"
 titulo "Recuperação de emergência da GPU"
+info "Finalidade: devolver GPU e áudio do vfio-pci ao host e restaurar o estado anterior do display manager após falha de release."
+info "Pré-requisitos: VM exatamente 'shut off', sudo, configuração PCI/IOMMU correta e acesso por TTY ou SSH."
+aviso "Efeito/risco: carrega módulos, reanexa ou solicita reprobe dos dispositivos, pode iniciar '$DM' e remover o state file no sucesso."
+aviso "A tela pode piscar, apagar ou permanecer sem sessão enquanto a GPU e o display manager são recuperados; salve seu trabalho antes."
+info "Recomendação: use --assumir-dm-ativo só sem state file, após confirmar que '$DM' deveria estar ativo."
+info "Não abrange: recuperar a sessão gráfica anterior, reset físico/power cycle da GPU, corrigir configuração da VM ou restaurar HD1."
+info "Retorno/reboot: 0 só após drivers, nvidia-smi e estado do display serem confirmados; falhas retornam 1. Não reinicia automaticamente."
+info "Journals para triagem em outro TTY/SSH:"
+printf '  sudo journalctl -t hook-qemu -b --no-pager\n'
+printf '  sudo journalctl -u libvirtd -b -e --no-pager\n'
+printf '  sudo journalctl -u %q -b -e --no-pager\n' "$DM"
 sudo install -d -o root -g root -m 0755 "$LOCK_DIR" \
     || falhar "Não foi possível preparar $LOCK_DIR."
 sudo test ! -L "$LOCK_FILE" || falhar "Lock inseguro (link simbólico): $LOCK_FILE"

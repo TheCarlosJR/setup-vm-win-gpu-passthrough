@@ -29,6 +29,17 @@ exigir_conf VM_NAME
 titulo "Capítulo 18: Instalação do Windows 11 (interativa)"
 info "Estado atual da VM: $($VIRSH domstate "$VM_NAME" 2>/dev/null || echo 'inexistente')"
 
+titulo "Antes de continuar"
+info "Objetivo: concluir interativamente a instalação do Windows 11 e dos drivers VirtIO no disco virtual da etapa 40."
+info "Pré-requisitos: VM e duas ISOs criadas/anexadas pela etapa 40; use o console gráfico e mantenha a rede NAT default até copiar os scripts iniciais."
+info "Alterações: este script apenas consulta a VM, imprime o roteiro e pode abrir o console; o instalador e os guest tools gravam sempre no QCOW2, nunca no HD1 físico."
+info "Destino obrigatório: ${QCOW2_PATH:-QCOW2 configurado na etapa 40}, com tamanho virtual ${QCOW2_TAMANHO:-configurado na etapa 40}."
+info "Recomendação: selecione instalação Personalizada, carregue viostor e confira que o único destino é o QCOW2 antes de avançar."
+aviso "Riscos: fechar o console não desfaz gravações; não force reset após haver dados importantes e nunca escolha, inicialize ou formate o HD1."
+info "Retorno/reboot: o host não reinicia; o instalador e os guest tools reiniciam apenas a VM. Para voltar ao estado anterior, restaure um backup do QCOW2."
+info "Se a VM estiver desligada, inicie-a com: virsh --connect qemu:///system start $VM_NAME"
+info "Depois de iniciar, execute esta etapa novamente para abrir o console."
+
 cat <<'GUIA'
 PASSO A PASSO (dentro do console gráfico da VM):
 
@@ -42,7 +53,10 @@ PASSO A PASSO (dentro do console gráfico da VM):
         viostor\w11\amd64
     (use vioscsi\w11\amd64 apenas se o disco foi configurado como virtio-scsi)
  8. Selecione "Red Hat VirtIO SCSI controller" > Avançar.
- 9. O disco de 250 GB aparece: selecione e prossiga a instalação.
+GUIA
+printf ' 9. O QCOW2 de %s aparece: selecione-o e prossiga a instalação.\n' \
+    "${QCOW2_TAMANHO:-tamanho configurado na etapa 40}"
+cat <<'GUIA'
 10. Se o instalador exigir rede/conta Microsoft: "Carregar driver" novamente em
         NetKVM\w11\amd64
 11. Ao chegar na área de trabalho, ainda com a virtio-win.iso anexada:
@@ -58,9 +72,31 @@ PÓS-INSTALAÇÃO (desenho de segurança do manual):
     (quando a GPU real estiver em passthrough): baixar de nvidia.com/drivers,
     opção "Instalação limpa".
 
-O disco HD1 físico é anexado na etapa 50; o particionamento dele (se estiver
-em branco) é feito no Gerenciamento de Disco do Windows: GPT + NTFS.
-Se o HD1 JÁ TEM dados: NÃO formate; ele aparece pronto com letra de unidade.
+TRANSFERÊNCIA INICIAL DOS .ps1 (antes do airlock):
+  1. Depois de instalar os guest tools, mantenha a NAT default da etapa 40.
+  2. No host, em outro terminal aberto na raiz deste projeto, execute:
+       HOST_NAT_IP="$(virsh --connect qemu:///system net-dumpxml default |
+         xmlstarlet sel -t -v 'string(/network/ip[1]/@address)')"
+       python3 -m http.server 8000 --bind "$HOST_NAT_IP" --directory windows
+  3. No Windows, abra o PowerShell e copie os três scripts:
+       $HostNAT = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
+         Sort-Object RouteMetric | Select-Object -First 1).NextHop
+       $Destino = "$HOME\Scripts-VM"
+       New-Item -ItemType Directory -Force $Destino | Out-Null
+       @('Desativar-Fast-Startup.ps1', 'Ativar-MSI-GPU.ps1',
+         'Gerar-Chave-Airlock.ps1') | ForEach-Object {
+           Invoke-WebRequest "http://${HostNAT}:8000/$_" -OutFile "$Destino\$_"
+       }
+  4. Confira os arquivos, encerre o servidor no host com Ctrl+C e deixe o
+     Defender verificá-los. Execute cada .ps1 somente na etapa indicada.
+
+O disco HD1 físico só é anexado na etapa 50, DEPOIS da instalação do Windows
+no QCOW2. Nunca selecione o HD1 físico como destino do instalador.
+
+PERDA DE DADOS: quando anexado, o Windows terá escrita no disco físico inteiro.
+O script não o formata. Se estiver em branco, GPT + NTFS pode ser criado no
+Gerenciamento de Disco; se JÁ TEM dados, NÃO inicialize, reparticione ou formate.
+Antes de qualquer alteração, confira tamanho/modelo e mantenha backup verificado.
 GUIA
 
 if vm_existe "$VM_NAME" && ! vm_desligada "$VM_NAME"; then

@@ -22,6 +22,15 @@ verificar() {
 [ "${1:-}" = "--verificar" ] && verificar
 
 exigir_nao_root
+
+titulo "Antes de continuar"
+info "Finalidade: atualizar índices, pacotes, kernel e firmware antes dos drivers e da virtualização."
+info "Pré-requisitos: rede funcional, usuário com sudo e espaço livre para pacotes e kernels."
+aviso "Alterações: o índice APT será atualizado; full-upgrade pode instalar ou remover pacotes; autoremove remove órfãos; fwupd pode atualizar firmware."
+info "Recomendação: mantenha backup recente, energia estável e não interrompa o APT nem uma atualização de firmware."
+aviso "Risco principal: interrupções ou regressões podem deixar pacotes inconsistentes ou afetar o próximo boot."
+info "Reboot/retorno: ao concluir, reinicie; depois valide o kernel ativo com 'uname -r' e retorne ao menu."
+
 exigir_sudo
 
 titulo "Capítulo 7: Atualização do Sistema"
@@ -46,5 +55,5 @@ echo
 ok "Atualização concluída."
 info "Kernel em execução: $KERNEL_ANTES"
 info "Kernel mais novo instalado: $(dpkg -l 2>/dev/null | awk '/^ii +linux-image-[0-9]/{print $2}' | sort -V | tail -n1)"
-aviso "Dica do manual: após o reboot, confirme com 'uname -r' que o kernel novo está em uso."
+aviso "Após o reboot, confirme com 'uname -r' que o kernel esperado está em uso."
 pedir_reboot
