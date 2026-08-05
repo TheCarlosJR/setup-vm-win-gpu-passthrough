@@ -662,6 +662,13 @@ util/atualizar-host.sh --validar               # validação em camadas pós-reb
 util/diagnostico.sh                            # qualquer problema: comece aqui
 ```
 
+O utilitário de snapshot exige a VM desligada, identifica no XML o disco cujo
+`source file` é `QCOW2_PATH`, cria nele um snapshot **interno** e exclui
+explicitamente HD1 e os demais discos. Antes de `reverter` ou `apagar`, recusa
+metadados externos, que exigem consolidação manual da cadeia. O backup também
+recusa XML apontando para overlay e qualquer QCOW2 com backing file: copiar só
+a base nesse estado produziria um backup desatualizado.
+
 Depois de atualizar kernel ou driver NVIDIA, valide nesta ordem: `nvidia-smi`,
 parâmetros de IOMMU no `/proc/cmdline`, VM liga (hook prepare), desktop volta ao
 desligar (hook release).

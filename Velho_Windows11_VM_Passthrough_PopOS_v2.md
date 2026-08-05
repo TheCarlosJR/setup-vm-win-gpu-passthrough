@@ -4072,26 +4072,35 @@ Dentro do Windows, o TRIM automático já é acionado pela tarefa agendada padr�
 > **⚠️ ALERTA:** Snapshots do QCOW2 **não substituem backup** (próxima subseção). Um snapshot ainda depende do mesmo arquivo físico `Windows11.qcow2` e do mesmo disco NVMe — se o SSD falhar fisicamente, todos os snapshots são perdidos junto com o disco.
 
 ```bash
-virsh --connect qemu:///system snapshot-create-as <VM_NAME> "antes-de-atualizar-windows" "Snapshot antes de aplicar atualização cumulativa do Windows"
+bash util/snapshot-vm.sh criar antes-de-atualizar-windows "Snapshot antes de aplicar atualização cumulativa do Windows"
 ```
-**O que faz:** cria um snapshot interno nomeado, com descrição, do estado atual completo do disco (e, opcionalmente, da memória RAM da VM, se ela estiver em execução no momento — um snapshot "live" preserva também o estado de execução, permitindo retomar exatamente de onde parou).
+**O que faz:** com a VM desligada, identifica o `QCOW2_PATH` realmente ativo no
+XML, cria nele um snapshot **interno** nomeado e passa `snapshot=no` para HD1 e
+os demais discos. A pós-condição é relida de `snapshot-dumpxml`; um overlay
+externo ativo ou metadados externos legados são recusados, pois não seriam
+compatíveis com a reversão simples oferecida abaixo.
 
 ```bash
-virsh --connect qemu:///system snapshot-list <VM_NAME>
+bash util/snapshot-vm.sh listar
 ```
-**O que faz:** lista todos os snapshots existentes para a VM, com nome e data de criação.
+**O que faz:** lista os snapshots associados à VM.
 
 ```bash
-virsh --connect qemu:///system snapshot-revert <VM_NAME> "antes-de-atualizar-windows"
+bash util/snapshot-vm.sh reverter antes-de-atualizar-windows
 ```
-**O que faz:** reverte o disco da VM ao estado exato capturado pelo snapshot nomeado, descartando todas as alterações feitas depois.
+**O que faz:** após confirmação e com a VM desligada, reverte o QCOW2 principal
+ao estado interno nomeado, descartando alterações posteriores. Snapshots
+externos são bloqueados antes de chamar `snapshot-revert`.
 
 ```bash
-virsh --connect qemu:///system snapshot-delete <VM_NAME> "antes-de-atualizar-windows"
+bash util/snapshot-vm.sh apagar antes-de-atualizar-windows
 ```
-**O que faz:** remove um snapshot específico, mesclando (consolidando) as alterações registradas nele de volta à cadeia principal do disco — necessário periodicamente, pois cada snapshot adiciona uma camada de indireção que acumula overhead de leitura/escrita se deixada indefinidamente.
+**O que faz:** após confirmação, remove um snapshot interno específico. O
+utilitário não tenta apagar ou consolidar automaticamente overlays externos.
 
-> **💡 DICA:** Snapshots frequentes e nunca removidos degradam progressivamente o desempenho de I/O do disco (cada leitura pode precisar atravessar múltiplas camadas de snapshot para encontrar o bloco de dados mais recente). Adote a prática de remover snapshots temporários assim que confirmar que a alteração testada foi bem-sucedida.
+> **💡 DICA:** snapshots internos acumulados consomem espaço e continuam no
+mesmo QCOW2/disco físico. Remova pontos temporários quando não forem mais
+necessários, mas mantenha backups independentes testados.
 
 ### Backup real
 
@@ -4108,9 +4117,14 @@ watch virsh --connect qemu:///system domstate <VM_NAME>
 **O que faz:** aguarda até o estado mudar para `shut off` antes de prosseguir.
 
 ```bash
-sudo rsync -avh --progress /vm/Windows11.qcow2 /mnt/docs4/backups-vm/Windows11-backup-$(date +%Y%m%d).qcow2
+bash util/backup-vm.sh
 ```
-**O que faz:** copia o arquivo de disco completo para dentro do HD2 (`/mnt/docs4`), com data no nome do arquivo de backup. Usar `rsync` em vez de `cp` permite retomar a cópia em caso de interrupção e oferece barra de progresso para arquivos grandes (o arquivo QCOW2, mesmo com alocação dinâmica, pode já ocupar dezenas ou centenas de gigabytes reais após uso prolongado).
+**O que faz:** desliga a VM graciosamente quando autorizado, confirma que
+`QCOW2_PATH` é exatamente o `source file` ativo no XML e que o arquivo não tem
+`backing-filename`, então copia com preservação sparse, executa `qemu-img check`
+e repete a prova de independência na cópia. Se houver overlay/cadeia externa,
+aborta antes de copiar uma base antiga. XML inativo, NVRAM e TPM são incluídos
+quando disponíveis; HD1 e outros discos ficam listados como fora do escopo.
 
 > **📝 NOTA:** Como o HD2 está fisicamente no mesmo computador (embora em disco separado do NVMe), este backup protege contra falha do **SSD NVMe especificamente**, mas não contra eventos que afetem o computador inteiro (incêndio, roubo, surto elétrico que danifique múltiplos discos simultaneamente). Para proteção completa, recomenda-se adicionalmente uma cópia periódica em mídia verdadeiramente externa/offsite — fora do escopo operacional deste documento, mas fortemente recomendada como prática complementar.
 
@@ -4124,18 +4138,19 @@ sudo mkdir -p /mnt/docs4/backups-vm
 ```bash
 lsblk --discard
 virsh --connect qemu:///system edit <VM_NAME>   # adicionar discard='unmap' ao disco
-sudo mkdir -p /mnt/docs4/backups-vm
-virsh --connect qemu:///system snapshot-create-as <VM_NAME> "<nome-do-snapshot>" "<descrição>"
-virsh --connect qemu:///system snapshot-list <VM_NAME>
-virsh --connect qemu:///system shutdown <VM_NAME>
-sudo rsync -avh --progress /vm/Windows11.qcow2 /mnt/docs4/backups-vm/Windows11-backup-$(date +%Y%m%d).qcow2
+bash util/snapshot-vm.sh criar <nome-do-snapshot> "<descrição>"
+bash util/snapshot-vm.sh listar
+bash util/snapshot-vm.sh reverter <nome-do-snapshot>
+bash util/snapshot-vm.sh apagar <nome-do-snapshot>
+bash util/backup-vm.sh
 ```
 
 ## Arquivos modificados
 
 - `/etc/libvirt/qemu/<VM_NAME>.xml` (atributo `discard='unmap'` adicionado ao disco).
 - `/mnt/docs4/backups-vm/` (diretório criado, recebe cópias de backup).
-- Metadados internos do arquivo `.qcow2` (snapshots armazenados internamente ao arquivo, no caso de `snapshot-create-as` sem `--disk-only` apontando para arquivo externo).
+- Metadados internos do `QCOW2_PATH` (somente o disco principal recebe `snapshot=internal`; os demais recebem `snapshot=no`).
+- Diretório datado em `BACKUPS_VM_DIR`, somente quando o QCOW2 ativo não possui backing chain.
 
 ## Como verificar
 
@@ -4163,7 +4178,7 @@ TRIM/discard repassado corretamente do NTFS dentro da VM até o SSD NVMe físico
 
 ```bash
 virsh --connect qemu:///system edit <VM_NAME>   # remover discard='unmap'
-virsh --connect qemu:///system snapshot-delete <VM_NAME> "<nome-do-snapshot>"
+bash util/snapshot-vm.sh apagar <nome-do-snapshot>
 rm /mnt/docs4/backups-vm/Windows11-backup-<data>.qcow2
 ```
 
@@ -4172,7 +4187,8 @@ rm /mnt/docs4/backups-vm/Windows11-backup-<data>.qcow2
 | Sintoma | Causa provável | Correção |
 |---|---|---|
 | Arquivo `.qcow2` não diminui de tamanho mesmo após apagar arquivos grandes dentro do Windows | `discard='unmap'` não configurado, ou otimização automática do Windows desabilitada para o disco C: | Revisar o XML da VM; verificar "Otimizar Unidades" dentro do Windows |
-| `snapshot-revert` falha com erro sobre estado da VM | VM em execução durante a tentativa de reverter um snapshot apenas de disco (não "live") | Desligar a VM antes de reverter, ou criar o snapshot como "live" desde o início se reversão com a VM ligada for necessária |
+| O utilitário recusa `reverter`/`apagar` por snapshot externo | Snapshot legado criado com `--disk-only`, gerando overlay incompatível com `snapshot-revert` simples | Não apague arquivos da cadeia; consolide manualmente com ferramentas do libvirt/qemu ou restaure um backup testado |
+| O backup recusa overlay ou backing file | O XML não aponta diretamente para `QCOW2_PATH`, ou o QCOW2 depende de outro arquivo | Consolide a cadeia externa antes do backup; copiar apenas a base produziria estado antigo |
 | Backup demora muito tempo / consome muito espaço no HD2 | Arquivo `.qcow2` já grande devido a jogos instalados no disco C: em vez de HD1 | Reforçar a prática de instalar jogos/aplicativos grandes em HD1 (D: dentro do Windows), mantendo C: (`Windows11.qcow2`) relativamente enxuto, conforme o desenho original do Capítulo 2 |
 
 ## Próxima etapa
@@ -4255,14 +4271,11 @@ Atualizações do driver NVIDIA dentro da VM seguem o procedimento padrão já d
 ## Comandos
 
 ```bash
-virsh --connect qemu:///system snapshot-create-as <VM_NAME> "antes-atualizacao-host-$(date +%Y%m%d)" "Snapshot de segurança antes de atualizar o host"
-sudo apt update
-sudo apt full-upgrade -y
-apt list --upgradable 2>/dev/null | grep -i nvidia
+bash util/atualizar-host.sh
+# O utilitário delega a util/snapshot-vm.sh e só considera proteção válida
+# depois de comprovar snapshot interno; sem ele exige CONTINUAR SEM SNAPSHOT.
 sudo reboot
-nvidia-smi
-cat /proc/cmdline | grep -o "amd_iommu=on iommu=pt"
-virsh --connect qemu:///system start <VM_NAME>
+bash util/atualizar-host.sh --validar
 ```
 
 ## Arquivos modificados
@@ -4280,7 +4293,7 @@ Host e VM atualizados de forma segura e verificada, com cada camada da pilha de 
 ## Como desfazer
 
 ```bash
-virsh --connect qemu:///system snapshot-revert <VM_NAME> "antes-atualizacao-host-<data>"
+bash util/snapshot-vm.sh reverter antes-atualizacao-host-<data-hora>
 ```
 
 Para reverter uma atualização do host que causou regressão, selecionar o kernel anterior no menu de boot (Advanced options, conforme Capítulo 7) enquanto se investiga a causa antes de remover definitivamente o kernel novo.

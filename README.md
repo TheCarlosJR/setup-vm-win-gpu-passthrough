@@ -246,6 +246,13 @@ util/diagnostico.sh                           # qualquer problema: comece aqui
 util/recuperar-gpu.sh                         # TTY (Ctrl+Alt+F3) se o vídeo não voltar
 ```
 
+`snapshot-vm.sh` cria somente snapshot **interno** do `QCOW2_PATH` ativo, com a
+VM desligada, e marca HD1/outros discos como `snapshot=no`; por isso os comandos
+`reverter` e `apagar` são compatíveis com o que o próprio utilitário cria.
+Snapshots externos legados são recusados em vez de executar uma operação
+incompleta. `backup-vm.sh` também aborta se o XML apontar para um overlay ou se
+o QCOW2 tiver backing file, evitando copiar uma base antiga como backup atual.
+
 Scripts da pasta `windows/`: leve-os para dentro da VM (pendrive/airlock) e
 execute no PowerShell como administrador.
 

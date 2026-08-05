@@ -46,32 +46,33 @@ if [ "${1:-}" = "--validar" ]; then
 fi
 
 titulo "Atualização do host com proteção prévia da VM"
-info "Finalidade: criar um snapshot offline da VM antes de executar apt update, full-upgrade e autoremove no host."
-info "Pré-requisitos: sudo, APT/rede funcionais e espaço; para o snapshot, VM configurada e armazenamento compatível."
-aviso "Efeito: pode criar snapshot, atualizar/remover pacotes, trocar kernel/driver e reiniciar o host se você confirmar."
+info "Finalidade: criar um snapshot interno offline da VM antes de executar apt update, full-upgrade e autoremove no host."
+info "Pré-requisitos: sudo, APT/rede funcionais e espaço; para o snapshot, VM configurada, desligada e QCOW2 ativo sem overlay externo."
+aviso "Efeito: pode criar snapshot interno, atualizar/remover pacotes, trocar kernel/driver e reiniciar o host se você confirmar."
 info "Recomendação: desligue a VM e tenha cópia independente verificada antes de continuar; revise pacotes críticos depois."
 aviso "Risco: full-upgrade/autoremove podem remover versões úteis para rollback; sem snapshot, só prossiga com confirmação textual e backup independente."
 info "Limite do snapshot: não é backup independente nem rollback do host e não cobre HD1; XML/NVRAM/TPM restauráveis não são garantidos."
-info "Retorno/reboot: falhas APT interrompem. Sem snapshot, o script exige confirmação textual. O reboot é opcional, mas necessário antes de --validar."
+info "Retorno/reboot: falhas APT interrompem. Sem snapshot interno comprovado, o script exige confirmação textual. O reboot é opcional, mas necessário antes de --validar."
 SNAPSHOT_OK=0
 if [ -n "${VM_NAME:-}" ] && vm_existe "$VM_NAME"; then
-    NOME_SNAP="antes-atualizacao-host-$(date +%Y%m%d)"
+    NOME_SNAP="antes-atualizacao-host-$(date +%Y%m%d-%H%M%S)"
     if vm_desligada "$VM_NAME"; then
-        info "Criando snapshot offline pré-atualização '$NOME_SNAP'..."
-        if $VIRSH snapshot-create-as "$VM_NAME" "$NOME_SNAP" "Snapshot da VM antes de atualizar o host; não substitui backup" --disk-only --atomic; then
+        info "Criando snapshot interno offline pré-atualização '$NOME_SNAP'..."
+        if bash "$PROJETO_DIR/util/snapshot-vm.sh" criar "$NOME_SNAP" \
+            "Snapshot interno da VM antes de atualizar o host; não substitui backup"; then
             SNAPSHOT_OK=1
-            ok "Snapshot pré-atualização criado."
+            ok "Snapshot interno pré-atualização criado e comprovado."
         else
-            aviso "Snapshot falhou (armazenamento/espaço/configuração)."
+            aviso "Snapshot interno falhou (overlay externo, armazenamento, espaço ou configuração)."
         fi
     else
-        aviso "VM está ligada; snapshot offline não será criado."
+        aviso "VM está ligada; snapshot interno offline não será criado."
     fi
 else
     aviso "VM não encontrada; não há snapshot a criar."
 fi
 if [ "$SNAPSHOT_OK" -ne 1 ]; then
-    confirmar_digitando "CONTINUAR SEM SNAPSHOT" "Sem snapshot prévio da VM. Confirme que há backup independente e digite CONTINUAR SEM SNAPSHOT para atualizar mesmo assim." \
+    confirmar_digitando "CONTINUAR SEM SNAPSHOT" "Sem snapshot interno comprovado da VM. Confirme que há backup independente e digite CONTINUAR SEM SNAPSHOT para atualizar mesmo assim." \
         || falhar "Atualização cancelada sem snapshot."
 fi
 

@@ -8,6 +8,10 @@ exigir_texto() {
     local arquivo="$1" texto="$2"
     grep -Fq -- "$texto" "$RAIZ/$arquivo" || falha "$arquivo não contém: $texto"
 }
+rejeitar_texto() {
+    local arquivo="$1" texto="$2"
+    ! grep -Fq -- "$texto" "$RAIZ/$arquivo" || falha "$arquivo ainda contém texto proibido: $texto"
+}
 
 bash -n "$RAIZ/etapas/11-driver-nvidia.sh" "$RAIZ/etapas/12-pacotes-base.sh" \
     "$RAIZ/etapas/14-docs4.sh" "$RAIZ/etapas/61-airlock.sh" \
@@ -15,9 +19,13 @@ bash -n "$RAIZ/etapas/11-driver-nvidia.sh" "$RAIZ/etapas/12-pacotes-base.sh" \
 
 exigir_texto etapas/14-docs4.sh 'rsync -a --checksum --itemize-changes --dry-run'
 exigir_texto util/backup-vm.sh 'qemu-img check'
+exigir_texto util/backup-vm.sh 'backing-filename'
 exigir_texto util/snapshot-vm.sh 'vm_desligada "$VM_NAME" || falhar'
-exigir_texto util/snapshot-vm.sh '--disk-only --atomic'
+exigir_texto util/snapshot-vm.sh 'SNAPSHOT_DISKSPECS+=(--diskspec "$alvo,snapshot=$modo")'
+rejeitar_texto util/snapshot-vm.sh '--disk-only'
 exigir_texto util/atualizar-host.sh 'CONTINUAR SEM SNAPSHOT'
+exigir_texto util/atualizar-host.sh 'util/snapshot-vm.sh'
+rejeitar_texto util/atualizar-host.sh 'snapshot-create-as'
 exigir_texto etapas/12-pacotes-base.sh 'rsync)'
 exigir_texto etapas/11-driver-nvidia.sh 'ubuntu-drivers devices'
 exigir_texto etapas/61-airlock.sh 'ssh-keygen -l -f'

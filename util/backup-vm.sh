@@ -13,14 +13,14 @@ DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
 DESTINO_BASE="${BACKUPS_VM_DIR:-$DOCS4/backups-vm}"
 
 titulo "Backup offline do conjunto da VM $VM_NAME"
-info "Cria um diretório datado com o QCOW2 principal, XML inativo e, quando existirem, NVRAM e estado TPM."
-info "Outros discos e HD1 físico são inventariados no relatório, mas não são copiados automaticamente."
+info "Cria um diretório datado com o QCOW2 principal ativo e sem backing chain, XML inativo e, quando existirem, NVRAM e estado TPM."
+info "Se o XML apontar para overlay externo ou o QCOW2 depender de backing file, o backup falha antes de copiar uma base obsoleta."
 aviso "A VM ficará desligada. Um backup só é comprovadamente restaurável após teste de restauração em ambiente separado."
 
 if [[ "$DESTINO_BASE" == "$DOCS4"/* ]]; then
     mountpoint -q "$DOCS4" || falhar "HD2 não montado em $DOCS4 (destino dos backups)."
 fi
-exigir_comando rsync qemu-img virsh
+exigir_comando rsync qemu-img virsh python3
 sudo mkdir -p "$DESTINO_BASE"
 
 if ! vm_desligada "$VM_NAME"; then
@@ -35,22 +35,80 @@ if ! vm_desligada "$VM_NAME"; then
     echo
 fi
 
+XML_LOCAL="$(mktemp)"
+trap 'rm -f "$XML_LOCAL"; encerrar_sudo_keepalive' EXIT INT TERM
+info "Exportando e validando a definição inativa da VM..."
+$VIRSH dumpxml "$VM_NAME" --inactive > "$XML_LOCAL"
+if ! VALIDACAO_XML="$(python3 - "$XML_LOCAL" "$QCOW2_PATH" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+arquivo, qcow2 = sys.argv[1:]
+try:
+    root = ET.parse(arquivo).getroot()
+except (OSError, ET.ParseError) as exc:
+    raise SystemExit(f'XML inativo inválido: {exc}')
+matches = []
+for disk in root.findall('./devices/disk'):
+    if disk.get('device') != 'disk':
+        continue
+    source = disk.find('source')
+    if source is not None and source.get('file') == qcow2:
+        matches.append(disk)
+if len(matches) != 1:
+    raise SystemExit(
+        f'QCOW2_PATH={qcow2} precisa ser exatamente o disco ativo no XML; '
+        'um overlay externo ou caminho divergente tornaria a cópia obsoleta'
+    )
+driver = matches[0].find('driver')
+if driver is None or driver.get('type') != 'qcow2':
+    raise SystemExit(f'o disco ativo {qcow2} não usa driver qcow2')
+PY
+)"; then
+    falhar "$VALIDACAO_XML Consolide snapshots externos ou corrija o XML antes do backup."
+fi
+
+QCOW2_VALIDACAO_ERRO=""
+validar_qcow2_sem_backing() {
+    local arquivo="$1" info resultado
+    QCOW2_VALIDACAO_ERRO=""
+    info="$(sudo qemu-img info --output=json "$arquivo" 2>/dev/null)" \
+        || { QCOW2_VALIDACAO_ERRO="qemu-img não conseguiu inspecionar $arquivo."; return 1; }
+    if ! resultado="$(python3 - 3<<< "$info" 2>&1 <<'PY'
+import json
+import os
+
+try:
+    with os.fdopen(3, encoding='utf-8') as stream:
+        info = json.load(stream)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'JSON do qemu-img inválido: {exc}')
+if info.get('format') != 'qcow2':
+    raise SystemExit(f"formato inesperado: {info.get('format', 'ausente')}")
+backing = info.get('full-backing-filename') or info.get('backing-filename')
+if backing:
+    raise SystemExit(f'backing file detectado: {backing}')
+PY
+)"; then
+        QCOW2_VALIDACAO_ERRO="$resultado"
+        return 1
+    fi
+}
+validar_qcow2_sem_backing "$QCOW2_PATH" \
+    || falhar "O disco ativo não é um QCOW2 independente: $QCOW2_VALIDACAO_ERRO Consolide a cadeia antes do backup."
+
 DATA_BACKUP="$(date +%Y%m%d-%H%M%S)"
 DESTINO_DIR="$DESTINO_BASE/${VM_NAME}-backup-$DATA_BACKUP"
 sudo mkdir -m 700 "$DESTINO_DIR"
 sudo mkdir "$DESTINO_DIR/discos-adicionais"
 
-TAM_ORIGEM_KB="$(du -k "$QCOW2_PATH" | cut -f1)"
+TAM_ORIGEM_KB="$(sudo du -k -- "$QCOW2_PATH" | cut -f1)"
 LIVRE_KB="$(df -k --output=avail "$DESTINO_BASE" 2>/dev/null | tail -n1 | tr -dc '0-9')"
 if [ -n "$LIVRE_KB" ] && [ "$LIVRE_KB" -lt "$TAM_ORIGEM_KB" ]; then
     falhar "Espaço insuficiente: $((LIVRE_KB / 1024)) MiB livres para ao menos $((TAM_ORIGEM_KB / 1024)) MiB físicos do QCOW2 principal."
 fi
 
 XML="$DESTINO_DIR/${VM_NAME}.inactive.xml"
-XML_LOCAL="$(mktemp)"
-trap 'rm -f "$XML_LOCAL"; encerrar_sudo_keepalive' EXIT INT TERM
-info "Exportando a definição inativa da VM..."
-$VIRSH dumpxml "$VM_NAME" --inactive > "$XML_LOCAL"
 sudo install -m 600 "$XML_LOCAL" "$XML"
 
 copiar_artefato() {
@@ -65,10 +123,12 @@ copiar_artefato() {
 }
 
 QCOW2_BACKUP="$(copiar_artefato "$QCOW2_PATH" discos)"
-info "Verificando integralmente o QCOW2 copiado com qemu-img check..."
+info "Verificando integralmente o QCOW2 copiado com qemu-img check e ausência de backing file..."
 sudo qemu-img check "$QCOW2_BACKUP" >/dev/null \
     || falhar "qemu-img check encontrou erro no QCOW2 copiado; não trate este backup como utilizável."
-ok "QCOW2 copiado com preservação sparse e aprovado em qemu-img check."
+validar_qcow2_sem_backing "$QCOW2_BACKUP" \
+    || falhar "A cópia não é independente: $QCOW2_VALIDACAO_ERRO"
+ok "QCOW2 ativo copiado com preservação sparse, sem backing chain e aprovado em qemu-img check."
 
 # Caminhos extraídos da definição inativa, produzida pelo próprio libvirt.
 NVRAM_PATH="$(sed -n "s|.*<nvram[^>]*>\(.*\)</nvram>.*|\1|p" "$XML_LOCAL" | head -n1)"
