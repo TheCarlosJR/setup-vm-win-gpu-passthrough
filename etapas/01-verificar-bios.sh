@@ -84,15 +84,18 @@ else
 fi
 
 echo "3) Mensagens AMD-Vi/IOMMU no kernel:"
-if sudo dmesg | grep -i -e "AMD-Vi" -e "IOMMU" | head -n 10 | grep -q .; then
-    sudo dmesg | grep -i -e "AMD-Vi" -e "IOMMU" | head -n 10
+DMESG_KERNEL="$(sudo dmesg)" || falhar "Não foi possível ler o dmesg."
+IOMMU_LOG="$(awk 'tolower($0) ~ /(amd-vi|iommu)/ && exibidas < 10 { print; exibidas++ }' <<< "$DMESG_KERNEL")"
+if [ -n "$IOMMU_LOG" ]; then
+    printf '%s\n' "$IOMMU_LOG"
 else
     info "(vazio: normal ANTES da etapa 30, que aplica amd_iommu=on ao kernel)"
 fi
 
 echo "4) Secure Boot:"
-if sudo dmesg | grep -i "secure boot" | head -n 3 | grep -q .; then
-    sudo dmesg | grep -i "secure boot" | head -n 3
+SECURE_BOOT_LOG="$(awk 'tolower($0) ~ /secure boot/ && exibidas < 3 { print; exibidas++ }' <<< "$DMESG_KERNEL")"
+if [ -n "$SECURE_BOOT_LOG" ]; then
+    printf '%s\n' "$SECURE_BOOT_LOG"
 else
     info "(kernel não reportou estado de Secure Boot; verifique na própria BIOS)"
 fi
