@@ -56,6 +56,7 @@ PUBLICADO=0
 limpar_temporarios_inventario() {
     [ "$PUBLICADO" -eq 1 ] || rm -f -- "$TMP_INVENTARIO"
     [ -z "$TMP_LINK" ] || rm -f -- "$TMP_LINK"
+    encerrar_sudo_keepalive
 }
 trap limpar_temporarios_inventario EXIT INT TERM
 
@@ -79,6 +80,7 @@ publicar_inventario_completo "$TMP_INVENTARIO" "$DIRETORIO_INVENTARIO" >/dev/nul
 ARQUIVO="$INVENTARIO_PUBLICADO"
 PUBLICADO=1
 
+limpar_temporarios_inventario
 trap - EXIT INT TERM
 
 echo

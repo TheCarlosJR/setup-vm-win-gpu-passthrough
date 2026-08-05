@@ -620,25 +620,51 @@ done < "$STATE_FILE"
 [ "$GPU_DRIVER" = nvidia ] || { echo "[hook release] driver GPU de estado inválido" >&2; exit 1; }
 [[ "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]] || { echo "[hook release] driver de áudio inválido" >&2; exit 1; }
 
+FALHAS=0
 for modulo in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
     echo "[hook release] carregando $modulo..."
-    modprobe "$modulo"
+    if ! modprobe "$modulo"; then
+        echo "[hook release] modprobe $modulo falhou" >&2
+        FALHAS=$((FALHAS + 1))
+    fi
 done
-[ -z "$AUDIO_DRIVER" ] || modprobe "$AUDIO_DRIVER"
-aguardar_driver "$GPU_PCI" "$GPU_DRIVER"
-if [ -n "$GPU_AUDIO_PCI" ]; then
-    aguardar_driver "$GPU_AUDIO_PCI" "$AUDIO_DRIVER"
+if [ -n "$AUDIO_DRIVER" ] && ! modprobe "$AUDIO_DRIVER"; then
+    echo "[hook release] modprobe $AUDIO_DRIVER falhou" >&2
+    FALHAS=$((FALHAS + 1))
 fi
-nvidia-smi >/dev/null
+if ! aguardar_driver "$GPU_PCI" "$GPU_DRIVER"; then
+    FALHAS=$((FALHAS + 1))
+fi
+if [ -n "$GPU_AUDIO_PCI" ] && ! aguardar_driver "$GPU_AUDIO_PCI" "$AUDIO_DRIVER"; then
+    FALHAS=$((FALHAS + 1))
+fi
+if ! nvidia-smi >/dev/null; then
+    echo "[hook release] nvidia-smi não respondeu" >&2
+    FALHAS=$((FALHAS + 1))
+fi
 if [ "$DM_WAS_ACTIVE" -eq 1 ]; then
-    systemctl start "$DM"
-    systemctl is-active --quiet "$DM" \
-        || { echo "[hook release] $DM não ficou ativo" >&2; exit 1; }
+    if ! systemctl start "$DM"; then
+        echo "[hook release] não foi possível iniciar $DM" >&2
+        FALHAS=$((FALHAS + 1))
+    elif ! systemctl is-active --quiet "$DM"; then
+        echo "[hook release] $DM não ficou ativo" >&2
+        FALHAS=$((FALHAS + 1))
+    fi
 else
-    [ "$(systemctl show -p ActiveState --value "$DM")" = inactive ] \
-        || { echo "[hook release] $DM estava inativo antes, mas mudou de estado" >&2; exit 1; }
+    if ! DM_ESTADO_FINAL="$(systemctl show -p ActiveState --value "$DM")"; then
+        echo "[hook release] não foi possível consultar o estado final de $DM" >&2
+        FALHAS=$((FALHAS + 1))
+    elif [ "$DM_ESTADO_FINAL" != inactive ]; then
+        echo "[hook release] $DM estava inativo antes, mas mudou para $DM_ESTADO_FINAL" >&2
+        FALHAS=$((FALHAS + 1))
+    fi
 fi
-rm -f -- "$STATE_FILE"
+if [ "$FALHAS" -ne 0 ]; then
+    echo "[hook release] restauração incompleta ($FALHAS falha(s)); estado preservado em $STATE_FILE" >&2
+    exit 1
+fi
+rm -f -- "$STATE_FILE" \
+    || { echo "[hook release] pós-condições aprovadas, mas o estado não pôde ser removido: $STATE_FILE" >&2; exit 1; }
 echo "[hook release] GPU e desktop restaurados com pós-condições verificadas."
 CORPO
     } > "$destino"
@@ -853,7 +879,11 @@ if sudo test -e "$HOOK_QEMU" || sudo test -L "$HOOK_QEMU"; then
     fi
 fi
 RENDER_DIR="$(mktemp -d)" || falhar "Não foi possível criar diretório de renderização."
-limpar_temporarios() { rm -rf -- "$RENDER_DIR"; rm -f -- "$XML_ANTES"; }
+limpar_temporarios() {
+    rm -rf -- "$RENDER_DIR"
+    rm -f -- "$XML_ANTES"
+    encerrar_sudo_keepalive
+}
 trap limpar_temporarios EXIT
 gerar_conjunto_hooks "$RENDER_DIR" "$LEGADO" || falhar "Hooks gerados não passaram em bash -n."
 
@@ -962,6 +992,7 @@ finalizar_transacao() {
     else
         erro "XML original preservado em: $XML_ANTES"
     fi
+    encerrar_sudo_keepalive
     exit "$rc"
 }
 trap finalizar_transacao EXIT

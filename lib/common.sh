@@ -54,12 +54,22 @@ encerrar_sudo_keepalive() {
 }
 
 exigir_sudo() {
+    local processo_dono="$BASHPID"
     if ! sudo -n true 2>/dev/null; then
         info "Acesso administrativo necessário: a senha do sudo será pedida UMA vez."
         sudo -v || falhar "Sem acesso sudo."
     fi
     if [ -z "$SUDO_KEEPALIVE_PID" ]; then
-        ( while :; do sudo -n true 2>/dev/null || exit 0; sleep 50; done ) &
+        # O trap encerra imediatamente no caminho normal. A verificação do PID
+        # dono é uma segunda defesa: se outro trap substituir o nosso ou o shell
+        # morrer abruptamente, o loop para antes de renovar novamente o ticket.
+        (
+            while kill -0 "$processo_dono" 2>/dev/null; do
+                sleep 50
+                kill -0 "$processo_dono" 2>/dev/null || exit 0
+                sudo -n true 2>/dev/null || exit 0
+            done
+        ) >/dev/null 2>&1 &
         SUDO_KEEPALIVE_PID=$!
         trap encerrar_sudo_keepalive EXIT INT TERM
     fi
