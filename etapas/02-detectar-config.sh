@@ -19,15 +19,22 @@
 #     script.
 #
 # Uso:
-#   02-detectar-config.sh               detecta apenas o que falta no conf
-#   02-detectar-config.sh --redetectar  refaz todas as detecções
-#   02-detectar-config.sh --verificar   confere se o conf está completo
+#   02-detectar-config.sh               descarta escolhas da etapa e reconfigura
+#   02-detectar-config.sh --redetectar  alias compatível do mesmo reinício
+#   02-detectar-config.sh --verificar   confere sem modificar arquivo algum
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 verificar() {
+    local inventario
+    if resolver_ultimo_inventario >/dev/null && inventario="$INVENTARIO_RESOLVIDO" \
+       && validar_inventario_principal "$inventario"; then
+        v_ok "Inventário de referência válido: $inventario"
+    else
+        v_falta "${INVENTARIO_ERRO:-Inventário de referência indisponível.}"
+    fi
     [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
     local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0 topologia ram_max
     local cpu_completa=1 memoria_completa=1
@@ -138,29 +145,53 @@ verificar() {
     fi
     v_fim
 }
-[ "${1:-}" = "--verificar" ] && verificar
+MODO_EXECUCAO="$(modo_execucao_etapa02 "${1:-}")" \
+    || falhar "Uso: $0 [--redetectar|--verificar]"
+[ "$MODO_EXECUCAO" = "verificar" ] && verificar
 
-REDETECTAR=0
-[ "${1:-}" = "--redetectar" ] && REDETECTAR=1
+# Execução normal e --redetectar são deliberadamente equivalentes: não existe
+# retomada implícita de escolhas administradas por esta etapa.
+REDETECTAR=1
 
 exigir_nao_root
 exigir_sudo
-exigir_comando lspci lsblk ip awk sed findmnt
+exigir_comando lscpu lspci lsblk ip awk sed findmnt
 
-# ja_definido VAR: retorna 0 se a variável já tem valor e não estamos redetectando
+if ! resolver_ultimo_inventario >/dev/null; then
+    falhar "$INVENTARIO_ERRO Execute primeiro a opção 1 (etapa 00)."
+fi
+INVENTARIO_USADO="$INVENTARIO_RESOLVIDO"
+validar_inventario_principal "$INVENTARIO_USADO" \
+    || falhar "$INVENTARIO_ERRO Execute novamente a opção 1 (etapa 00)."
+if ! comparar_inventario_com_hardware "$INVENTARIO_USADO"; then
+    erro "$INVENTARIO_ERRO"
+    [ -z "$INVENTARIO_DIFERENCAS" ] || while IFS= read -r diferenca; do erro "  - $diferenca"; done <<< "$INVENTARIO_DIFERENCAS"
+    falhar "O passthrough.conf foi preservado. Execute novamente a opção 1 antes de reconfigurar."
+fi
+info "Inventário de hardware utilizado: $INVENTARIO_USADO"
+
+# ja_definido permanece como estrutura dos blocos, mas após o reset sempre
+# retorna falso para as escolhas desta etapa.
 ja_definido() {
     [ "$REDETECTAR" -eq 0 ] && [ -n "${!1:-}" ]
 }
 
+aviso "As escolhas atuais da configuração central serão descartadas e refeitas desde 1/8 Identidade."
+backup_e_resetar_config_etapa02
+if [ -n "$BACKUP_CONFIG_ETAPA02" ]; then
+    info "Backup da configuração anterior: $BACKUP_CONFIG_ETAPA02"
+else
+    info "Conf criado a partir do modelo; não havia configuração anterior para backup."
+fi
+
 titulo "Detecção de configuração (grava em $CONF_ARQUIVO)"
 info "Finalidade: configurar interativamente GPU, discos, plano de CPU/RAM, rede e complementos."
 info "Pré-requisitos: execute como usuário normal com sudo; mantenha GPU, discos e rede que serão usados conectados."
-info "Alteração desta etapa: cria ou atualiza apenas o arquivo central passthrough.conf."
-aviso "As respostas são salvas por bloco à medida que o fluxo avança; cancelar não desfaz blocos anteriores."
-info "Use --redetectar para rever decisões salvas. Nada é formatado, montado, anexado à VM ou aplicado ao kernel aqui."
+info "Alteração desta etapa: faz backup restrito, limpa atomicamente suas escolhas e grava novas respostas no passthrough.conf."
+aviso "As respostas são salvas por bloco à medida que o fluxo avança; cancelar não restaura escolhas antigas."
+info "A execução sem argumento e --redetectar sempre recomeçam. Nada é formatado, montado, anexado à VM ou aplicado ao kernel aqui."
 aviso "Risco: uma identificação errada pode orientar etapas posteriores; confira modelos, seriais, IDs e o resumo final."
-info "Recomendação: mantenha o inventário da opção 1 à mão. Não exige reboot; ao concluir, volte ao menu."
-[ -f "$CONF_ARQUIVO" ] || { cp "$PROJETO_DIR/passthrough.conf.example" "$CONF_ARQUIVO"; info "Conf criado a partir do modelo."; }
+info "O inventário recente acima é a referência automática; as validações ao vivo continuam sendo a autoridade. Não exige reboot."
 
 # ----------------------------------------------------------------------------
 # 1. Identidade
@@ -826,6 +857,8 @@ done
 
 # ----------------------------------------------------------------------------
 titulo "Resumo gravado em $CONF_ARQUIVO"
+info "Inventário de hardware utilizado: $INVENTARIO_USADO"
+ok "Comparação prévia: CPU, RAM, PCI e discos correspondem ao inventário selecionado."
 grep -vE '^\s*(#|$)' "$CONF_ARQUIVO" | sed 's/^/  /'
 echo
 ok "Detecção concluída. Revise o resumo acima antes de seguir para as próximas etapas."

@@ -149,9 +149,9 @@ bash etapas/30-iommu-vfio.sh --verificar
 
 | Etapa | O que faz | Parada |
 |---|---|---|
-| 00 | inventário de hardware em arquivo datado | |
+| 00 | publica inventário completo com nome único e atualiza `ultimo-inventario.txt` atomicamente | |
 | 01 | checklist da BIOS e verificação pelo lado do Linux | |
-| 02 | detecta hardware, enumera uplinks físicos e grava `REDE_MODO=bridge|nat` no `passthrough.conf` | |
+| 02 | usa o último inventário, faz backup/reset e pergunta hardware e rede novamente | |
 | 10 | atualiza sistema e firmware | reboot |
 | 11 | driver NVIDIA no host | reboot |
 | 12 | pacotes utilitários (inclui `xmlstarlet`) | |
@@ -183,9 +183,11 @@ depende da rede finalizada pela 60. A etapa 70 pode ser executada depois da VM.
 bash etapas/00-inventario.sh
 ```
 
-Gera `~/inventario-hardware/inventario-<data>.txt` com CPU, RAM, placa-mãe,
-dispositivos PCI e discos. **Guarde uma cópia fora do disco do sistema**: é a
-referência para conferir modelo e serial na hora de escolher disco.
+Gera primeiro um temporário e, somente após concluir todas as seções, publica
+`~/inventario-hardware/inventario-AAAAMMDD-HHMMSS-NNNNNNNNN.txt`. O symlink
+relativo `ultimo-inventario.txt` é atualizado atomicamente; coletas interrompidas
+não substituem a referência anterior e os históricos são mantidos. **Guarde uma
+cópia fora do disco do sistema**: é a referência para conferir modelo e serial.
 
 > Esta etapa pede senha de administrador logo no início: `dmidecode` lê a tabela
 > SMBIOS e o `dmesg` do Pop!_OS é restrito a root (`kernel.dmesg_restrict=1`).
@@ -220,13 +222,15 @@ lado do Linux o que é verificável por comando: flag `svm`, modo UEFI e `/dev/k
 bash etapas/02-detectar-config.sh
 ```
 
-Detecta tudo no seu hardware e grava em `passthrough.conf`, que todas as demais
-etapas leem. Nenhum script tem valor chumbado. Aqui você decide, com os tetos da
-seção 2.3 aplicados: GPU, CPU, RAM, disco físico (ou nenhum), airlock e rede. A
-enumeração usa `/sys/class/net/*/device` para oferecer somente interfaces
-físicas, exclui `lo` e interfaces virtuais, mostra estado/carrier/IP/MAC/driver e
-exige uma escolha mesmo quando há uma única candidata. Wi-Fi é reconhecido pela
-existência de `/sys/class/net/<iface>/wireless`, nunca pelo prefixo do nome.
+A execução normal sempre usa o alvo válido de `ultimo-inventario.txt` (ou o
+inventário legado/novo temporalmente mais recente como fallback), compara CPU/topologia, RAM,
+PCI e modelo/serial/tamanho dos discos com o estado atual e anuncia o caminho.
+Uma divergência aborta antes de alterar a configuração e exige executar a etapa
+00 novamente. Em seguida, cria backup restrito do `passthrough.conf`, limpa em
+uma única atualização as escolhas da etapa 02 e recomeça em `1/8 Identidade`.
+`--redetectar` é alias desse comportamento; `--verificar` é estritamente somente
+leitura. Consultas e travas ao vivo de GPU, discos, CPU, RAM e rede continuam
+sendo a autoridade.
 
 Em Ethernet, escolha `bridge` (VM na LAN) ou `nat` (sub-rede privada libvirt).
 Em Wi-Fi station, a etapa grava somente `nat`: bridge de camada 2 normalmente
@@ -238,7 +242,9 @@ uplink/métrica e aborta antes de qualquer mutação até `INTERFACE_FISICA` ser
 dispositivo efetivo. Trocar o uplink mantendo bridge limpa `VM_IP_FIXO` e
 `IP_FIXO_HOST`, pois eram reservas da LAN anterior.
 
-Para refazer: `bash etapas/02-detectar-config.sh --redetectar`.
+Executar novamente: `bash etapas/02-detectar-config.sh` ou o alias
+`bash etapas/02-detectar-config.sh --redetectar`; ambos fazem backup e reiniciam
+todas as perguntas.
 
 ### 4.4 Sistema, driver e utilitários
 

@@ -129,9 +129,9 @@ bash menu.sh --status                     # checklist completo sem menu
 
 | # | Etapa | Observação |
 |---|-------|-----------|
-| 1 | `00-inventario` | somente leitura (pede sudo: `dmidecode` e `dmesg` exigem); guarde o arquivo gerado fora do disco do sistema |
+| 1 | `00-inventario` | coleta somente dados do hardware (pede sudo para `dmidecode`/`dmesg`) e publica um relatório único; guarde uma cópia fora do disco do sistema |
 | 2 | `01-verificar-bios` | manual + verificação; refaça até tudo passar |
-| 3 | `02-detectar-config` | detecta GPU/discos/CPU/RAM/bootloader; enumera interfaces físicas, exige escolher o uplink e grava `REDE_MODO` (`bridge`/`nat`) |
+| 3 | `02-detectar-config` | usa o último inventário completo, faz backup e reinicia todas as escolhas de GPU/discos/CPU/RAM/bootloader/rede |
 | 4 | `10-atualizar-sistema` | **reboot** ao final |
 | 5 | `11-driver-nvidia` | **reboot** se instalar; valida `nvidia-smi` |
 | 6 | `12-pacotes-base` | inclui xmlstarlet (edição segura de XML) |
@@ -152,10 +152,13 @@ bash menu.sh --status                     # checklist completo sem menu
 
 ### 5. Configuração central
 
-Todos os valores do seu hardware moram em `passthrough.conf` (gerado pela
-etapa 02, editável à mão). Nenhum script contém valor chumbado; se faltar
-algo, a etapa aborta apontando para a 02. Para refazer uma detecção:
-`bash etapas/02-detectar-config.sh --redetectar`.
+Todos os valores do seu hardware moram em `passthrough.conf`. A opção 3 e a
+execução direta de `etapas/02-detectar-config.sh` sempre criam um backup restrito
+em `backups/`, limpam atomicamente as escolhas administradas pela etapa e
+recomeçam em `1/8 Identidade`; `--redetectar` é um alias compatível do mesmo
+comportamento. `--verificar` apenas lê e não altera conteúdo nem data do arquivo.
+Opções externas ao fluxo, como `QCOW2_PATH`, nomes de bridge, `VM_NIC_MAC`,
+`AIRLOCK_BIND` e destinos de backup, são preservadas.
 
 O que é configurável sem editar script: nome e RAM/CPU da VM, caminho e tamanho
 do QCOW2, ponto de montagem do HD2 (`DOCS4_MONTAGEM`), pasta de trânsito do
@@ -264,7 +267,10 @@ grep -rlU $'\r' --include='*.sh' . && echo "CORRIGIR os arquivos acima" || echo 
 # 3. Nenhum placeholder do manual esquecido (formato <MAIUSCULAS>)
 grep -rnE '<[A-Z_]{3,}>' etapas/ lib/ util/ | grep -v 'IP_FIXO_HOST' || echo "OK sem placeholders"
 
-# 4. Linters opcionais, quando instalados
+# 4. Testes automatizados sem alterar hardware, serviços ou discos
+for teste in tests/test-*.sh; do bash "$teste" || exit 1; done
+
+# 5. Linters opcionais, quando instalados
 if command -v shellcheck >/dev/null; then
   shellcheck lib/common.sh etapas/*.sh util/*.sh menu.sh
 fi

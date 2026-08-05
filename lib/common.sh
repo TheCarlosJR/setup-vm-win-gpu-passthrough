@@ -73,6 +73,308 @@ exigir_comando() {
     done
 }
 
+# --- Inventário de hardware --------------------------------------------------
+INVENTARIO_ERRO=""
+INVENTARIO_DIFERENCAS=""
+INVENTARIO_RESOLVIDO=""
+
+modo_execucao_etapa02() {
+    case "${1:-}" in
+        ""|--redetectar) printf '%s\n' reiniciar ;;
+        --verificar) printf '%s\n' verificar ;;
+        *) return 1 ;;
+    esac
+}
+
+resolver_ultimo_inventario() {
+    # Imprime o inventário principal mais recente. O diretório opcional existe
+    # para testes; em produção a única fonte é ~/inventario-hardware.
+    local diretorio="${1:-${INVENTARIO_DIR:-$HOME/inventario-hardware}}"
+    local ponteiro="$diretorio/ultimo-inventario.txt" alvo nome candidato
+    local -a candidatos=()
+    INVENTARIO_ERRO=""
+    INVENTARIO_RESOLVIDO=""
+    [ -d "$diretorio" ] \
+        || { INVENTARIO_ERRO="Diretório de inventários não existe: $diretorio"; return 1; }
+
+    if [ -L "$ponteiro" ]; then
+        alvo="$(readlink -- "$ponteiro" 2>/dev/null || true)"
+        # O gerador publica links relativos para um arquivo direto no diretório.
+        # Isso impede escape por caminho absoluto, '..' ou subdiretórios.
+        if [[ "$alvo" != */* ]] \
+           && [[ "$alvo" =~ ^inventario-[0-9]{8}(-[0-9]{6}-[0-9]{9})?\.txt$ ]] \
+           && [ -f "$diretorio/$alvo" ] && [ ! -L "$diretorio/$alvo" ] \
+           && [ -r "$diretorio/$alvo" ] && [ -s "$diretorio/$alvo" ] \
+           && validar_inventario_principal "$diretorio/$alvo"; then
+            INVENTARIO_RESOLVIDO="$diretorio/$alvo"
+            printf '%s\n' "$INVENTARIO_RESOLVIDO"
+            return 0
+        fi
+        INVENTARIO_ERRO="Ponteiro de inventário inválido, quebrado, incompleto ou fora do diretório: $ponteiro"
+        return 1
+    elif [ -e "$ponteiro" ]; then
+        INVENTARIO_ERRO="Ponteiro de inventário não é um link simbólico: $ponteiro"
+        return 1
+    fi
+
+    # Sem ponteiro, recupera deterministicamente históricos completos nos
+    # formatos novo e legado. Artefatos, links, vazios e parciais não entram.
+    for candidato in "$diretorio"/inventario-*.txt; do
+        [ -f "$candidato" ] && [ ! -L "$candidato" ] && [ -r "$candidato" ] && [ -s "$candidato" ] || continue
+        nome="${candidato##*/}"
+        [[ "$nome" =~ ^inventario-[0-9]{8}(-[0-9]{6}-[0-9]{9})?\.txt$ ]] || continue
+        validar_inventario_principal "$candidato" || continue
+        candidatos+=("$candidato")
+    done
+    if [ "${#candidatos[@]}" -gt 0 ]; then
+        local chave data hora nanos
+        local -a candidatos_ordenados=()
+        for candidato in "${candidatos[@]}"; do
+            nome="${candidato##*/}"
+            if [[ "$nome" =~ ^inventario-([0-9]{8})\.txt$ ]]; then
+                data="${BASH_REMATCH[1]}"; hora="000000"; nanos="000000000"
+            else
+                [[ "$nome" =~ ^inventario-([0-9]{8})-([0-9]{6})-([0-9]{9})\.txt$ ]] || continue
+                data="${BASH_REMATCH[1]}"; hora="${BASH_REMATCH[2]}"; nanos="${BASH_REMATCH[3]}"
+            fi
+            chave="$data-$hora-$nanos"
+            candidatos_ordenados+=("$chave|$candidato")
+        done
+        INVENTARIO_RESOLVIDO="$(printf '%s\n' "${candidatos_ordenados[@]}" | LC_ALL=C sort | tail -n1 | cut -d'|' -f2-)"
+        INVENTARIO_ERRO=""
+        printf '%s\n' "$INVENTARIO_RESOLVIDO"
+        return 0
+    fi
+    [ -n "$INVENTARIO_ERRO" ] \
+        || INVENTARIO_ERRO="Nenhum inventário principal válido e legível em $diretorio."
+    return 1
+}
+
+validar_inventario_principal() {
+    local arquivo="${1:-}" secao
+    INVENTARIO_ERRO=""
+    [ -f "$arquivo" ] && [ ! -L "$arquivo" ] && [ -r "$arquivo" ] && [ -s "$arquivo" ] \
+        || { INVENTARIO_ERRO="Inventário inválido, vazio ou ilegível: ${arquivo:-vazio}"; return 1; }
+    for secao in '== CPU ==' '== RAM ==' '== PCI ==' '== BLOCK DEVICES =='; do
+        grep -Fqx -- "$secao" "$arquivo" \
+            || { INVENTARIO_ERRO="Inventário incompleto: seção '$secao' ausente em $arquivo."; return 1; }
+    done
+}
+
+INVENTARIO_PUBLICADO=""
+publicar_inventario_completo() {
+    # Publica um temporário já concluído e só então troca atomicamente o
+    # ponteiro. O timestamp opcional torna o contrato testável sem relógio real.
+    local temporario="${1:-}" diretorio="${2:-}" timestamp="${3:-$(date +%Y%m%d-%H%M%S-%N)}"
+    local diretorio_real temporario_dir_real arquivo tmp_link
+    INVENTARIO_ERRO=""
+    INVENTARIO_PUBLICADO=""
+    [ -d "$diretorio" ] \
+        || { INVENTARIO_ERRO="Diretório de inventários não existe: ${diretorio:-vazio}"; return 1; }
+    validar_inventario_principal "$temporario" || return 1
+    [[ "$timestamp" =~ ^[0-9]{8}-[0-9]{6}-[0-9]{9}$ ]] \
+        || { INVENTARIO_ERRO="Timestamp inválido para publicação: $timestamp"; return 1; }
+    diretorio_real="$(readlink -f -- "$diretorio")" || return 1
+    temporario_dir_real="$(readlink -f -- "$(dirname -- "$temporario")")" || return 1
+    [ "$temporario_dir_real" = "$diretorio_real" ] \
+        || { INVENTARIO_ERRO="O temporário precisa estar dentro de $diretorio."; return 1; }
+
+    arquivo="$diretorio/inventario-${timestamp}.txt"
+    tmp_link="$diretorio/.ultimo-inventario.tmp.$timestamp"
+    [ ! -e "$arquivo" ] && [ ! -L "$arquivo" ] \
+        || { INVENTARIO_ERRO="Nome de inventário já existe: $arquivo"; return 1; }
+    [ ! -e "$tmp_link" ] && [ ! -L "$tmp_link" ] \
+        || { INVENTARIO_ERRO="Temporário do ponteiro já existe: $tmp_link"; return 1; }
+
+    mv -- "$temporario" "$arquivo" \
+        || { INVENTARIO_ERRO="Não foi possível publicar o inventário completo."; return 1; }
+    if ! ln -s -- "${arquivo##*/}" "$tmp_link"; then
+        INVENTARIO_ERRO="Inventário publicado, mas não foi possível preparar o novo ponteiro; o anterior foi preservado."
+        return 1
+    fi
+    if ! mv -Tf -- "$tmp_link" "$diretorio/ultimo-inventario.txt"; then
+        rm -f -- "$tmp_link"
+        INVENTARIO_ERRO="Inventário publicado, mas não foi possível atualizar o ponteiro; o anterior foi preservado."
+        return 1
+    fi
+    INVENTARIO_PUBLICADO="$arquivo"
+    printf '%s\n' "$arquivo"
+}
+
+normalizar_identidade_hardware_atual() {
+    # Formato estável, deliberadamente sem drivers, montagens, nomes /dev/sdX
+    # ou outros dados voláteis. LC_ALL=C torna rótulos e ordenação previsíveis.
+    local lscpu_saida chave valor ram_kib
+    lscpu_saida="$(LC_ALL=C lscpu)" || return 1
+    for chave in Architecture 'CPU(s)' 'On-line CPU(s) list' 'Thread(s) per core' \
+                 'Core(s) per socket' 'Socket(s)' 'Model name'; do
+        valor="$(awk -F: -v chave="$chave" '$1 == chave {sub(/^[[:space:]]+/, "", $2); print $2; exit}' <<< "$lscpu_saida")"
+        printf 'CPU|%s|%s\n' "$chave" "$valor"
+    done
+    ram_kib="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)"
+    [[ "$ram_kib" =~ ^[0-9]+$ ]] || return 1
+    printf 'RAM_MIB|%s\n' "$((ram_kib / 1024))"
+    LC_ALL=C lspci -Dnn | awk '
+        {
+            bdf=$1; classe=""; id=""
+            for (i=2; i<=NF; i++) {
+                if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]:$/ && classe == "") {
+                    classe=$i; gsub(/[\[\]:]/, "", classe)
+                } else if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]/) {
+                    id=$i; gsub(/[\[\]]/, "", id)
+                }
+            }
+            if (bdf != "" && classe != "" && id != "") print "PCI|" bdf "|" classe "|" id
+        }
+    ' | LC_ALL=C sort
+    LC_ALL=C lsblk -bdnP -o SIZE,MODEL,SERIAL,TYPE | awk '
+        /TYPE="disk"/ {
+            linha=$0; sub(/^SIZE=/, "BYTES=", linha)
+            gsub(/[[:space:]]+/, " ", linha); print "DISK|" linha
+        }
+    ' | LC_ALL=C sort
+}
+
+extrair_identidade_inventario() {
+    local arquivo="$1" identidade
+    identidade="$(awk '/^== HARDWARE IDENTITY ==$/ {captura=1; next} /^== / {if (captura) exit} captura && /^(CPU\||RAM_MIB\||PCI\||DISK\|)/ {print}' "$arquivo")"
+    if [ -n "$identidade" ]; then
+        printf '%s\n' "$identidade"
+        return 0
+    fi
+
+    # Compatibilidade com relatórios anteriores à seção normalizada. Só os
+    # campos estáveis são extraídos; se algum conjunto não puder ser provado,
+    # a comparação posterior falha fechada e pede uma nova coleta.
+    awk '
+        function tamanho_em_bytes(texto, numero, unidade, mult) {
+            numero=texto + 0
+            unidade=substr(texto, length(texto), 1)
+            mult=1
+            if (unidade == "K") mult=1024
+            else if (unidade == "M") mult=1048576
+            else if (unidade == "G") mult=1073741824
+            else if (unidade == "T") mult=1099511627776
+            else if (unidade == "P") mult=1125899906842624
+            else unidade=""
+            if (unidade == "") return sprintf("%.0f", numero)
+            return sprintf("%.0f", numero * mult)
+        }
+        /^== CPU ==$/ {secao="cpu"; next}
+        /^== RAM ==$/ {secao="ram"; next}
+        /^== PCI ==$/ {secao="pci"; next}
+        /^== BLOCK DEVICES ==$/ {secao="disk"; cabecalho=""; next}
+        /^== / {secao=""}
+        secao == "cpu" && index($0, ":") {
+            chave=$0; sub(/:.*/, "", chave); gsub(/^[[:space:]]+|[[:space:]]+$/, "", chave)
+            if (chave == "Architecture" || chave == "CPU(s)" || chave == "On-line CPU(s) list" ||
+                chave == "Thread(s) per core" || chave == "Core(s) per socket" ||
+                chave == "Socket(s)" || chave == "Model name") {
+                valor=$0; sub(/^[^:]*:[[:space:]]*/, "", valor)
+                cpu[chave]=valor
+            }
+        }
+        secao == "ram" && /^[[:space:]]*Size:[[:space:]]*[0-9]+[[:space:]]+(MB|GB|TB)/ {
+            valor=$2 + 0; unidade=$3
+            if (unidade == "GB") valor *= 1024
+            else if (unidade == "TB") valor *= 1048576
+            ram += valor
+        }
+        secao == "pci" && /^([[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:)?[[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]]\.[0-7][[:space:]]/ {
+            bdf=$1
+            if (bdf !~ /^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:/) bdf="0000:" bdf
+            classe=""; id=""
+            for (i=2; i<=NF; i++) {
+                if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]:$/ && classe == "") {
+                    classe=$i; gsub(/[\[\]:]/, "", classe)
+                } else if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]/) {
+                    id=$i; gsub(/[\[\]]/, "", id)
+                }
+            }
+            if (classe != "" && id != "") pci[++npci]="PCI|" bdf "|" classe "|" id
+        }
+        secao == "disk" && cabecalho == "" && /NAME/ && /SIZE/ && /TYPE/ && /MODEL/ && /SERIAL/ {
+            cabecalho=$0
+            psize=index(cabecalho, "SIZE"); ptype=index(cabecalho, "TYPE")
+            pmodel=index(cabecalho, "MODEL"); pserial=index(cabecalho, "SERIAL")
+            next
+        }
+        secao == "disk" && cabecalho != "" {
+            tipo=substr($0, ptype, pmodel-ptype); gsub(/^[[:space:]]+|[[:space:]]+$/, "", tipo)
+            if (tipo == "disk") {
+                tamanho=substr($0, psize, ptype-psize); modelo=substr($0, pmodel, pserial-pmodel); serial=substr($0, pserial)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", tamanho)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", modelo)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", serial)
+                disco[++ndisco]="DISK|BYTES=\"" tamanho_em_bytes(tamanho) "\" MODEL=\"" modelo "\" SERIAL=\"" serial "\" TYPE=\"disk\""
+            }
+        }
+        END {
+            ordem[1]="Architecture"; ordem[2]="CPU(s)"; ordem[3]="On-line CPU(s) list"
+            ordem[4]="Thread(s) per core"; ordem[5]="Core(s) per socket"
+            ordem[6]="Socket(s)"; ordem[7]="Model name"
+            for (i=1; i<=7; i++) print "CPU|" ordem[i] "|" cpu[ordem[i]]
+            if (ram > 0) print "RAM_MIB|" ram
+            for (i=1; i<=npci; i++) print pci[i]
+            for (i=1; i<=ndisco; i++) print disco[i]
+        }
+    ' "$arquivo" | {
+        # CPU mantém ordem semântica; os dois inventários de conjuntos precisam
+        # da mesma ordem C usada pela coleta nova.
+        awk '/^CPU\||^RAM_MIB\|/ {print; next} /^PCI\|/ {pci[++np]=$0; next} /^DISK\|/ {disk[++nd]=$0} END {
+            for (i=1; i<=np; i++) print pci[i] | "LC_ALL=C sort"
+            close("LC_ALL=C sort")
+            for (i=1; i<=nd; i++) print disk[i] | "LC_ALL=C sort"
+            close("LC_ALL=C sort")
+        }'
+    }
+}
+
+comparar_inventario_com_hardware() {
+    # O segundo argumento é uma fotografia normalizada opcional, usada apenas
+    # por testes. Em produção ela é sempre coletada novamente do kernel.
+    local arquivo="${1:-}" atual="${2:-}" esperado ram_antiga ram_atual tolerancia diferencas=""
+    INVENTARIO_DIFERENCAS=""
+    validar_inventario_principal "$arquivo" || return 1
+    esperado="$(extrair_identidade_inventario "$arquivo")"
+    if [ -z "$(grep '^CPU|' <<< "$esperado")" ] \
+       || [ -z "$(grep '^RAM_MIB|' <<< "$esperado")" ] \
+       || [ -z "$(grep '^PCI|' <<< "$esperado")" ] \
+       || [ -z "$(grep '^DISK|' <<< "$esperado")" ]; then
+        INVENTARIO_ERRO="Inventário sem identidade suficiente para comparação; execute novamente a etapa 00."
+        return 1
+    fi
+    [ -n "$atual" ] || atual="$(normalizar_identidade_hardware_atual)" \
+        || { INVENTARIO_ERRO="Não foi possível obter a identidade atual do hardware."; return 1; }
+
+    if [ "$(grep '^CPU|' <<< "$esperado")" != "$(grep '^CPU|' <<< "$atual")" ]; then
+        diferencas+="CPU: identidade ou topologia mudou."$'\n'
+    fi
+    ram_antiga="$(awk -F'|' '$1 == "RAM_MIB" {print $2; exit}' <<< "$esperado")"
+    ram_atual="$(awk -F'|' '$1 == "RAM_MIB" {print $2; exit}' <<< "$atual")"
+    if [[ "$ram_antiga" =~ ^[0-9]+$ ]] && [[ "$ram_atual" =~ ^[0-9]+$ ]]; then
+        tolerancia=$((ram_antiga / 20))
+        [ "$tolerancia" -ge 1024 ] || tolerancia=1024
+        if [ "$ram_atual" -lt $((ram_antiga - tolerancia)) ] \
+           || [ "$ram_atual" -gt $((ram_antiga + tolerancia)) ]; then
+            diferencas+="RAM: inventário=${ram_antiga} MiB, atual=${ram_atual} MiB (tolerância=${tolerancia} MiB)."$'\n'
+        fi
+    else
+        diferencas+="RAM: total não pôde ser comparado."$'\n'
+    fi
+    if [ "$(grep '^PCI|' <<< "$esperado")" != "$(grep '^PCI|' <<< "$atual")" ]; then
+        diferencas+="PCI: conjunto normalizado de dispositivos mudou."$'\n'
+    fi
+    if [ "$(grep '^DISK|' <<< "$esperado")" != "$(grep '^DISK|' <<< "$atual")" ]; then
+        diferencas+="Discos: modelo, serial ou tamanho mudou."$'\n'
+    fi
+    if [ -n "$diferencas" ]; then
+        INVENTARIO_DIFERENCAS="${diferencas%$'\n'}"
+        INVENTARIO_ERRO="O hardware atual diverge do último inventário completo."
+        return 1
+    fi
+}
+
 # --- Configuração central (passthrough.conf) ---------------------------------
 # O arquivo é tratado como DADOS, nunca como código shell. Somente as chaves
 # conhecidas abaixo e literais simples são aceitos; command substitution, eval,
@@ -514,6 +816,47 @@ salvar_conf_lote() {
         printf -v "${chaves[$i]}" '%s' "${valores[$i]}"
         export "${chaves[$i]}"
     done
+}
+
+backup_e_resetar_config_etapa02() {
+    # O conjunto precisa acompanhar toda chave escolhida/calculada pela etapa
+    # 02. A limpeza inteira é publicada pelo único rename de salvar_conf_lote.
+    local timestamp backup="" conf_existia=0
+    local -a chaves=(
+        USUARIO_LINUX VM_NAME BOOTLOADER
+        GPU_PCI_ID GPU_AUDIO_PCI_ID GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID
+        IOMMU_GROUP_GPU DM_SERVICE
+        NVME_DEVICE UUID_HD2 HD2_DISCO_PAI HD2_DISPENSADO DOCS4_DISPENSADO
+        HD1_BY_ID_PATH HD1_DISPENSADO
+        CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB HUGEPAGES_1G
+        INTERFACE_FISICA REDE_MODO VM_IP_FIXO IP_FIXO_HOST REDE_NAT_CIDR
+        TRANSFER_USER AIRLOCK_DIR ISO_WINDOWS ISO_VIRTIO
+    )
+    local -a pares=()
+    local chave
+    BACKUP_CONFIG_ETAPA02=""
+    if [ -f "$CONF_ARQUIVO" ]; then
+        conf_existia=1
+        mkdir -p -- "$BACKUPS_DIR" || falhar "Não foi possível criar $BACKUPS_DIR."
+        timestamp="$(date +%Y%m%d-%H%M%S-%N)"
+        backup="$(umask 077; mktemp "$BACKUPS_DIR/passthrough.conf.pre-redetectar-${timestamp}.XXXXXX.bak")" \
+            || falhar "Não foi possível reservar um nome único para o backup pré-redetecção."
+        cp -- "$CONF_ARQUIVO" "$backup" \
+            || { rm -f -- "$backup"; falhar "Não foi possível criar o backup pré-redetecção."; }
+        chmod 600 -- "$backup" \
+            || { rm -f -- "$backup"; falhar "Não foi possível restringir o backup pré-redetecção."; }
+        BACKUP_CONFIG_ETAPA02="$backup"
+    fi
+    if [ "$conf_existia" -eq 0 ]; then
+        cp -- "$PROJETO_DIR/passthrough.conf.example" "$CONF_ARQUIVO" \
+            || falhar "Não foi possível criar o arquivo central a partir do modelo."
+        chmod 600 -- "$CONF_ARQUIVO" \
+            || falhar "Não foi possível restringir o novo arquivo de configuração."
+    fi
+    for chave in "${chaves[@]}"; do
+        pares+=("$chave" "")
+    done
+    salvar_conf_lote "${pares[@]}"
 }
 
 exigir_conf() {

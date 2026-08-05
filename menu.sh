@@ -26,7 +26,7 @@ fi
 ETAPAS=(
     "00-inventario.sh|Inventário de hardware (Cap. 3)|auto|"
     "01-verificar-bios.sh|BIOS/UEFI: checklist e verificação (Cap. 12)|manual|"
-    "02-detectar-config.sh|Configuração central interativa: GPU, discos, CPU/RAM e rede|auto|"
+    "02-detectar-config.sh|Reiniciar configuração central: GPU, discos, CPU/RAM e rede|auto|"
     "10-atualizar-sistema.sh|Atualizar sistema e firmware (Cap. 7)|auto|reboot"
     "11-driver-nvidia.sh|Driver NVIDIA no host (Cap. 8)|auto|reboot"
     "12-pacotes-base.sh|Pacotes base (Cap. 9)|auto|"
@@ -74,7 +74,8 @@ imprimir_lista() {
     echo "${C_NEGRITO}Windows 11 VM + GPU Passthrough (Pop!_OS): etapas${C_RESET}"
     echo "Conf: ${CONF_ARQUIVO} $( [ -f "$CONF_ARQUIVO" ] && echo '(presente)' || echo '(AUSENTE: execute a opção 3)')"
     echo "Execute como usuário normal; no modo interativo, sudo será solicitado quando necessário."
-    echo "A opção 3 é a configuração central interativa de GPU, discos, CPU/RAM e rede."
+    echo "A opção 3 reinicia a configuração central, faz backup das escolhas atuais e pergunta tudo novamente."
+    echo "Ela usa automaticamente o último inventário completo da opção 1 e preserva validações ao vivo."
     echo "O menu apenas consulta status e inicia o item escolhido; cada fluxo informa alterações e riscos."
     echo "Recomendação: siga a ordem e, após <reboot>/<logout>, retorne ao menu antes de continuar."
     echo

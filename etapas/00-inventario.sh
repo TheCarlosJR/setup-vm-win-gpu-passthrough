@@ -18,10 +18,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 verificar() {
-    if ls "$HOME"/inventario-hardware/inventario-*.txt >/dev/null 2>&1; then
-        v_ok "Inventário encontrado em ~/inventario-hardware/"
+    local inventario
+    if resolver_ultimo_inventario >/dev/null && inventario="$INVENTARIO_RESOLVIDO" \
+       && validar_inventario_principal "$inventario"; then
+        v_ok "Último inventário completo: $inventario"
     else
-        v_falta "Nenhum inventário gerado ainda."
+        v_falta "${INVENTARIO_ERRO:-Nenhum inventário válido gerado ainda.}"
     fi
     v_fim
 }
@@ -45,20 +47,42 @@ if ! command -v dmidecode >/dev/null 2>&1; then
     sudo apt-get install -y dmidecode
 fi
 
-mkdir -p "$HOME/inventario-hardware"
-ARQUIVO="$HOME/inventario-hardware/inventario-$(date +%Y%m%d).txt"
+DIRETORIO_INVENTARIO="$HOME/inventario-hardware"
+mkdir -p "$DIRETORIO_INVENTARIO"
+TMP_INVENTARIO="$(umask 077; mktemp "$DIRETORIO_INVENTARIO/.inventario.tmp.XXXXXXXXX")" \
+    || falhar "Não foi possível criar o relatório temporário."
+TMP_LINK=""
+PUBLICADO=0
+limpar_temporarios_inventario() {
+    [ "$PUBLICADO" -eq 1 ] || rm -f -- "$TMP_INVENTARIO"
+    [ -z "$TMP_LINK" ] || rm -f -- "$TMP_LINK"
+}
+trap limpar_temporarios_inventario EXIT INT TERM
 
 {
-    echo "== CPU ==";        lscpu
+    echo "== HARDWARE IDENTITY =="; normalizar_identidade_hardware_atual
+    echo "== CPU ==";        LC_ALL=C lscpu
     echo "== RAM ==";        sudo dmidecode --type memory
     echo "== BASEBOARD =="; sudo dmidecode -t baseboard
     echo "== BIOS ==";       sudo dmidecode -t bios
-    echo "== PCI ==";        lspci -nnk
-    echo "== BLOCK DEVICES =="; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
-    echo "== IOMMU/DMAR (pré-configuração) =="; sudo dmesg | grep -i -e DMAR -e IOMMU || echo "(vazio: normal antes da etapa 30)"
-} | tee "$ARQUIVO"
+    echo "== PCI ==";        LC_ALL=C lspci -Dnnk
+    echo "== BLOCK DEVICES =="; LC_ALL=C lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
+    echo "== IOMMU/DMAR (pré-configuração) =="
+    MENSAGENS_IOMMU="$(sudo dmesg | grep -i -e DMAR -e IOMMU || true)"
+    printf '%s\n' "${MENSAGENS_IOMMU:-(vazio: normal antes da etapa 30)}"
+} | tee "$TMP_INVENTARIO"
+
+validar_inventario_principal "$TMP_INVENTARIO" \
+    || falhar "A coleta não produziu um inventário completo: $INVENTARIO_ERRO"
+publicar_inventario_completo "$TMP_INVENTARIO" "$DIRETORIO_INVENTARIO" >/dev/null \
+    || falhar "$INVENTARIO_ERRO"
+ARQUIVO="$INVENTARIO_PUBLICADO"
+PUBLICADO=1
+
+trap - EXIT INT TERM
 
 echo
 ok "Inventário salvo em: $ARQUIVO"
+info "Ponteiro atualizado: $DIRETORIO_INVENTARIO/ultimo-inventario.txt -> ${ARQUIVO##*/}"
 info "Confira na seção PCI as duas linhas NVIDIA (VGA e Audio) no mesmo barramento (ex.: 0c:00.x)."
 info "Recomendação do manual: guarde uma cópia deste arquivo FORA do disco do sistema."

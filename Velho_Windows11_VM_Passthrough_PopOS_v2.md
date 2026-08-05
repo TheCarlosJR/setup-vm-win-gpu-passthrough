@@ -427,24 +427,22 @@ dmesg | grep -i -e DMAR -e IOMMU
 
 Resumo de todos os comandos deste capítulo, para execução sequencial e registro em log:
 
+O script `etapas/00-inventario.sh` implementa esta coleta com publicação segura:
+gera um temporário, publica `inventario-AAAAMMDD-HHMMSS-NNNNNNNNN.txt` somente
+após todas as seções terminarem e troca atomicamente o symlink relativo
+`ultimo-inventario.txt`. Assim, duas coletas no mesmo dia não se sobrescrevem e
+uma coleta interrompida não substitui o último relatório completo.
+
 ```bash
-mkdir -p ~/inventario-hardware
-{
-  echo "== CPU =="; lscpu
-  echo "== RAM =="; sudo dmidecode --type memory
-  echo "== BASEBOARD =="; sudo dmidecode -t baseboard
-  echo "== BIOS =="; sudo dmidecode -t bios
-  echo "== PCI =="; lspci -nnk
-  echo "== BLOCK DEVICES =="; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
-  echo "== IOMMU/DMAR (pré-configuração) =="; dmesg | grep -i -e DMAR -e IOMMU
-} | tee ~/inventario-hardware/inventario-$(date +%Y%m%d).txt
+bash etapas/00-inventario.sh
 ```
 
 **O que este bloco faz:** executa todos os comandos de inventário em sequência e grava a saída completa em um arquivo de texto com data, usando `tee` para exibir na tela e salvar simultaneamente. Esse arquivo se torna a referência primária de hardware para o restante do documento — recomenda-se guardá-lo fora do disco que será reinstalado (Capítulo 6), por exemplo em um pen drive ou anotado externamente.
 
 ## Arquivos modificados
 
-- `~/inventario-hardware/inventario-<data>.txt` (criado, apenas leitura de diagnóstico).
+- `~/inventario-hardware/inventario-<data>-<hora>-<nanossegundos>.txt` (criado).
+- `~/inventario-hardware/ultimo-inventario.txt` (symlink relativo atualizado atomicamente).
 
 ## Como verificar
 

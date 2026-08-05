@@ -1,7 +1,9 @@
 # ============================================================================
 # passthrough.conf - configuração central dos scripts
 # ============================================================================
-# Este arquivo é gerado/atualizado por: etapas/02-detectar-config.sh
+# Este arquivo é gerado/atualizado por: etapas/02-detectar-config.sh. Cada
+# execução normal (ou com --redetectar) faz backup e reinicia as escolhas
+# administradas pela etapa; --verificar é estritamente somente leitura.
 # (pode também ser editado à mão; é lido como dados por um parser restrito,
 # nunca executado com source/eval).
 #
@@ -42,7 +44,7 @@ HD1_BY_ID_PATH=""                # disco INTEIRO entregue à VM (/dev/disk/by-id
                                  # ex.: o pai /dev/sdb, incluindo /dev/sdb1
                                  # VAZIO = nenhum: a VM usa somente o QCOW2
 HD1_DISPENSADO=""                # "sim" quando você escolheu 0 (sem disco físico)
-                                 # evita a etapa 02 reperguntar a cada execução
+                                 # a opção 3 sempre pergunta novamente
 DOCS4_MONTAGEM="/mnt/docs4"      # onde o HD2 de documentos seria montado
 
 # --- VM (Capítulos 17 e 21) --------------------------------------------------
