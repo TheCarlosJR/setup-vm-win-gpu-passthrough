@@ -16,7 +16,29 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
+CPU_SUPORTE_ERRO=""
+validar_cpu_amd_suportada() {
+    CPU_SUPORTE_ERRO=""
+    plataforma_validar_cpu_amd \
+        || { CPU_SUPORTE_ERRO="$PLATAFORMA_ERRO"; return 1; }
+}
+
 verificar() {
+    if ! plataforma_carregar; then
+        v_erro "$PLATAFORMA_ERRO"
+        v_fim
+    fi
+    if validar_cpu_amd_suportada; then
+        v_ok "CPU AMD suportada por esta implementação: $PLATAFORMA_CPU_VENDOR."
+    else
+        v_erro "$CPU_SUPORTE_ERRO"
+        v_fim
+    fi
+    if validar_bootloader_configurado; then
+        v_ok "Boot persistido coincide com o efetivo: $BOOTLOADER_ATIVO."
+    else
+        v_erro "$BOOTLOADER_VALIDACAO_ERRO"
+    fi
     if cmdline_tem "amd_iommu=on" && cmdline_tem "iommu=pt"; then
         v_ok "Parâmetros amd_iommu=on iommu=pt ativos no kernel em execução."
     else
@@ -49,24 +71,31 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+exigir_plataforma_suportada
+validar_cpu_amd_suportada || falhar "$CPU_SUPORTE_ERRO"
+# LIM-001: o bloqueio ocorre antes de sudo, escrita de configuração ou qualquer
+# mutação de boot/initramfs. Não se aplicam parâmetros AMD a Intel.
+exigir_nao_root
+exigir_conf BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID
+exigir_bootloader_coerente
+if [ -n "${GPU_AUDIO_PCI_ID:-}" ]; then
+    exigir_conf GPU_AUDIO_VENDOR_DEVICE_ID
+fi
+
 titulo "Antes de continuar"
-info "Objetivo: habilitar IOMMU/VFIO no host e validar que o grupo PCI da GPU é seguro para passthrough dinâmico."
+info "Objetivo: habilitar IOMMU/VFIO no host AMD e validar que o grupo PCI da GPU é seguro para passthrough dinâmico."
+info "Limitação segura: CPUs Intel e fabricantes desconhecidos são bloqueados antes de sudo; suporte Intel não é inferido nem aplicado parcialmente."
 info "Pré-requisitos: SVM e IOMMU habilitados na BIOS, configuração da etapa 02 completa e etapa 21 concluída já em uma sessão nova."
 info "Fases: a A altera boot/módulos e exige reboot; após reiniciar, execute novamente esta mesma etapa/opção para a fase B validar o kernel e registrar o grupo da GPU."
-info "Alterações: a fase A define amd_iommu=on iommu=pt, substitui /etc/modules-load.d/vfio.conf e regenera o initramfs; a B grava IOMMU_GROUP_GPU e o inventário em ~/inventario-hardware/."
+info "Alterações: a fase A define amd_iommu=on iommu=pt, substitui /etc/modules-load.d/vfio.conf e regenera o initramfs via $PLATAFORMA_INITRAMFS_BACKEND; a B grava IOMMU_GROUP_GPU e o inventário."
 info "Recomendação: não interrompa a atualização do boot/initramfs e guarde a saída que identifica o backup real do GRUB."
 aviso "Riscos: parâmetros ou initramfs inválidos podem impedir o próximo boot; não reinicie se houver erro ou rollback não comprovado."
 info "Retorno no kernelstub: sudo kernelstub -d \"amd_iommu=on iommu=pt\"."
 info "Retorno no GRUB: use o caminho exato mostrado por 'Backup do GRUB preservado em:' para restaurar /etc/default/grub e rode sudo update-grub."
-info "Retorno comum: remova /etc/modules-load.d/vfio.conf, rode sudo update-initramfs -u -k all e reinicie; não há reboot automático na fase B."
+info "Retorno comum: remova /etc/modules-load.d/vfio.conf, regenere o initramfs e reinicie; não há reboot automático na fase B."
 
-exigir_nao_root
 exigir_sudo
 exigir_comando lspci
-exigir_conf BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID
-if [ -n "${GPU_AUDIO_PCI_ID:-}" ]; then
-    exigir_conf GPU_AUDIO_VENDOR_DEVICE_ID
-fi
 
 titulo "Capítulo 16: IOMMU e VFIO"
 
@@ -86,8 +115,8 @@ vfio_pci
 vfio_iommu_type1
 MODULOS
 
-    info "Regenerando initramfs para todos os kernels instalados..."
-    sudo update-initramfs -u -k all
+    info "Regenerando initramfs para todos os kernels instalados via $PLATAFORMA_INITRAMFS_BACKEND..."
+    plataforma_atualizar_initramfs
 
     echo
     ok "Fase A concluída."

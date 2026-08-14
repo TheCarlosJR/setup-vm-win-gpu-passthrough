@@ -2,42 +2,71 @@
 # ============================================================================
 # etapas/13-diretorios.sh - Capítulo 10: Estrutura de Diretórios
 # ============================================================================
-# Cria /vm (disco virtual da VM) e /mnt/docs4 (ponto de montagem do HD2).
-# A permissão fina de /vm para o usuário libvirt-qemu é feita na etapa 21,
-# depois que a pilha de virtualização criar esse usuário de sistema.
+# Cria e converge somente /vm com o grupo compartilhado dedicado. A etapa 21
+# acrescenta a identidade QEMU ao mesmo grupo.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
-DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
+VM_STORAGE_GROUP="${VM_STORAGE_GROUP:-vm-passthrough}"
 
 verificar() {
-    [ -d /vm ]       && v_ok "/vm existe."       || v_falta "/vm não existe."
-    [ -d "$DOCS4" ]  && v_ok "$DOCS4 existe."    || v_falta "$DOCS4 não existe."
+    local usuario_valido=0
+    if [ -z "${USUARIO_LINUX:-}" ]; then
+        v_falta "USUARIO_LINUX não definido (etapa 02)."
+    elif validar_usuario_linux "$USUARIO_LINUX"; then
+        usuario_valido=1
+        if [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ]; then
+            v_erro "USUARIO_LINUX='$USUARIO_LINUX' difere do operador efetivo '$USUARIO_OPERADOR'; a execução exigirá confirmação reforçada."
+        else
+            v_ok "Conta do operador validada no NSS: uid=$USUARIO_VALIDADO_UID gid=$USUARIO_VALIDADO_GID home=$USUARIO_VALIDADO_HOME."
+        fi
+    else
+        v_erro "$USUARIO_VALIDACAO_ERRO"
+    fi
+    if ! nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP"; then
+        v_erro "VM_STORAGE_GROUP deve usar o namespace dedicado vm-passthrough[-sufixo]: '$VM_STORAGE_GROUP'."
+    elif [ "$usuario_valido" -eq 1 ] \
+         && validar_modelo_diretorio_vm /vm "$USUARIO_LINUX" "" "$VM_STORAGE_GROUP"; then
+        v_ok "/vm usa root:$VM_STORAGE_GROUP, modo 2770 e ACL padrão rwx/rwx/---."
+    else
+        v_falta "Modelo base de /vm pendente: ${GRUPO_VM_ERRO:-usuário ainda não validado}."
+    fi
     v_fim
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
 exigir_nao_root
+exigir_conf USUARIO_LINUX
+exigir_usuario_linux_valido "$USUARIO_LINUX"
+exigir_comando setfacl getfacl
+nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP" \
+    || falhar "VM_STORAGE_GROUP deve usar o namespace dedicado vm-passthrough[-sufixo]: '$VM_STORAGE_GROUP'."
 
 titulo "Antes de continuar"
-info "Finalidade: preparar /vm para o disco virtual e $DOCS4 como diretório de montagem do Docs4."
-info "Pré-requisitos: usuário com sudo e confirmação de que /vm e $DOCS4 são os caminhos desejados."
-aviso "Alterações: cria os diretórios e redefine /vm como root:root 755; $DOCS4 (por padrão /mnt/docs4) é só ponto de montagem, nenhum disco é montado nesta etapa."
-info "Recomendação: inspecione conteúdo e permissões preexistentes antes de continuar."
-aviso "Risco principal: um /vm já em uso pode ter suas permissões alteradas, ou dados locais podem ficar ocultos por montagem futura."
-aviso "Se o HD2 foi dispensado, configure AIRLOCK_DIR fora de $DOCS4 antes da etapa 61; o padrão $DOCS4/airlock ocuparia o disco do sistema."
-info "Reboot/retorno: não exige reboot; retorne ao menu e siga para a etapa 14, ou pule-a se Docs4 foi dispensado."
+info "Finalidade: preparar somente /vm para o disco virtual da VM."
+info "Pré-requisitos: conta Linux validada, pacote acl (etapa 12), sudo e confirmação do caminho."
+aviso "Alterações: cria o grupo dedicado '$VM_STORAGE_GROUP', acrescenta o operador, cria /vm e converge o diretório para root:$VM_STORAGE_GROUP 2770 com ACL de herança."
+info "A etapa 21 acrescentará a identidade QEMU detectada ao mesmo grupo; não se usa 777 nem o grupo interno libvirt-qemu como proprietário."
+info "Recomendação: inspecione conteúdo, ACLs e permissões preexistentes de /vm antes de continuar."
+aviso "Risco principal: ACLs preexistentes de /vm são substituídas pelo modelo dedicado; arquivos existentes não são removidos."
+info "O workingDisk é externo e não é criado, montado ou alterado por esta etapa."
+info "Reboot/retorno: os novos grupos exigem logout/login; a etapa 21 reforçará esse requisito antes da criação da VM."
 
 exigir_sudo
 
 titulo "Capítulo 10: Estrutura de diretórios"
 
+if ! getent group "$VM_STORAGE_GROUP" >/dev/null; then
+    sudo groupadd --system "$VM_STORAGE_GROUP"
+fi
+sudo usermod -aG "$VM_STORAGE_GROUP" "$USUARIO_LINUX"
 sudo mkdir -p /vm
-sudo mkdir -p "$DOCS4"
-sudo chown root:root /vm
-sudo chmod 755 /vm
+configurar_modelo_diretorio_vm /vm "$VM_STORAGE_GROUP"
+validar_modelo_diretorio_vm /vm "$USUARIO_LINUX" "" "$VM_STORAGE_GROUP" \
+    || falhar "Pós-condição de /vm não comprovada: $GRUPO_VM_ERRO"
 
-ok "Diretórios garantidos:"
-ls -ld /vm "$DOCS4"
-info "/vm está em root:root 755; a etapa 21 o ajusta para o grupo libvirt-qemu. $DOCS4 continua apenas como ponto de montagem."
+ok "Diretório /vm garantido:"
+ls -ld /vm
+getfacl -cp /vm | sed 's/^/  /'
+info "/vm está em root:$VM_STORAGE_GROUP 2770 com ACL padrão; a etapa 21 integrará a identidade QEMU e testará arquivos novos pelas duas contas."

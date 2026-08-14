@@ -19,6 +19,7 @@
 # --- Identidade -------------------------------------------------------------
 USUARIO_LINUX=""                 # usuário Linux principal (ex.: charles)
 VM_NAME="win11"                  # nome da VM no libvirt (<VM_NAME>)
+VM_STORAGE_GROUP="vm-passthrough" # grupo dedicado compartilhado por operador e QEMU em /vm
 
 # --- Bootloader (Capítulo 15): kernelstub (padrão Pop!_OS) ou grub ----------
 BOOTLOADER=""
@@ -34,18 +35,17 @@ IOMMU_GROUP_GPU=""               # preenchido automaticamente após a etapa 30
 # gdm3 no Pop!_OS/GNOME; "display-manager" funciona como alias universal.
 DM_SERVICE=""
 
-# --- Discos (Capítulos 5, 11 e 19) ------------------------------------------
+# --- Discos e workingDisk externo (Capítulos 5, 11 e 19) ---------------------
 NVME_DEVICE=""                   # ex. de formato: /dev/nvme0n1
-UUID_HD2=""                      # partição NTFS opcional de documentos (blkid)
-HD2_DISCO_PAI=""                 # disco físico pai atual do HD2; protege-o da VM
-HD2_DISPENSADO=""                # "sim" quando você escolheu 0 (sem HD2 separado)
-DOCS4_DISPENSADO=""              # "sim" para a etapa 14 registrar Docs4 como pulado
+WORKING_DISK_PATH="/mnt/workingDisk"
+                                 # caminho absoluto opcional, já montado pelo
+                                 # operador; o projeto nunca cria/monta a base
+WORKING_DISK_DISPENSADO=""       # "sim" quando você escolheu 0
 HD1_BY_ID_PATH=""                # disco INTEIRO entregue à VM (/dev/disk/by-id/...)
                                  # ex.: o pai /dev/sdb, incluindo /dev/sdb1
                                  # VAZIO = nenhum: a VM usa somente o QCOW2
 HD1_DISPENSADO=""                # "sim" quando você escolheu 0 (sem disco físico)
                                  # a opção 3 sempre pergunta novamente
-DOCS4_MONTAGEM="/mnt/docs4"      # onde o HD2 de documentos seria montado
 
 # --- VM (Capítulos 17 e 21) --------------------------------------------------
 QCOW2_PATH="/vm/Windows11.qcow2"
@@ -89,12 +89,12 @@ IP_FIXO_HOST=""                 # bridge: IP LAN do host; NAT: gateway virtual
 # --- Airlock: canal de transferência host <-> VM (Capítulo 24) ----------------
 TRANSFER_USER="vmtransfer"       # conta de sistema dedicada às transferências
 AIRLOCK_DIR=""                   # pasta de TRÂNSITO dos arquivos (configurável).
-                                 # Vazio = $DOCS4_MONTAGEM/airlock (padrão).
-                                 # Pode ficar em qualquer caminho local; se
-                                 # estiver fora do HD2, a montagem da visão não
-                                 # depende mais do docs4.
+                                 # Vazio = $WORKING_DISK_PATH/airlock quando o
+                                 # workingDisk está configurado; sem ele, usa
+                                 # /var/lib/vm-passthrough/airlock.
 AIRLOCK_BIND="/srv/airlock/files"  # visão de serviço exposta pelo SFTP (chroot)
 
 # --- Backups da VM (Capítulo 25) ----------------------------------------------
-BACKUPS_VM_DIR=""                # destino dos backups do QCOW2.
-                                 # Vazio = $DOCS4_MONTAGEM/backups-vm (padrão)
+BACKUPS_VM_DIR=""                # destino explícito, com prioridade.
+                                 # Vazio = $WORKING_DISK_PATH/backups-vm somente
+                                 # quando o workingDisk está configurado.

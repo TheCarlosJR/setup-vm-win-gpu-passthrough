@@ -294,7 +294,7 @@ verificar() {
     if [ -n "$params" ] && kernel_parametros_persistentes_exatos "$params"; then
         v_ok "Persistência do boot é exata e coerente entre entradas."
     else
-        v_falta "Persistência de HugePages não comprovada: ${KERNEL_PERSISTENCIA_ERRO:-configuração ausente}."
+        v_kernel_persistencia_falhou "Persistência de HugePages não comprovada: ${KERNEL_PERSISTENCIA_ERRO:-configuração ausente}."
     fi
     if [ "$faltando" -eq 0 ] && validar_isolamento_compativel; then
         v_ok "Isolamento está ausente ou exatamente alinhado ao pinning configurado."
@@ -331,9 +331,10 @@ aplicar_xml() {
 desfazer() {
     local params tmp candidato pos
     exigir_nao_root
+    exigir_conf VM_NAME BOOTLOADER
+    exigir_bootloader_coerente
     exigir_sudo
     exigir_comando python3 virsh virt-xml-validate
-    exigir_conf VM_NAME BOOTLOADER
     exigir_vm_desligada "$VM_NAME"
     $VIRSH help define 2>/dev/null | grep -q -- '--validate' \
         || falhar "Este virsh não oferece 'define --validate'; nenhuma alteração foi feita."
@@ -405,9 +406,10 @@ main() {
     esac
 
     exigir_nao_root
+    exigir_conf VM_NAME CPUS_VM CPUS_HOST VM_CORES VM_THREADS VM_VCPUS VM_RAM_MB HUGEPAGES_1G BOOTLOADER
+    exigir_bootloader_coerente
     exigir_sudo
     exigir_comando python3 virsh lscpu virt-xml-validate
-    exigir_conf VM_NAME CPUS_VM CPUS_HOST VM_CORES VM_THREADS VM_VCPUS VM_RAM_MB HUGEPAGES_1G BOOTLOADER
     exigir_vm_desligada "$VM_NAME"
     $VIRSH help define 2>/dev/null | grep -q -- '--validate' \
         || falhar "Este virsh não oferece 'define --validate'; nenhuma alteração foi feita."

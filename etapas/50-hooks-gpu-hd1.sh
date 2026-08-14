@@ -115,7 +115,7 @@ verificar() {
             v_falta "Uso do HD1 ainda não decidido na etapa 02."
         elif disco_estado_xml "$HD1_BY_ID_PATH" \
              && [ "$DISCO_XML_SOURCE" = 1 ] && [ "$DISCO_XML_EXATO" = 1 ]; then
-            if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" "${HD2_DISCO_PAI:-}"; then
+            if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}"; then
                 v_ok "HD1 exato no XML e seguro no estado atual: $HD1_BY_ID_PATH."
             else
                 v_falta "$DISCO_VM_ERRO"
@@ -147,9 +147,6 @@ validar_config_hooks() {
     elif [ -n "${HD1_BY_ID_PATH:-}" ]; then
         caminho_absoluto_seguro "$HD1_BY_ID_PATH" || falhar "HD1_BY_ID_PATH inseguro."
         exigir_conf NVME_DEVICE
-        if [ -n "${UUID_HD2:-}" ]; then
-            exigir_conf HD2_DISCO_PAI
-        fi
     elif [ "${HD1_DISPENSADO:-}" != "sim" ]; then
         falhar "Uso do disco físico adicional ainda não foi decidido. Rode a etapa 02 e escolha um disco ou a opção 0."
     fi
@@ -249,7 +246,6 @@ CAB
         printf 'DM=%q\n' "$DM_SERVICE"
         printf 'HD1_BY_ID=%q\n' "${HD1_BY_ID_PATH:-}"
         printf 'DISCO_SISTEMA=%q\n' "${NVME_DEVICE:-}"
-        printf 'DISCO_HD2=%q\n' "${HD2_DISCO_PAI:-}"
         printf 'HD1_IDENTIDADE=%q\n' "${HD1_IDENTIDADE:-}"
         cat <<'CORPO'
 STATE_DIR=/run/libvirt-gpu-passthrough
@@ -351,7 +347,7 @@ inspecionar_montagens() {
     fi
 }
 capturar_snapshot_hd1() {
-    local alvo tipo devno raizes raiz protegido real identidade
+    local alvo tipo devno raizes raiz real identidade
     [ -L "$HD1_BY_ID" ] || falha "HD1 persistente ausente: $HD1_BY_ID"
     alvo="$(readlink -f -- "$HD1_BY_ID")" || falha "não foi possível resolver HD1"
     [ -b "$alvo" ] || falha "alvo do HD1 não é bloco: $alvo"
@@ -365,12 +361,11 @@ capturar_snapshot_hd1() {
         raiz="$(readlink -f -- "$raiz")" || falha "ancestral da raiz ilegível"
         [ "$alvo" != "$raiz" ] || falha "HD1 coincide com a raiz do host ($raiz)"
     done <<< "$raizes"
-    for protegido in "$DISCO_SISTEMA" "$DISCO_HD2"; do
-        [ -n "$protegido" ] || continue
-        real="$(readlink -f -- "$protegido")" || falha "disco protegido desapareceu: $protegido"
-        [ -b "$real" ] || falha "disco protegido não é bloco: $protegido"
-        [ "$alvo" != "$real" ] || falha "HD1 coincide com disco protegido: $real"
-    done
+    if [ -n "$DISCO_SISTEMA" ]; then
+        real="$(readlink -f -- "$DISCO_SISTEMA")" || falha "disco do sistema desapareceu: $DISCO_SISTEMA"
+        [ -b "$real" ] || falha "disco do sistema não é bloco: $DISCO_SISTEMA"
+        [ "$alvo" != "$real" ] || falha "HD1 coincide com o disco do sistema: $real"
+    fi
     inspecionar_montagens "$alvo" || falha "lsblk falhou ao inspecionar montagens de $alvo"
     [ "$SNAP_MONTADO" -eq 0 ] || falha "HD1 ou partição está montado no host: $alvo"
     identidade="$(identidade_disco "$alvo")" || falha "HD1 não possui WWN/serial verificável"
@@ -717,7 +712,7 @@ titulo "Capítulo 19: hooks dinâmicos e HD1 físico (VM: $VM_NAME)"
 # Todos os preflights ocorrem antes da primeira mutação.
 HD1_IDENTIDADE=""
 if [ -n "${HD1_BY_ID_PATH:-}" ]; then
-    validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" "${HD2_DISCO_PAI:-}" \
+    validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" \
         || falhar "$DISCO_VM_ERRO"
     ALVO_HD1="$DISCO_VM_ALVO"
     PROPRIEDADES_HD1="$(udevadm info --query=property --name "$ALVO_HD1" 2>/dev/null)" \

@@ -10,6 +10,7 @@ PROJETO_TESTE="$TMPDIR_TESTE/projeto"
 BIN="$TMPDIR_TESTE/bin"
 mkdir -p "$PROJETO_TESTE/lib" "$PROJETO_TESTE/util" "$BIN"
 cp "$RAIZ/lib/common.sh" "$PROJETO_TESTE/lib/common.sh"
+cp "$RAIZ/lib/platform.sh" "$PROJETO_TESTE/lib/platform.sh"
 cp "$RAIZ/util/snapshot-vm.sh" "$PROJETO_TESTE/util/snapshot-vm.sh"
 cat > "$PROJETO_TESTE/passthrough.conf" <<'CONF'
 VM_NAME="fixture"
@@ -133,7 +134,6 @@ cp "$RAIZ/util/backup-vm.sh" "$PROJETO_TESTE/util/backup-vm.sh"
 cat > "$PROJETO_TESTE/passthrough.conf" <<CONF
 VM_NAME="fixture"
 QCOW2_PATH="/vm/Windows11.qcow2"
-DOCS4_MONTAGEM="/mnt/fixture-docs"
 BACKUPS_VM_DIR="$TMPDIR_TESTE/backup-dest"
 CONF
 cat > "$BIN/sudo" <<'SCRIPT'
@@ -156,6 +156,59 @@ exit 0
 SCRIPT
 chmod +x "$BIN/sudo" "$BIN/qemu-img" "$BIN/rsync"
 export BACKUP_COMMAND_LOG="$TMPDIR_TESTE/backup-commands.log"
+: > "$BACKUP_COMMAND_LOG"
+
+# O utilitário deve reclassificar fisicamente o destino antes de qualquer
+# mutação: escape lexical é erro e alias externo para dentro exige mount ativo.
+WORKING_DISK_FIXTURE="$TMPDIR_TESTE/workingDisk"
+FORA_WORKING_DISK="$TMPDIR_TESTE/fora-working-disk"
+ALIAS_WORKING_DISK="$TMPDIR_TESTE/alias-working-disk"
+mkdir -p "$WORKING_DISK_FIXTURE" "$FORA_WORKING_DISK"
+ln -s "$FORA_WORKING_DISK" "$WORKING_DISK_FIXTURE/escape"
+cat > "$PROJETO_TESTE/passthrough.conf" <<CONF
+VM_NAME="fixture"
+QCOW2_PATH="/vm/Windows11.qcow2"
+WORKING_DISK_PATH="$WORKING_DISK_FIXTURE"
+WORKING_DISK_DISPENSADO=""
+BACKUPS_VM_DIR="$WORKING_DISK_FIXTURE/escape/backups"
+CONF
+set +e
+SAIDA_ESCAPE="$(DOMAIN_MODE=normal bash "$PROJETO_TESTE/util/backup-vm.sh" 2>&1)"
+RC_ESCAPE=$?
+set -e
+[ "$RC_ESCAPE" -ne 0 ] || falha "backup aceitou destino lexical interno que resolve para fora"
+[[ "$SAIDA_ESCAPE" == *'contenção insegura'* && "$SAIDA_ESCAPE" == *'resolve para fora'* ]] \
+    || falha "backup não explicou o escape simbólico do workingDisk"
+[ ! -s "$BACKUP_COMMAND_LOG" ] || falha "backup executou qemu-img/rsync antes de rejeitar escape simbólico"
+
+ln -s "$WORKING_DISK_FIXTURE" "$ALIAS_WORKING_DISK"
+cat > "$PROJETO_TESTE/passthrough.conf" <<CONF
+VM_NAME="fixture"
+QCOW2_PATH="/vm/Windows11.qcow2"
+WORKING_DISK_PATH="$WORKING_DISK_FIXTURE"
+WORKING_DISK_DISPENSADO=""
+BACKUPS_VM_DIR="$ALIAS_WORKING_DISK/backups"
+CONF
+: > "$BACKUP_COMMAND_LOG"
+set +e
+SAIDA_ALIAS="$(DOMAIN_MODE=normal bash "$PROJETO_TESTE/util/backup-vm.sh" 2>&1)"
+RC_ALIAS=$?
+set -e
+[ "$RC_ALIAS" -ne 0 ] || falha "backup por alias interno ignorou workingDisk desmontado"
+[[ "$SAIDA_ALIAS" == *'workingDisk não está montado exatamente'* ]] \
+    || falha "alias externo para dentro não armou a validação do mountpoint"
+[ ! -s "$BACKUP_COMMAND_LOG" ] || falha "backup executou qemu-img/rsync com workingDisk desmontado"
+
+# BACKUPS_VM_DIR explícito e fisicamente externo continua tendo prioridade,
+# mesmo com WORKING_DISK_PATH configurado e desmontado; o fluxo deve alcançar
+# a rejeição posterior do overlay ativo.
+cat > "$PROJETO_TESTE/passthrough.conf" <<CONF
+VM_NAME="fixture"
+QCOW2_PATH="/vm/Windows11.qcow2"
+WORKING_DISK_PATH="$WORKING_DISK_FIXTURE"
+WORKING_DISK_DISPENSADO=""
+BACKUPS_VM_DIR="$TMPDIR_TESTE/backup-dest"
+CONF
 : > "$BACKUP_COMMAND_LOG"
 set +e
 SAIDA_BACKUP="$(DOMAIN_MODE=overlay bash "$PROJETO_TESTE/util/backup-vm.sh" 2>&1)"

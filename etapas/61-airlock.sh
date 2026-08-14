@@ -4,8 +4,9 @@
 # ============================================================================
 # Canal recomendado de troca host<->VM, exposto por SFTP com chroot, chave
 # obrigatória, usuário sem shell e firewall restrito ao IP fixo da VM.
-# O HD2 é dispensável: sem AIRLOCK_DIR, o padrão é /mnt/docs4/airlock e requer
-# /mnt/docs4 montado; configure AIRLOCK_DIR em outro filesystem para não usá-lo.
+# O workingDisk é opcional: quando AIRLOCK_DIR estiver dentro de
+# WORKING_DISK_PATH, o mountpoint-base externo precisa permanecer ativo. Sem
+# workingDisk, AIRLOCK_DIR pode apontar para outro filesystem local.
 #
 #   1. Grupo/usuário dedicados (airlock-transfer / vmtransfer)
 #   2. Pasta de trânsito + /srv/airlock/files (chroot)
@@ -195,20 +196,59 @@ contar_regras_ufw_airlock_exatas() {
     printf '%s\n' "$total"
 }
 
-DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
-# Pasta de TRÂNSITO: configurável (etapa 02). Padrão: dentro do HD2.
-AIRLOCK_TRANSITO="${AIRLOCK_DIR:-$DOCS4/airlock}"
+WORKING_DISK="${WORKING_DISK_PATH:-}"
+if [ -n "${AIRLOCK_DIR:-}" ]; then
+    AIRLOCK_TRANSITO="$AIRLOCK_DIR"
+elif [ -n "$WORKING_DISK" ]; then
+    AIRLOCK_TRANSITO="$WORKING_DISK/airlock"
+else
+    AIRLOCK_TRANSITO="/var/lib/vm-passthrough/airlock"
+fi
 AIRLOCK_BIND="${AIRLOCK_BIND:-/srv/airlock/files}"
 AIRLOCK_BASE="$(dirname "$AIRLOCK_BIND")"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/10-airlock.conf"
 
-# A visão só depende do docs4 quando a pasta de trânsito mora nele
-DEPENDE_DOCS4=0
-case "$AIRLOCK_TRANSITO" in
-    "$DOCS4"/*) DEPENDE_DOCS4=1 ;;
-esac
+AIRLOCK_DEPENDS_ON_WORKING_DISK=0
+AIRLOCK_CONTENCAO_ERRO=""
+classificar_airlock_working_disk() {
+    local rc
+    AIRLOCK_DEPENDS_ON_WORKING_DISK=0
+    AIRLOCK_CONTENCAO_ERRO=""
+    [ -n "$WORKING_DISK" ] || return 0
+    if caminho_dentro_working_disk "$AIRLOCK_TRANSITO" "$WORKING_DISK"; then
+        AIRLOCK_DEPENDS_ON_WORKING_DISK=1
+        return 0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    AIRLOCK_CONTENCAO_ERRO="Airlock recusado por contenção insegura no workingDisk: $WORKING_DISK_CONTENCAO_ERRO"
+    return 1
+}
 
 verificar() {
+    if [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
+        v_erro "Configuração contraditória: WORKING_DISK_PATH definido e WORKING_DISK_DISPENSADO=sim."
+    elif ! classificar_airlock_working_disk; then
+        v_erro "$AIRLOCK_CONTENCAO_ERRO"
+    elif [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
+        if validar_working_disk_montado "$WORKING_DISK"; then
+            v_ok "Base do airlock protegida pelo workingDisk ativo em $WORKING_DISK."
+        else
+            v_falta "$WORKING_DISK_ERRO"
+        fi
+    fi
+    if [ -z "${USUARIO_LINUX:-}" ]; then
+        v_falta "USUARIO_LINUX não definido."
+    elif validar_usuario_linux "$USUARIO_LINUX"; then
+        if [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ]; then
+            v_erro "USUARIO_LINUX='$USUARIO_LINUX' difere do operador '$USUARIO_OPERADOR'."
+        else
+            v_ok "Conta principal validada no NSS: $USUARIO_LINUX."
+        fi
+    else
+        v_erro "$USUARIO_VALIDACAO_ERRO"
+    fi
     if ! validar_config_rede; then
         v_falta "$REDE_CONFIG_ERRO"
         v_fim
@@ -305,8 +345,9 @@ if [ "${1:-}" = "--instalar-chave" ]; then
 fi
 
 exigir_nao_root
-exigir_sudo
 exigir_conf TRANSFER_USER VM_NAME USUARIO_LINUX REDE_MODO INTERFACE_FISICA VM_IP_FIXO IP_FIXO_HOST
+exigir_usuario_linux_valido "$USUARIO_LINUX"
+exigir_sudo
 exigir_config_rede
 nome_usuario_valido "$TRANSFER_USER" \
     || falhar "TRANSFER_USER='$TRANSFER_USER' não é um nome de usuário seguro."
@@ -316,6 +357,19 @@ ip link show "$AIRLOCK_REDE_IFACE" >/dev/null 2>&1 \
     || falhar "Interface $AIRLOCK_REDE_IFACE ausente; conclua e verifique a etapa 60 primeiro."
 validar_ips_interface_rede "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO" "$IP_FIXO_HOST" \
     || falhar "$REDE_IP_ERRO"
+caminho_absoluto_seguro "$AIRLOCK_TRANSITO" \
+    || falhar "AIRLOCK_DIR precisa ser um caminho absoluto seguro (está: '$AIRLOCK_TRANSITO')."
+caminho_absoluto_seguro "$AIRLOCK_BIND" \
+    || falhar "AIRLOCK_BIND precisa ser um caminho absoluto seguro (está: '$AIRLOCK_BIND')."
+if [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
+    falhar "Configuração contraditória: WORKING_DISK_PATH definido e WORKING_DISK_DISPENSADO=sim."
+fi
+classificar_airlock_working_disk || falhar "$AIRLOCK_CONTENCAO_ERRO"
+if [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
+    validar_working_disk_montado "$WORKING_DISK" \
+        || falhar "Airlock dentro do workingDisk recusado: $WORKING_DISK_ERRO"
+    info "workingDisk ativo antes de qualquer escrita do airlock: $WORKING_DISK (source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE)."
+fi
 
 # Dependências são instaladas antes da transação; as mutações do Airlock abaixo
 # passam a ter rollback do estado que o script gerencia.
@@ -326,10 +380,6 @@ airlock_iniciar_transacao
 trap airlock_finalizar EXIT INT TERM
 
 titulo "Capítulo 24: Airlock (modo: $REDE_MODO; interface: $AIRLOCK_REDE_IFACE; VM: $VM_NAME)"
-case "$AIRLOCK_TRANSITO" in
-    /*) : ;;
-    *)  falhar "AIRLOCK_DIR precisa ser um caminho absoluto (está: '$AIRLOCK_TRANSITO')." ;;
-esac
 if [ "$AIRLOCK_TRANSITO" = "$AIRLOCK_BIND" ] \
    || [[ "$AIRLOCK_BIND" == "$AIRLOCK_TRANSITO"/* ]] \
    || [[ "$AIRLOCK_TRANSITO" == "$AIRLOCK_BIND"/* ]]; then
@@ -349,8 +399,9 @@ Airlock/SFTP é o canal recomendado; esta execução fará, nesta ordem:
   5. UFW: regra SFTP para VM Windows $VM_IP_FIXO em $AIRLOCK_REDE_IFACE,
      políticas globais e ativação opcional;
   6. hook: /etc/libvirt/hooks/qemu.d/$VM_NAME/prepare/begin/00-airlock.sh.
-HD2 é dispensável: o padrão é /mnt/docs4/airlock; AIRLOCK_DIR pode apontar
-para outro filesystem. Se qualquer fase falhar ou for interrompida, o script
+workingDisk é opcional. Quando AIRLOCK_DIR está dentro de WORKING_DISK_PATH,
+o mountpoint-base externo precisa estar ativo; fora dele, AIRLOCK_DIR usa o
+filesystem escolhido pelo operador. Se qualquer fase falhar ou for interrompida,
 restaura fstab, SSH/chave, UFW, hook e a conta/grupo que tenha criado. SSH/UFW
 podem ter efeito imediato; não há reboot do host, e o hook atua no próximo
 start da VM. Revise o acesso por console antes de continuar.
@@ -372,12 +423,13 @@ ok "Conta de sistema sem shell, sem home real e sem senha (raio de alcance míni
 # 2. Pastas
 # ----------------------------------------------------------------------------
 titulo "2/7 Pastas"
-if [ "$DEPENDE_DOCS4" -eq 1 ]; then
-    mountpoint -q "$DOCS4" \
-        || falhar "A pasta de trânsito está em $DOCS4, que não está montado (etapa 14 / Capítulo 11)."
+classificar_airlock_working_disk || falhar "$AIRLOCK_CONTENCAO_ERRO"
+if [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
+    validar_working_disk_montado "$WORKING_DISK" \
+        || falhar "O workingDisk deixou de estar ativo antes da criação do airlock: $WORKING_DISK_ERRO"
 else
-    aviso "Pasta de trânsito fora do HD2: $AIRLOCK_TRANSITO"
-    aviso "Ela vai consumir espaço do disco onde está; mantenha-a como zona de passagem."
+    aviso "Pasta de trânsito fora do workingDisk: $AIRLOCK_TRANSITO"
+    aviso "Ela vai consumir espaço do filesystem escolhido; mantenha-a como zona de passagem."
 fi
 sudo mkdir -p "$AIRLOCK_TRANSITO"
 sudo mkdir -p "$AIRLOCK_BIND"
@@ -389,8 +441,13 @@ ok "Trânsito: $AIRLOCK_TRANSITO | Base do chroot (root:root 755): $AIRLOCK_BASE
 # 3. Visão de serviço (bindfs)
 # ----------------------------------------------------------------------------
 titulo "3/7 Visão de serviço (bindfs)"
+classificar_airlock_working_disk || falhar "$AIRLOCK_CONTENCAO_ERRO"
+if [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
+    validar_working_disk_montado "$WORKING_DISK" \
+        || falhar "O workingDisk deixou de estar ativo antes do bindfs do airlock: $WORKING_DISK_ERRO"
+fi
 OPCOES_BINDFS="force-user=$TRANSFER_USER,force-group=airlock-transfer,perms=0770,chmod-ignore,chown-ignore,allow_other,noexec,nosuid,nodev,nofail"
-[ "$DEPENDE_DOCS4" -eq 1 ] && OPCOES_BINDFS="${OPCOES_BINDFS},x-systemd.requires=$(sed 's/ /\\040/g' <<< "$DOCS4")"
+[ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ] && OPCOES_BINDFS="${OPCOES_BINDFS},x-systemd.requires=$(sed 's/ /\\040/g' <<< "$WORKING_DISK")"
 fstab_backup
 fstab_definir_linha airlock-bindfs \
     "$(sed 's/ /\\040/g' <<< "$AIRLOCK_TRANSITO")  $(sed 's/ /\\040/g' <<< "$AIRLOCK_BIND")  fuse.bindfs  $OPCOES_BINDFS  0  0"
@@ -523,25 +580,66 @@ sudo tee "$HOOK_FILE" >/dev/null <<'HOOKAIR'
 
 AIRLOCK_TRANSITO="@AIRLOCK_TRANSITO@"
 AIRLOCK_BIND="@AIRLOCK_BIND@"
-DOCS4="@DOCS4@"
-DEPENDE_DOCS4="@DEPENDE_DOCS4@"
+WORKING_DISK="@WORKING_DISK@"
+AIRLOCK_DEPENDS_ON_WORKING_DISK=0
 
-# 1) Se a pasta de transito mora no HD2, ele precisa estar montado; sem isso,
-#    criar a pasta poluiria o ponto de montagem vazio no disco do sistema em
-#    vez do HD2 real (alerta do Capitulo 11).
-if [ "$DEPENDE_DOCS4" = "1" ] && ! mountpoint -q "$DOCS4"; then
-    logger -t hook-qemu "AVISO: $DOCS4 nao montado; airlock indisponivel nesta sessao da VM."
+caminho_lexico_normalizado() {
+    local caminho="${1:-}"
+    while [[ "$caminho" == *//* ]]; do caminho="${caminho//\/\//\/}"; done
+    while [ "$caminho" != / ] && [[ "$caminho" == */ ]]; do caminho="${caminho%/}"; done
+    printf '%s\n' "$caminho"
+}
+caminho_igual_ou_filho() {
+    local caminho="${1:-}" base="${2:-}"
+    [ "$caminho" = "$base" ] && return 0
+    [ "$base" = / ] && return 0
+    [[ "$caminho" == "$base"/* ]]
+}
+classificar_airlock_working_disk() {
+    local caminho_lexico base_lexica caminho_fisico base_fisica
+    local lexical_dentro=0 fisico_dentro=0
+    AIRLOCK_DEPENDS_ON_WORKING_DISK=0
+    [ -n "$WORKING_DISK" ] || return 0
+    command -v readlink >/dev/null 2>&1 || return 2
+    caminho_lexico="$(caminho_lexico_normalizado "$AIRLOCK_TRANSITO")" \
+        && base_lexica="$(caminho_lexico_normalizado "$WORKING_DISK")" \
+        && caminho_fisico="$(readlink -m -- "$AIRLOCK_TRANSITO" 2>/dev/null)" \
+        && base_fisica="$(readlink -m -- "$WORKING_DISK" 2>/dev/null)" \
+        || return 2
+    [ "$WORKING_DISK" = "$base_lexica" ] && [ "$base_fisica" = "$base_lexica" ] || return 2
+    caminho_igual_ou_filho "$caminho_lexico" "$base_lexica" && lexical_dentro=1
+    caminho_igual_ou_filho "$caminho_fisico" "$base_fisica" && fisico_dentro=1
+    [ "$lexical_dentro" -eq 1 ] && [ "$fisico_dentro" -ne 1 ] && return 2
+    [ "$fisico_dentro" -eq 1 ] && AIRLOCK_DEPENDS_ON_WORKING_DISK=1
+    return 0
+}
+working_disk_ativo() {
+    local alvo
+    [ -d "$WORKING_DISK" ] || return 1
+    mountpoint -q -- "$WORKING_DISK" || return 1
+    alvo="$(findmnt -rn --raw --mountpoint "$WORKING_DISK" --output TARGET 2>/dev/null)" || return 1
+    [ "$alvo" = "$WORKING_DISK" ]
+}
+destino_airlock_disponivel() {
+    classificar_airlock_working_disk || return $?
+    [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" = "0" ] || working_disk_ativo
+}
+
+# Recalcula a relação física imediatamente antes de cada mutação. Em caso de
+# escape simbólico ou mount ausente, o hook preserva o contrato de não impedir
+# o início da VM e não cria/monta nada.
+if ! destino_airlock_disponivel; then
+    logger -t hook-qemu "AVISO: destino do airlock não pôde ser comprovado com o workingDisk ativo; airlock indisponível nesta sessão da VM."
     exit 0
 fi
-
-# 2) Cria a pasta de transito, se ausente (idempotente).
-#    Sem chown/chmod: em NTFS (ntfs-3g), dono e permissoes vem das opcoes
-#    de montagem do fstab (Capitulo 11) e nao podem ser alterados por pasta.
 if [ ! -d "$AIRLOCK_TRANSITO" ]; then
     mkdir -p "$AIRLOCK_TRANSITO" && logger -t hook-qemu "pasta airlock criada em $AIRLOCK_TRANSITO"
 fi
 
-# 3) Garante a visao de servico (bindfs) montada, usando a entrada do fstab.
+if ! destino_airlock_disponivel; then
+    logger -t hook-qemu "AVISO: destino do airlock mudou ou o workingDisk ficou indisponível; bindfs não será montado nesta sessão da VM."
+    exit 0
+fi
 if ! mountpoint -q "$AIRLOCK_BIND"; then
     if mount "$AIRLOCK_BIND" 2>/dev/null; then
         logger -t hook-qemu "visao bindfs do airlock montada em $AIRLOCK_BIND"
@@ -555,8 +653,7 @@ HOOKAIR
 sudo sed -i \
     -e "s|@AIRLOCK_TRANSITO@|$AIRLOCK_TRANSITO|g" \
     -e "s|@AIRLOCK_BIND@|$AIRLOCK_BIND|g" \
-    -e "s|@DOCS4@|$DOCS4|g" \
-    -e "s|@DEPENDE_DOCS4@|$DEPENDE_DOCS4|g" \
+    -e "s|@WORKING_DISK@|$WORKING_DISK|g" \
     "$HOOK_FILE"
 sudo chmod +x "$HOOK_FILE"
 sudo chown root:root "$HOOK_FILE"

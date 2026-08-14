@@ -92,7 +92,16 @@ exige() {
     coletar bash "$PROJETO_DIR/util/listar-grupos-iommu.sh"
 
     secao "Montagens relevantes"
-    coletar bash -c 'mount | grep -E "docs4|airlock|/vm"'
+    if [ -n "${WORKING_DISK_PATH:-}" ]; then
+        echo "workingDisk configurado: $WORKING_DISK_PATH"
+        coletar findmnt -rn --raw --mountpoint "$WORKING_DISK_PATH" \
+            --output TARGET,SOURCE,FSTYPE,OPTIONS
+    elif [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
+        echo "workingDisk dispensado explicitamente"
+    else
+        echo "workingDisk ainda não configurado nem dispensado"
+    fi
+    coletar bash -c 'mount | grep -E "airlock|/vm"'
 
     secao "Logs recentes do libvirtd"
     coletar sudo journalctl -u libvirtd -e -n 50 --no-pager

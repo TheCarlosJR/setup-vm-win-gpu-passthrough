@@ -6,21 +6,51 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 exigir_nao_root
-exigir_sudo
 exigir_conf VM_NAME QCOW2_PATH
 nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros."
-DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
-DESTINO_BASE="${BACKUPS_VM_DIR:-$DOCS4/backups-vm}"
+WORKING_DISK="${WORKING_DISK_PATH:-}"
+if [ -n "${BACKUPS_VM_DIR:-}" ]; then
+    DESTINO_BASE="$BACKUPS_VM_DIR"
+elif [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" != "sim" ]; then
+    DESTINO_BASE="${WORKING_DISK%/}/backups-vm"
+else
+    falhar "Destino de backup não resolvido. Defina BACKUPS_VM_DIR ou configure WORKING_DISK_PATH na etapa 02 e mantenha o workingDisk montado."
+fi
+caminho_absoluto_seguro "$DESTINO_BASE" \
+    || falhar "Destino de backup inseguro: '$DESTINO_BASE'."
+BACKUP_DEPENDS_ON_WORKING_DISK=0
+classificar_destino_backup() {
+    local alvo="${1:-$DESTINO_BASE}" rc
+    BACKUP_DEPENDS_ON_WORKING_DISK=0
+    [ -n "$WORKING_DISK" ] || return 0
+    if caminho_dentro_working_disk "$alvo" "$WORKING_DISK"; then
+        BACKUP_DEPENDS_ON_WORKING_DISK=1
+        return 0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 1 ] && return 0
+    falhar "Destino de backup recusado por contenção insegura no workingDisk: $WORKING_DISK_CONTENCAO_ERRO"
+}
+exigir_destino_backup_disponivel() {
+    local alvo="${1:-$DESTINO_BASE}"
+    classificar_destino_backup "$alvo"
+    if [ "$BACKUP_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
+        validar_working_disk_montado "$WORKING_DISK" \
+            || falhar "Backup dentro do workingDisk recusado: $WORKING_DISK_ERRO"
+    fi
+}
 
 titulo "Backup offline do conjunto da VM $VM_NAME"
 info "Cria um diretório datado com o QCOW2 principal ativo e sem backing chain, XML inativo e, quando existirem, NVRAM e estado TPM."
+info "BACKUPS_VM_DIR explícito tem prioridade; sem ele, o destino é derivado do workingDisk configurado."
 info "Se o XML apontar para overlay externo ou o QCOW2 depender de backing file, o backup falha antes de copiar uma base obsoleta."
 aviso "A VM ficará desligada. Um backup só é comprovadamente restaurável após teste de restauração em ambiente separado."
 
-if [[ "$DESTINO_BASE" == "$DOCS4"/* ]]; then
-    mountpoint -q "$DOCS4" || falhar "HD2 não montado em $DOCS4 (destino dos backups)."
-fi
+exigir_destino_backup_disponivel
 exigir_comando rsync qemu-img virsh python3
+exigir_sudo
+exigir_destino_backup_disponivel
 sudo mkdir -p "$DESTINO_BASE"
 
 if ! vm_desligada "$VM_NAME"; then
@@ -99,6 +129,7 @@ validar_qcow2_sem_backing "$QCOW2_PATH" \
 
 DATA_BACKUP="$(date +%Y%m%d-%H%M%S)"
 DESTINO_DIR="$DESTINO_BASE/${VM_NAME}-backup-$DATA_BACKUP"
+exigir_destino_backup_disponivel "$DESTINO_DIR"
 sudo mkdir -m 700 "$DESTINO_DIR"
 sudo mkdir "$DESTINO_DIR/discos-adicionais"
 
@@ -109,12 +140,14 @@ if [ -n "$LIVRE_KB" ] && [ "$LIVRE_KB" -lt "$TAM_ORIGEM_KB" ]; then
 fi
 
 XML="$DESTINO_DIR/${VM_NAME}.inactive.xml"
+exigir_destino_backup_disponivel "$XML"
 sudo install -m 600 "$XML_LOCAL" "$XML"
 
 copiar_artefato() {
     local origem="$1" subdiretorio="$2" destino
     [ -f "$origem" ] || return 1
     destino="$DESTINO_DIR/$subdiretorio/$(basename "$origem")"
+    exigir_destino_backup_disponivel "$destino"
     sudo mkdir -p "$DESTINO_DIR/$subdiretorio"
     info "Copiando $origem -> $subdiretorio/ (preservando sparse e metadados)..." >&2
     sudo rsync -aHAXS --numeric-ids --protect-args "$origem" "$destino"
@@ -142,6 +175,7 @@ fi
 TPM_STATE="/var/lib/libvirt/swtpm/$VM_NAME"
 if sudo test -d "$TPM_STATE"; then
     info "Copiando estado TPM em $TPM_STATE..."
+    exigir_destino_backup_disponivel "$DESTINO_DIR/tpm"
     sudo rsync -aHAXS --numeric-ids --protect-args "$TPM_STATE/" "$DESTINO_DIR/tpm/"
     sudo chmod -R go-rwx "$DESTINO_DIR/tpm"
     ok "Estado TPM incluído."
@@ -150,6 +184,7 @@ else
 fi
 
 MAPA_DISCOS="$DESTINO_DIR/ESCOPO-NAO-INCLUIDO.txt"
+exigir_destino_backup_disponivel "$MAPA_DISCOS"
 {
     printf 'Backup: %s\nVM: %s\n\n' "$DATA_BACKUP" "$VM_NAME"
     printf 'Incluído:\n- QCOW2 principal: %s\n- XML inativo: %s\n' "$QCOW2_PATH" "$XML"

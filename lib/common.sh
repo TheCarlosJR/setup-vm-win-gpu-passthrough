@@ -11,11 +11,14 @@
 # --- Localização do projeto e arquivos centrais -----------------------------
 COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJETO_DIR="$(cd "$COMMON_DIR/.." && pwd)"
+# shellcheck source=lib/platform.sh
+source "$COMMON_DIR/platform.sh"
 CONF_ARQUIVO="$PROJETO_DIR/passthrough.conf"
 BACKUPS_DIR="$PROJETO_DIR/backups"
 FSTAB="/etc/fstab"
 GRUB_DEFAULT_ARQUIVO="/etc/default/grub"
 GRUB_CFG_ARQUIVO="/boot/grub/grub.cfg"
+KERNELSTUB_ENTRIES_DIR="/boot/efi/loader/entries"
 VIRSH="virsh --connect qemu:///system"
 
 # --- Saída colorida ----------------------------------------------------------
@@ -32,6 +35,49 @@ aviso()  { echo "${C_AMARELO}[aviso]${C_RESET} $*"; }
 erro()   { echo "${C_VERMELHO}[erro]${C_RESET} $*" >&2; }
 titulo() { echo; echo "${C_NEGRITO}==== $* ====${C_RESET}"; }
 falhar() { erro "$*"; exit 1; }
+
+# --- Raiz hermética opcional, exclusiva dos testes ---------------------------
+# A produção nunca aceita redirecionamento de /etc, /vm ou /usr. O modo de
+# teste só é ativado quando o próprio PATH fornece um sudo falso, regular,
+# pertencente ao operador e localizado dentro da raiz temporária. Assim um
+# sudo real jamais pode receber caminhos injetados pelo ambiente.
+SISTEMA_RAIZ_TESTE=""
+inicializar_raiz_teste() {
+    local solicitada="${PASSTHROUGH_TEST_ROOT:-}" canonica sudo_falso
+    [ -n "$solicitada" ] || return 0
+    [ "${PASSTHROUGH_TEST_MODE:-}" = 1 ] \
+        || falhar "PASSTHROUGH_TEST_ROOT exige PASSTHROUGH_TEST_MODE=1."
+    [[ "$solicitada" == /* ]] && [ "$solicitada" != / ] \
+        && [ -d "$solicitada" ] && [ ! -L "$solicitada" ] && [ -O "$solicitada" ] \
+        || falhar "Raiz hermética de teste inválida ou não pertencente ao operador."
+    canonica="$(cd -- "$solicitada" && pwd -P)" \
+        || falhar "Não foi possível canonicalizar a raiz hermética."
+    [ "$canonica" = "$solicitada" ] \
+        || falhar "A raiz hermética precisa ser canônica e não pode conter links."
+    [ -d "$canonica/bin" ] && [ ! -L "$canonica/bin" ] \
+        || falhar "A raiz hermética não contém bin/ seguro."
+    sudo_falso="$(type -P sudo 2>/dev/null || true)"
+    [ "$sudo_falso" = "$canonica/bin/sudo" ] && [ -f "$sudo_falso" ] \
+        && [ ! -L "$sudo_falso" ] && [ -O "$sudo_falso" ] && [ -x "$sudo_falso" ] \
+        || falhar "Modo hermético recusado: sudo não é o mock confinado da raiz de teste."
+    SISTEMA_RAIZ_TESTE="$canonica"
+}
+
+caminho_sistema() {
+    local caminho="${1:-}"
+    [[ "$caminho" == /* ]] \
+        && [[ "$caminho" != *'/../'* && "$caminho" != */.. \
+           && "$caminho" != *'/./'* && "$caminho" != */. ]] \
+        || return 1
+    if [ -n "$SISTEMA_RAIZ_TESTE" ]; then
+        [ "$caminho" = / ] && printf '%s\n' "$SISTEMA_RAIZ_TESTE" \
+            || printf '%s%s\n' "$SISTEMA_RAIZ_TESTE" "$caminho"
+    else
+        printf '%s\n' "$caminho"
+    fi
+}
+
+inicializar_raiz_teste
 
 # --- Pré-checagens ------------------------------------------------------------
 exigir_nao_root() {
@@ -81,6 +127,82 @@ exigir_comando() {
         command -v "$cmd" >/dev/null 2>&1 \
             || falhar "Comando '$cmd' não encontrado. Verifique as etapas anteriores (README)."
     done
+}
+
+exigir_plataforma_suportada() {
+    plataforma_carregar || falhar "$PLATAFORMA_ERRO"
+}
+
+APT_ATUALIZACOES_ERRO=""
+APT_ATUALIZACOES_TOTAL=""
+APT_DIST_INSTALACOES=""
+APT_DIST_REMOCOES=""
+APT_AUTOREMOVE_EXCLUSIVAS=""
+apt_contar_atualizacoes() {
+    # Simula, sem locale e sem locks, as duas classes de transação realmente
+    # aplicadas pela etapa 10. O total deduplica nomes de pacote entre os dois
+    # planos; as categorias são diagnóstico e não devem ser somadas.
+    local saida_dist saida_autoremove resumo total instalacoes remocoes auto_exclusivas
+    APT_ATUALIZACOES_ERRO=""
+    APT_ATUALIZACOES_TOTAL=""
+    APT_DIST_INSTALACOES=""
+    APT_DIST_REMOCOES=""
+    APT_AUTOREMOVE_EXCLUSIVAS=""
+    command -v apt-get >/dev/null 2>&1 \
+        || { APT_ATUALIZACOES_ERRO="apt-get não está disponível."; return 1; }
+    if ! saida_dist="$(LC_ALL=C apt-get --simulate -o Debug::NoLocking=1 dist-upgrade 2>&1)"; then
+        APT_ATUALIZACOES_ERRO="Falha ao simular dist-upgrade APT: ${saida_dist:-sem diagnóstico}."
+        return 1
+    fi
+    if ! saida_autoremove="$(LC_ALL=C apt-get --simulate -o Debug::NoLocking=1 autoremove 2>&1)"; then
+        APT_ATUALIZACOES_ERRO="Falha ao simular autoremove APT: ${saida_autoremove:-sem diagnóstico}."
+        return 1
+    fi
+    resumo="$(awk '
+        BEGIN { fase = "dist" }
+        $0 == "__PASSTHROUGH_AUTOREMOVE__" { fase = "autoremove"; next }
+        ($1 == "Inst" || $1 == "Remv") && NF >= 2 {
+            pacote = $2
+            todos[pacote] = 1
+            if (fase == "dist") {
+                dist[pacote] = 1
+                if ($1 == "Inst") inst[pacote] = 1
+                else remv[pacote] = 1
+            } else {
+                auto[pacote] = 1
+            }
+        }
+        END {
+            for (p in todos) total++
+            for (p in inst) ni++
+            for (p in remv) nr++
+            for (p in auto) if (!(p in dist)) na++
+            print total + 0, ni + 0, nr + 0, na + 0
+        }
+    ' <<< "$saida_dist"$'\n__PASSTHROUGH_AUTOREMOVE__\n'"$saida_autoremove")" \
+        || { APT_ATUALIZACOES_ERRO="Falha ao analisar as simulações APT."; return 1; }
+    read -r total instalacoes remocoes auto_exclusivas <<< "$resumo"
+    [[ "$total" =~ ^[0-9]+$ && "$instalacoes" =~ ^[0-9]+$ \
+       && "$remocoes" =~ ^[0-9]+$ && "$auto_exclusivas" =~ ^[0-9]+$ ]] \
+        || { APT_ATUALIZACOES_ERRO="Resumo APT inválido: '$resumo'."; return 1; }
+    APT_ATUALIZACOES_TOTAL="$total"
+    APT_DIST_INSTALACOES="$instalacoes"
+    APT_DIST_REMOCOES="$remocoes"
+    APT_AUTOREMOVE_EXCLUSIVAS="$auto_exclusivas"
+    printf '%s\n' "$total"
+}
+
+fwupd_classificar_resultado() {
+    # Contrato do cliente fwupdmgr: 0=operação concluída e 2=nada a fazer.
+    # O código 2 só é normal para consultas/aplicação de updates; refresh deve
+    # concluir com zero. Qualquer outro status é falha operacional.
+    local operacao="${1:-}" rc="${2:-}"
+    [[ "$rc" =~ ^[0-9]+$ ]] || return 1
+    case "$operacao:$rc" in
+        refresh:0|get-updates:0|update:0) printf '%s\n' sucesso ;;
+        get-updates:2|update:2) printf '%s\n' sem-atualizacoes ;;
+        *) printf '%s\n' erro; return 1 ;;
+    esac
 }
 
 # --- Inventário de hardware --------------------------------------------------
@@ -390,11 +512,11 @@ comparar_inventario_com_hardware() {
 # conhecidas abaixo e literais simples são aceitos; command substitution, eval,
 # expansões de variáveis e diretivas shell são rejeitados antes de qualquer uso.
 CHAVES_CONF_PERMITIDAS=(
-    USUARIO_LINUX VM_NAME BOOTLOADER
+    USUARIO_LINUX VM_NAME BOOTLOADER VM_STORAGE_GROUP
     GPU_PCI_ID GPU_AUDIO_PCI_ID GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID
     IOMMU_GROUP_GPU DM_SERVICE
-    NVME_DEVICE UUID_HD2 HD2_DISCO_PAI HD1_BY_ID_PATH HD1_DISPENSADO
-    HD2_DISPENSADO DOCS4_DISPENSADO DOCS4_MONTAGEM
+    NVME_DEVICE WORKING_DISK_PATH WORKING_DISK_DISPENSADO
+    HD1_BY_ID_PATH HD1_DISPENSADO
     QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS VM_CORES VM_THREADS
     CPUS_VM CPUS_HOST HUGEPAGES_1G ISO_WINDOWS ISO_VIRTIO
     REDE_MODO INTERFACE_FISICA REDE_BRIDGE REDE_LIBVIRT
@@ -507,12 +629,6 @@ validar_grupo_iommu_gpu() {
     done
 }
 
-uuid_fs_valido() {
-    local valor="${1:-}"
-    [ "${#valor}" -ge 1 ] && [ "${#valor}" -le 128 ] \
-        && [[ "$valor" =~ ^[[:alnum:]][[:alnum:]_.:-]*$ ]]
-}
-
 caminho_absoluto_seguro() {
     # Espaços e caracteres UTF-8 são permitidos, mas não metacaracteres que
     # mudariam shell/XML/fstab nem componentes relativos ambíguos.
@@ -525,6 +641,233 @@ caminho_absoluto_seguro() {
        && "$caminho" != *'>'* && "$caminho" != *'#'* ]] || return 1
     [[ "$caminho" != *'/../'* && "$caminho" != */.. \
        && "$caminho" != *'/./'* && "$caminho" != */. ]]
+}
+
+_caminho_lexico_normalizado() {
+    local caminho="${1:-}"
+    while [[ "$caminho" == *//* ]]; do
+        caminho="${caminho//\/\//\/}"
+    done
+    while [ "$caminho" != / ] && [[ "$caminho" == */ ]]; do
+        caminho="${caminho%/}"
+    done
+    printf '%s\n' "$caminho"
+}
+
+_caminho_igual_ou_filho() {
+    local caminho="${1:-}" base="${2:-}"
+    [ "$caminho" = "$base" ] && return 0
+    [ "$base" = / ] && return 0
+    [[ "$caminho" == "$base"/* ]]
+}
+
+WORKING_DISK_ERRO=""
+WORKING_DISK_SOURCE=""
+WORKING_DISK_FSTYPE=""
+validar_working_disk_montado() {
+    # O operador monta o workingDisk externamente. Esta função apenas comprova
+    # que o caminho configurado é canônico, um mountpoint ativo e coleta um
+    # diagnóstico; nunca cria diretório, monta, formata ou altera o fstab.
+    local caminho="${1:-}" alvo caminho_lexico caminho_fisico
+    WORKING_DISK_ERRO=""
+    WORKING_DISK_SOURCE=""
+    WORKING_DISK_FSTYPE=""
+    caminho_absoluto_seguro "$caminho" \
+        || { WORKING_DISK_ERRO="WORKING_DISK_PATH inseguro: '${caminho:-vazio}'."; return 1; }
+    [ -d "$caminho" ] \
+        || { WORKING_DISK_ERRO="WORKING_DISK_PATH não é um diretório existente: $caminho"; return 1; }
+    command -v readlink >/dev/null 2>&1 \
+        && command -v mountpoint >/dev/null 2>&1 \
+        && command -v findmnt >/dev/null 2>&1 \
+        || { WORKING_DISK_ERRO="readlink/mountpoint/findmnt são necessários para validar o workingDisk."; return 1; }
+    caminho_lexico="$(_caminho_lexico_normalizado "$caminho")" \
+        || { WORKING_DISK_ERRO="Não foi possível normalizar WORKING_DISK_PATH: $caminho"; return 1; }
+    caminho_fisico="$(readlink -f -- "$caminho" 2>/dev/null)" \
+        || { WORKING_DISK_ERRO="Não foi possível canonicalizar WORKING_DISK_PATH: $caminho"; return 1; }
+    [ "$caminho" = "$caminho_lexico" ] && [ "$caminho_fisico" = "$caminho" ] \
+        || { WORKING_DISK_ERRO="WORKING_DISK_PATH precisa ser canônico e não pode conter componentes simbólicos: $caminho"; return 1; }
+    mountpoint -q -- "$caminho" \
+        || { WORKING_DISK_ERRO="workingDisk não está montado exatamente em $caminho."; return 1; }
+    alvo="$(findmnt -rn --raw --mountpoint "$caminho" --output TARGET 2>/dev/null)" \
+        || { WORKING_DISK_ERRO="findmnt não confirmou o mountpoint exato $caminho."; return 1; }
+    [ "$alvo" = "$caminho" ] \
+        || { WORKING_DISK_ERRO="mountpoint divergente: configurado '$caminho', ativo '${alvo:-desconhecido}'."; return 1; }
+    WORKING_DISK_SOURCE="$(findmnt -rn --raw --mountpoint "$caminho" --output SOURCE 2>/dev/null)" \
+        || { WORKING_DISK_ERRO="findmnt não informou a origem de $caminho."; return 1; }
+    WORKING_DISK_FSTYPE="$(findmnt -rn --raw --mountpoint "$caminho" --output FSTYPE 2>/dev/null)" \
+        || { WORKING_DISK_ERRO="findmnt não informou o filesystem de $caminho."; return 1; }
+    [ -n "$WORKING_DISK_SOURCE" ] && [ -n "$WORKING_DISK_FSTYPE" ] \
+        || { WORKING_DISK_ERRO="Diagnóstico incompleto do workingDisk em $caminho."; return 1; }
+}
+
+WORKING_DISK_CONTENCAO_ERRO=""
+WORKING_DISK_CAMINHO_FISICO=""
+WORKING_DISK_BASE_FISICA=""
+WORKING_DISK_CONTENCAO_ESTADO=""
+caminho_dentro_working_disk() {
+    # Retornos: 0=dentro (inclusive alias externo que resolve para dentro),
+    # 1=fora comprovado, 2=inválido/escape simbólico. Destinos podem não existir.
+    local caminho="${1:-}" base="${2:-${WORKING_DISK_PATH:-}}"
+    local caminho_lexico base_lexica caminho_fisico base_fisica
+    local lexical_dentro=0 fisico_dentro=0
+    WORKING_DISK_CONTENCAO_ERRO=""
+    WORKING_DISK_CAMINHO_FISICO=""
+    WORKING_DISK_BASE_FISICA=""
+    WORKING_DISK_CONTENCAO_ESTADO=""
+    if ! caminho_absoluto_seguro "$caminho" || ! caminho_absoluto_seguro "$base"; then
+        WORKING_DISK_CONTENCAO_ERRO="Destino ou WORKING_DISK_PATH possui sintaxe insegura: destino='${caminho:-vazio}', base='${base:-vazia}'."
+        WORKING_DISK_CONTENCAO_ESTADO=erro
+        return 2
+    fi
+    command -v readlink >/dev/null 2>&1 \
+        || { WORKING_DISK_CONTENCAO_ERRO="readlink é necessário para comprovar a contenção no workingDisk."; WORKING_DISK_CONTENCAO_ESTADO=erro; return 2; }
+    caminho_lexico="$(_caminho_lexico_normalizado "$caminho")" \
+        && base_lexica="$(_caminho_lexico_normalizado "$base")" \
+        || { WORKING_DISK_CONTENCAO_ERRO="Não foi possível normalizar destino/base do workingDisk."; WORKING_DISK_CONTENCAO_ESTADO=erro; return 2; }
+    caminho_fisico="$(readlink -m -- "$caminho" 2>/dev/null)" \
+        && base_fisica="$(readlink -m -- "$base" 2>/dev/null)" \
+        || { WORKING_DISK_CONTENCAO_ERRO="Não foi possível resolver fisicamente destino/base do workingDisk."; WORKING_DISK_CONTENCAO_ESTADO=erro; return 2; }
+    WORKING_DISK_CAMINHO_FISICO="$caminho_fisico"
+    WORKING_DISK_BASE_FISICA="$base_fisica"
+    if [ "$base" != "$base_lexica" ] || [ "$base_fisica" != "$base_lexica" ]; then
+        WORKING_DISK_CONTENCAO_ERRO="WORKING_DISK_PATH precisa ser canônico e não pode conter componentes simbólicos: $base"
+        WORKING_DISK_CONTENCAO_ESTADO=erro
+        return 2
+    fi
+    _caminho_igual_ou_filho "$caminho_lexico" "$base_lexica" && lexical_dentro=1
+    _caminho_igual_ou_filho "$caminho_fisico" "$base_fisica" && fisico_dentro=1
+    if [ "$lexical_dentro" -eq 1 ] && [ "$fisico_dentro" -ne 1 ]; then
+        WORKING_DISK_CONTENCAO_ERRO="Destino lexicalmente interno ao workingDisk resolve para fora dele: '$caminho' -> '$caminho_fisico'."
+        WORKING_DISK_CONTENCAO_ESTADO=erro
+        return 2
+    fi
+    if [ "$fisico_dentro" -eq 1 ]; then
+        WORKING_DISK_CONTENCAO_ESTADO=dentro
+        return 0
+    fi
+    WORKING_DISK_CONTENCAO_ESTADO=fora
+    return 1
+}
+
+# Artefatos entregues à gramática `--disk` do virt-install ficam diretamente
+# em /vm e nunca contêm vírgula (delimitador interno dessa opção). Além de
+# evitar reinterpretação, a raiz única pode ser selada contra rename no open.
+caminho_artefato_vm_logico_valido() {
+    local caminho="${1:-}" nome
+    caminho_absoluto_seguro "$caminho" || return 1
+    [[ "$caminho" != *,* && "$caminho" == /vm/* ]] || return 1
+    nome="${caminho#/vm/}"
+    [ -n "$nome" ] && [[ "$nome" != */* ]] && [ "$caminho" = "/vm/$nome" ]
+}
+
+caminho_qcow2_logico_valido() {
+    caminho_artefato_vm_logico_valido "${1:-}"
+}
+
+ARMAZENAMENTO_ERRO=""
+ARMAZENAMENTO_CAMINHO_FISICO=""
+ARMAZENAMENTO_FINGERPRINT=""
+ARMAZENAMENTO_QCOW2_ESTADO=""
+
+_caminho_configurado_fisico() {
+    local caminho="${1:-}"
+    caminho_absoluto_seguro "$caminho" || return 1
+    caminho_sistema "$caminho"
+}
+
+_armazenamento_caminho_existente_canonico() {
+    local caminho="${1:-}" pai real_pai real_alvo
+    [ -f "$caminho" ] && [ ! -L "$caminho" ] || return 1
+    pai="$(dirname -- "$caminho")" || return 1
+    real_pai="$(readlink -f -- "$pai" 2>/dev/null)" || return 1
+    real_alvo="$(readlink -f -- "$caminho" 2>/dev/null)" || return 1
+    [ "$real_pai" = "$pai" ] && [ "$real_alvo" = "$caminho" ]
+}
+
+armazenamento_fingerprint_atual() {
+    local caminho="${1:-}"
+    _armazenamento_caminho_existente_canonico "$caminho" || return 1
+    stat -c '%d:%i:%s:%Y:%f:%h' -- "$caminho" 2>/dev/null
+}
+
+validar_qcow2_configurado() {
+    # Aceita estado existente ou ausente, mas nunca link, hardlink, componente
+    # simbólico, formato diferente de qcow2 ou metadados que exigiriam reparo
+    # privilegiado. Define caminho físico/fingerprint/estado para o chamador.
+    local logico="${1:-}" grupo="${2:-}" fisico raiz real_raiz pai estado info links
+    ARMAZENAMENTO_ERRO=""
+    ARMAZENAMENTO_CAMINHO_FISICO=""
+    ARMAZENAMENTO_FINGERPRINT=""
+    ARMAZENAMENTO_QCOW2_ESTADO=""
+    caminho_qcow2_logico_valido "$logico" \
+        || { ARMAZENAMENTO_ERRO="QCOW2_PATH deve ser canônico e um filho direto de /vm: '$logico'."; return 1; }
+    nome_grupo_vm_dedicado_valido "$grupo" \
+        || { ARMAZENAMENTO_ERRO="Grupo de armazenamento inválido: '$grupo'."; return 1; }
+    fisico="$(_caminho_configurado_fisico "$logico")" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível mapear QCOW2_PATH."; return 1; }
+    raiz="$(caminho_sistema /vm)" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível resolver /vm."; return 1; }
+    [ -d "$raiz" ] && [ ! -L "$raiz" ] \
+        || { ARMAZENAMENTO_ERRO="/vm precisa ser diretório real, não link."; return 1; }
+    real_raiz="$(readlink -f -- "$raiz" 2>/dev/null)" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível canonicalizar /vm."; return 1; }
+    [ "$real_raiz" = "$raiz" ] \
+        || { ARMAZENAMENTO_ERRO="/vm contém componente simbólico ou não canônico."; return 1; }
+    pai="$(dirname -- "$fisico")"
+    [ "$pai" = "$raiz" ] \
+        || { ARMAZENAMENTO_ERRO="QCOW2_PATH físico escapou da raiz /vm."; return 1; }
+    [ ! -L "$fisico" ] \
+        || { ARMAZENAMENTO_ERRO="QCOW2_PATH não pode ser link simbólico."; return 1; }
+    ARMAZENAMENTO_CAMINHO_FISICO="$fisico"
+    if [ ! -e "$fisico" ]; then
+        ARMAZENAMENTO_QCOW2_ESTADO=ausente
+        return 0
+    fi
+    _armazenamento_caminho_existente_canonico "$fisico" \
+        || { ARMAZENAMENTO_ERRO="QCOW2 existente deve ser arquivo regular canônico, sem links em nenhum componente."; return 1; }
+    links="$(stat -c '%h' -- "$fisico" 2>/dev/null)" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível inspecionar os links do QCOW2."; return 1; }
+    [ "$links" = 1 ] \
+        || { ARMAZENAMENTO_ERRO="QCOW2 com hardlinks foi recusado (nlink=$links)."; return 1; }
+    estado="$(stat -c '%G:%a' -- "$fisico" 2>/dev/null)" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível inspecionar grupo/modo do QCOW2."; return 1; }
+    [ "$estado" = "$grupo:660" ] \
+        || { ARMAZENAMENTO_ERRO="QCOW2 está como $estado; esperado $grupo:660. Corrija-o manualmente após conferir o inode, sem executar esta etapa como root."; return 1; }
+    command -v qemu-img >/dev/null 2>&1 \
+        || { ARMAZENAMENTO_ERRO="qemu-img indisponível para validar o formato antes de sudo."; return 1; }
+    info="$(qemu-img info --output=json "$fisico" 2>&1)" \
+        || { ARMAZENAMENTO_ERRO="qemu-img recusou o arquivo: ${info:-sem diagnóstico}."; return 1; }
+    grep -Eq '"format"[[:space:]]*:[[:space:]]*"qcow2"' <<< "$info" \
+        || { ARMAZENAMENTO_ERRO="O arquivo existente não declara formato qcow2."; return 1; }
+    ARMAZENAMENTO_FINGERPRINT="$(armazenamento_fingerprint_atual "$fisico")" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível fixar a identidade do QCOW2."; return 1; }
+    ARMAZENAMENTO_QCOW2_ESTADO=existente
+}
+
+validar_iso_configurada() {
+    # ISOs são somente leitura: não há cópia, chmod, chgrp nem ACL automática.
+    # O acesso do QEMU é comprovado separadamente depois que sudo está disponível.
+    local logico="${1:-}" fisico links
+    ARMAZENAMENTO_ERRO=""
+    ARMAZENAMENTO_CAMINHO_FISICO=""
+    ARMAZENAMENTO_FINGERPRINT=""
+    caminho_artefato_vm_logico_valido "$logico" \
+        || { ARMAZENAMENTO_ERRO="ISO deve ser um filho direto canônico de /vm e não pode conter vírgula: '$logico'."; return 1; }
+    fisico="$(_caminho_configurado_fisico "$logico")" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível mapear a ISO."; return 1; }
+    [ ! -L "$fisico" ] \
+        || { ARMAZENAMENTO_ERRO="ISO não pode ser link simbólico: $logico"; return 1; }
+    _armazenamento_caminho_existente_canonico "$fisico" \
+        || { ARMAZENAMENTO_ERRO="ISO deve ser arquivo regular canônico, sem componentes simbólicos: $logico"; return 1; }
+    [ -r "$fisico" ] \
+        || { ARMAZENAMENTO_ERRO="O operador não consegue ler a ISO: $logico"; return 1; }
+    links="$(stat -c '%h' -- "$fisico" 2>/dev/null)" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível inspecionar a ISO: $logico"; return 1; }
+    [ "$links" = 1 ] \
+        || { ARMAZENAMENTO_ERRO="ISO com hardlinks foi recusada: $logico"; return 1; }
+    ARMAZENAMENTO_CAMINHO_FISICO="$fisico"
+    ARMAZENAMENTO_FINGERPRINT="$(armazenamento_fingerprint_atual "$fisico")" \
+        || { ARMAZENAMENTO_ERRO="Não foi possível fixar a identidade da ISO: $logico"; return 1; }
 }
 
 nome_unidade_systemd_valido() {
@@ -579,16 +922,18 @@ validar_valor_conf() {
     [ -z "$valor" ] && return 0
     case "$chave" in
         USUARIO_LINUX|TRANSFER_USER) nome_usuario_valido "$valor" ;;
+        VM_STORAGE_GROUP) nome_grupo_vm_dedicado_valido "$valor" ;;
         VM_NAME) nome_vm_valido "$valor" ;;
         BOOTLOADER) [[ "$valor" = kernelstub || "$valor" = grub ]] ;;
         GPU_PCI_ID|GPU_AUDIO_PCI_ID) pci_bdf_valido "$valor" ;;
         GPU_VENDOR_DEVICE_ID|GPU_AUDIO_VENDOR_DEVICE_ID) pci_vendor_device_valido "$valor" ;;
         IOMMU_GROUP_GPU) inteiro_na_faixa "$valor" 0 65535 ;;
         DM_SERVICE) nome_unidade_systemd_valido "$valor" ;;
-        NVME_DEVICE|HD2_DISCO_PAI|HD1_BY_ID_PATH|DOCS4_MONTAGEM|QCOW2_PATH|ISO_WINDOWS|ISO_VIRTIO|AIRLOCK_DIR|AIRLOCK_BIND|BACKUPS_VM_DIR)
+        NVME_DEVICE|WORKING_DISK_PATH|HD1_BY_ID_PATH|AIRLOCK_DIR|AIRLOCK_BIND|BACKUPS_VM_DIR)
             caminho_absoluto_seguro "$valor" ;;
-        UUID_HD2) uuid_fs_valido "$valor" ;;
-        HD1_DISPENSADO|HD2_DISPENSADO|DOCS4_DISPENSADO|AIRLOCK_DISPENSADO|BACKUP_DISPENSADO)
+        QCOW2_PATH) caminho_qcow2_logico_valido "$valor" ;;
+        ISO_WINDOWS|ISO_VIRTIO) caminho_artefato_vm_logico_valido "$valor" ;;
+        WORKING_DISK_DISPENSADO|HD1_DISPENSADO|AIRLOCK_DISPENSADO|BACKUP_DISPENSADO)
             [[ "$valor" = sim || "$valor" = nao ]] ;;
         QCOW2_TAMANHO) [[ "$valor" =~ ^[1-9][0-9]*[KMGTPE]$ ]] ;;
         VM_RAM_MB) inteiro_na_faixa "$valor" 1024 1048576 ;;
@@ -836,7 +1181,7 @@ backup_e_resetar_config_etapa02() {
         USUARIO_LINUX VM_NAME BOOTLOADER
         GPU_PCI_ID GPU_AUDIO_PCI_ID GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID
         IOMMU_GROUP_GPU DM_SERVICE
-        NVME_DEVICE UUID_HD2 HD2_DISCO_PAI HD2_DISPENSADO DOCS4_DISPENSADO
+        NVME_DEVICE WORKING_DISK_PATH WORKING_DISK_DISPENSADO
         HD1_BY_ID_PATH HD1_DISPENSADO
         CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB HUGEPAGES_1G
         INTERFACE_FISICA REDE_MODO VM_IP_FIXO IP_FIXO_HOST REDE_NAT_CIDR
@@ -904,6 +1249,230 @@ nome_vm_valido() {
 nome_usuario_valido() {
     local nome="${1:-}"
     [[ "$nome" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+}
+
+nome_grupo_valido() {
+    local nome="${1:-}"
+    [[ "$nome" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+}
+
+nome_grupo_vm_dedicado_valido() {
+    # Reserva um namespace próprio para impedir que uma configuração manual
+    # reutilize grupos privilegiados como disk, sudo, adm ou libvirt.
+    local nome="${1:-}"
+    nome_grupo_valido "$nome" || return 1
+    [[ "$nome" = vm-passthrough || "$nome" =~ ^vm-passthrough-[a-z0-9][a-z0-9_-]*$ ]]
+}
+
+USUARIO_VALIDACAO_ERRO=""
+USUARIO_VALIDADO_UID=""
+USUARIO_VALIDADO_GID=""
+USUARIO_VALIDADO_HOME=""
+USUARIO_OPERADOR=""
+USUARIO_DIFERE_OPERADOR=0
+
+usuario_operador_efetivo() {
+    # O argumento opcional existe apenas para testes unitários que chamam esta
+    # API diretamente. Fluxos operacionais não o recebem do ambiente.
+    local operador="${1:-}"
+    if [ -z "$operador" ]; then
+        if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+            operador="$SUDO_USER"
+        else
+            operador="$(id -un 2>/dev/null)" || return 1
+        fi
+    fi
+    nome_usuario_valido "$operador" || return 1
+    printf '%s\n' "$operador"
+}
+
+validar_usuario_linux() {
+    # Valida uma única entrada NSS e cruza UID/GID com id(1). O home precisa
+    # ser absoluto, existir e ser atravessável como diretório. O segundo
+    # argumento injeta o operador somente em chamadas unitárias explícitas.
+    local usuario="${1:-}" operador_injetado="${2:-}"
+    local registro nome senha uid gid gecos home shell extra uid_id gid_id operador
+    local -a registros=()
+    USUARIO_VALIDACAO_ERRO=""
+    USUARIO_VALIDADO_UID=""
+    USUARIO_VALIDADO_GID=""
+    USUARIO_VALIDADO_HOME=""
+    USUARIO_OPERADOR=""
+    USUARIO_DIFERE_OPERADOR=0
+    nome_usuario_valido "$usuario" \
+        || { USUARIO_VALIDACAO_ERRO="USUARIO_LINUX inválido: '${usuario:-vazio}'."; return 1; }
+    mapfile -t registros < <(getent passwd "$usuario" 2>/dev/null)
+    [ "${#registros[@]}" -eq 1 ] \
+        || { USUARIO_VALIDACAO_ERRO="A conta '$usuario' não possui uma entrada NSS única."; return 1; }
+    registro="${registros[0]}"
+    IFS=: read -r nome senha uid gid gecos home shell extra <<< "$registro"
+    [ "$nome" = "$usuario" ] && [ -z "$extra" ] \
+        || { USUARIO_VALIDACAO_ERRO="A entrada NSS de '$usuario' é inconsistente."; return 1; }
+    inteiro_na_faixa "$uid" 1 2147483647 \
+        || { USUARIO_VALIDACAO_ERRO="UID inválido para '$usuario': '${uid:-vazio}'."; return 1; }
+    inteiro_na_faixa "$gid" 1 2147483647 \
+        || { USUARIO_VALIDACAO_ERRO="GID inválido para '$usuario': '${gid:-vazio}'."; return 1; }
+    caminho_absoluto_seguro "$home" && [ -d "$home" ] \
+        || { USUARIO_VALIDACAO_ERRO="Home inválido ou inexistente para '$usuario': '${home:-vazio}'."; return 1; }
+    uid_id="$(id -u "$usuario" 2>/dev/null)" \
+        || { USUARIO_VALIDACAO_ERRO="id não conseguiu resolver o UID de '$usuario'."; return 1; }
+    gid_id="$(id -g "$usuario" 2>/dev/null)" \
+        || { USUARIO_VALIDACAO_ERRO="id não conseguiu resolver o GID de '$usuario'."; return 1; }
+    [ "$uid_id" = "$uid" ] && [ "$gid_id" = "$gid" ] \
+        || { USUARIO_VALIDACAO_ERRO="UID/GID de id e NSS divergem para '$usuario'."; return 1; }
+    operador="$(usuario_operador_efetivo "$operador_injetado")" \
+        || { USUARIO_VALIDACAO_ERRO="Não foi possível determinar o operador efetivo."; return 1; }
+    USUARIO_VALIDADO_UID="$uid"
+    USUARIO_VALIDADO_GID="$gid"
+    USUARIO_VALIDADO_HOME="$home"
+    USUARIO_OPERADOR="$operador"
+    [ "$usuario" = "$operador" ] || USUARIO_DIFERE_OPERADOR=1
+}
+
+confirmar_usuario_linux_diferente() {
+    local usuario="${1:-}" token
+    [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ] || return 0
+    token="USAR-$usuario"
+    confirmar_digitando "$token" \
+        "USUARIO_LINUX='$usuario' é uma conta válida, mas o operador efetivo é '$USUARIO_OPERADOR'. As mutações agirão sobre a outra conta."
+}
+
+exigir_usuario_linux_valido() {
+    local usuario="${1:-${USUARIO_LINUX:-}}"
+    validar_usuario_linux "$usuario" || falhar "$USUARIO_VALIDACAO_ERRO"
+    confirmar_usuario_linux_diferente "$usuario" \
+        || falhar "Conta diferente do operador não foi autorizada; nenhuma mutação foi iniciada."
+}
+
+GRUPO_VM_ERRO=""
+validar_acl_diretorio_vm() {
+    local diretorio="${1:-/vm}" saida linha
+    local u=0 g=0 m=0 o=0 du=0 dg=0 dm=0 do_=0
+    GRUPO_VM_ERRO=""
+    command -v getfacl >/dev/null 2>&1 \
+        || { GRUPO_VM_ERRO="getfacl indisponível para comprovar a herança de /vm."; return 1; }
+    saida="$(getfacl -cp -- "$diretorio" 2>/dev/null)" \
+        || { GRUPO_VM_ERRO="Não foi possível ler as ACLs de $diretorio."; return 1; }
+    while IFS= read -r linha || [ -n "$linha" ]; do
+        [ -n "$linha" ] || continue
+        case "$linha" in
+            user::rwx) u=$((u + 1)) ;;
+            group::rwx) g=$((g + 1)) ;;
+            mask::rwx) m=$((m + 1)) ;;
+            other::---) o=$((o + 1)) ;;
+            default:user::rwx) du=$((du + 1)) ;;
+            default:group::rwx) dg=$((dg + 1)) ;;
+            default:mask::rwx) dm=$((dm + 1)) ;;
+            default:other::---) do_=$((do_ + 1)) ;;
+            \#*) ;;
+            *) GRUPO_VM_ERRO="ACL inesperada em $diretorio: $linha"; return 1 ;;
+        esac
+    done <<< "$saida"
+    [ "$u" -eq 1 ] && [ "$g" -eq 1 ] && [ "$m" -eq 1 ] && [ "$o" -eq 1 ] \
+        && [ "$du" -eq 1 ] && [ "$dg" -eq 1 ] && [ "$dm" -eq 1 ] && [ "$do_" -eq 1 ] \
+        || { GRUPO_VM_ERRO="ACL de acesso/default de $diretorio não é exatamente rwx/rwx/--- com máscara rwx."; return 1; }
+}
+
+usuario_pertence_grupo() {
+    local usuario="$1" grupo="$2" grupos
+    grupos="$(id -nG "$usuario" 2>/dev/null)" || return 1
+    grep -qw -- "$grupo" <<< "$grupos"
+}
+
+validar_modelo_diretorio_vm() {
+    # validar_modelo_diretorio_vm DIRETORIO OPERADOR [USUARIO_QEMU] [GRUPO]
+    local diretorio="${1:-/vm}" operador="${2:-}" qemu="${3:-}"
+    local grupo="${4:-${VM_STORAGE_GROUP:-vm-passthrough}}" estado
+    local nome senha gid membros extra
+    local -a registros=()
+    GRUPO_VM_ERRO=""
+    nome_grupo_vm_dedicado_valido "$grupo" \
+        || { GRUPO_VM_ERRO="Grupo de armazenamento precisa usar o namespace dedicado 'vm-passthrough[-sufixo]': '$grupo'."; return 1; }
+    mapfile -t registros < <(getent group "$grupo" 2>/dev/null)
+    [ "${#registros[@]}" -eq 1 ] \
+        || { GRUPO_VM_ERRO="Grupo compartilhado '$grupo' não possui entrada NSS única."; return 1; }
+    IFS=: read -r nome senha gid membros extra <<< "${registros[0]}"
+    [ "$nome" = "$grupo" ] && [ -z "$extra" ] && inteiro_na_faixa "$gid" 1 2147483647 \
+        || { GRUPO_VM_ERRO="Entrada NSS inconsistente para o grupo dedicado '$grupo'."; return 1; }
+    [ -d "$diretorio" ] \
+        || { GRUPO_VM_ERRO="Diretório $diretorio não existe."; return 1; }
+    estado="$(stat -c '%U:%G:%a' -- "$diretorio" 2>/dev/null)" \
+        || { GRUPO_VM_ERRO="Não foi possível inspecionar $diretorio."; return 1; }
+    [ "$estado" = "root:$grupo:2770" ] \
+        || { GRUPO_VM_ERRO="$diretorio está como $estado; esperado root:$grupo:2770."; return 1; }
+    usuario_pertence_grupo "$operador" "$grupo" \
+        || { GRUPO_VM_ERRO="Operador '$operador' não pertence ao grupo '$grupo'."; return 1; }
+    if [ -n "$qemu" ]; then
+        usuario_pertence_grupo "$qemu" "$grupo" \
+            || { GRUPO_VM_ERRO="Identidade QEMU '$qemu' não pertence ao grupo '$grupo'."; return 1; }
+    fi
+    validar_acl_diretorio_vm "$diretorio"
+}
+
+configurar_modelo_diretorio_vm() {
+    local diretorio="${1:-/vm}" grupo="${2:-${VM_STORAGE_GROUP:-vm-passthrough}}"
+    nome_grupo_vm_dedicado_valido "$grupo" \
+        || falhar "Grupo de armazenamento precisa usar o namespace dedicado 'vm-passthrough[-sufixo]': '$grupo'."
+    sudo chown "root:$grupo" "$diretorio"
+    sudo setfacl -b -k -- "$diretorio"
+    sudo setfacl -m 'u::rwx,g::rwx,m::rwx,o::---' -- "$diretorio"
+    sudo setfacl -m 'd:u::rwx,d:g::rwx,d:m::rwx,d:o::---' -- "$diretorio"
+    sudo chmod 2770 "$diretorio"
+}
+
+SELO_VM_ERRO=""
+selar_diretorio_vm() {
+    # Remove somente o write do grupo na raiz fixa /vm. Arquivos já abertos
+    # continuam graváveis, mas nenhum membro do grupo pode criar/renomear uma
+    # entrada entre a validação e o consumidor abrir o pathname.
+    local diretorio="${1:-}" grupo="${2:-}" raiz estado real
+    SELO_VM_ERRO=""
+    raiz="$(caminho_sistema /vm)" \
+        || { SELO_VM_ERRO="Não foi possível resolver /vm para selagem."; return 1; }
+    [ "$diretorio" = "$raiz" ] && [ -d "$diretorio" ] && [ ! -L "$diretorio" ] \
+        || { SELO_VM_ERRO="A selagem só aceita a raiz fixa /vm, regular e sem link."; return 1; }
+    nome_grupo_vm_dedicado_valido "$grupo" \
+        || { SELO_VM_ERRO="Grupo inválido para selagem de /vm: '$grupo'."; return 1; }
+    real="$(readlink -f -- "$diretorio" 2>/dev/null)" \
+        || { SELO_VM_ERRO="Não foi possível canonicalizar /vm para selagem."; return 1; }
+    [ "$real" = "$diretorio" ] \
+        || { SELO_VM_ERRO="A raiz /vm não é canônica para selagem."; return 1; }
+    estado="$(stat -c '%U:%G:%a' -- "$diretorio" 2>/dev/null)" \
+        || { SELO_VM_ERRO="Não foi possível inspecionar /vm antes da selagem."; return 1; }
+    [ "$estado" = "root:$grupo:2770" ] \
+        || { SELO_VM_ERRO="Estado inesperado antes da selagem: $estado."; return 1; }
+    sudo chmod 2750 "$diretorio" \
+        || { SELO_VM_ERRO="Falha ao remover write do grupo em /vm."; return 1; }
+    estado="$(stat -c '%U:%G:%a' -- "$diretorio" 2>/dev/null)" \
+        || { SELO_VM_ERRO="Não foi possível comprovar a selagem de /vm."; return 1; }
+    [ "$estado" = "root:$grupo:2750" ] \
+        || { SELO_VM_ERRO="Selagem de /vm não convergiu: $estado."; return 1; }
+}
+
+restaurar_diretorio_vm() {
+    local diretorio="${1:-}" grupo="${2:-}" raiz estado
+    SELO_VM_ERRO=""
+    raiz="$(caminho_sistema /vm)" \
+        || { SELO_VM_ERRO="Não foi possível resolver /vm para restauração."; return 1; }
+    [ "$diretorio" = "$raiz" ] && [ -d "$diretorio" ] && [ ! -L "$diretorio" ] \
+        || { SELO_VM_ERRO="A restauração só aceita a raiz fixa /vm."; return 1; }
+    nome_grupo_vm_dedicado_valido "$grupo" \
+        || { SELO_VM_ERRO="Grupo inválido para restauração de /vm: '$grupo'."; return 1; }
+    sudo chmod 2770 "$diretorio" \
+        || { SELO_VM_ERRO="Falha ao restaurar write do grupo em /vm."; return 1; }
+    estado="$(stat -c '%U:%G:%a' -- "$diretorio" 2>/dev/null)" \
+        || { SELO_VM_ERRO="Não foi possível comprovar a restauração de /vm."; return 1; }
+    [ "$estado" = "root:$grupo:2770" ] \
+        || { SELO_VM_ERRO="Restauração de /vm não convergiu: $estado."; return 1; }
+    validar_acl_diretorio_vm "$diretorio" \
+        || { SELO_VM_ERRO="ACL de /vm não foi restaurada: $GRUPO_VM_ERRO"; return 1; }
+}
+
+validar_arquivo_compartilhado_vm() {
+    local arquivo="$1" grupo="$2" estado
+    [ -f "$arquivo" ] && [ ! -L "$arquivo" ] || return 1
+    estado="$(stat -c '%h:%G:%a' -- "$arquivo" 2>/dev/null)" || return 1
+    [ "$estado" = "1:$grupo:660" ]
 }
 
 mac_valido() {
@@ -1004,16 +1573,18 @@ cidr_privado_24_valido() {
 }
 
 interface_fisica_elegivel() {
-    local iface="${1:-}"
+    local iface="${1:-}" base
     nome_interface_valido "$iface" || return 1
     [ "$iface" != "lo" ] || return 1
-    [ -e "/sys/class/net/$iface/device" ] || return 1
-    [ "$(cat "/sys/class/net/$iface/type" 2>/dev/null)" = "1" ]
+    base="$(caminho_sistema "/sys/class/net/$iface")" || return 1
+    [ -e "$base/device" ] || return 1
+    [ "$(cat "$base/type" 2>/dev/null)" = "1" ]
 }
 
 interface_wifi() {
-    local iface="${1:-}"
-    [ -d "/sys/class/net/$iface/wireless" ]
+    local iface="${1:-}" base
+    base="$(caminho_sistema "/sys/class/net/$iface")" || return 1
+    [ -d "$base/wireless" ]
 }
 
 dispositivo_uplink_ipv4_efetivo() {
@@ -1321,12 +1892,12 @@ disco_em_uso_pelo_host() {
 DISCO_VM_ERRO=""
 DISCO_VM_ALVO=""
 validar_disco_fisico_vm() {
-    # validar_disco_fisico_vm BY_ID [DISCO_SISTEMA] [DISCO_HD2] [ALVO_ESPERADO]
+    # validar_disco_fisico_vm BY_ID [DISCO_SISTEMA] [ALVO_ESPERADO]
     # Executa duas fotografias completas: link, tipo, todos os ancestrais da
-    # raiz, discos protegidos e montagens. Qualquer erro de inspeção bloqueia.
-    local origem="${1:-}" disco_sistema="${2:-${NVME_DEVICE:-}}"
-    local disco_hd2="${3:-${HD2_DISCO_PAI:-}}" esperado="${4:-}"
-    local alvo="" atual raizes raiz protegido real descricao tipo uso_status rodada
+    # raiz, disco do sistema e montagens/consumidores. Qualquer erro de
+    # inspeção bloqueia.
+    local origem="${1:-}" disco_sistema="${2:-${NVME_DEVICE:-}}" esperado="${3:-}"
+    local alvo="" atual raizes raiz real tipo uso_status rodada
     DISCO_VM_ERRO=""
     DISCO_VM_ALVO=""
 
@@ -1363,16 +1934,14 @@ validar_disco_fisico_vm() {
                 || { DISCO_VM_ERRO="BLOQUEADO: o disco selecionado contém a raiz do host ($raiz)."; return 1; }
         done <<< "$raizes"
 
-        for descricao in sistema hd2; do
-            if [ "$descricao" = sistema ]; then protegido="$disco_sistema"; else protegido="$disco_hd2"; fi
-            [ -n "$protegido" ] || continue
-            real="$(readlink -f -- "$protegido" 2>/dev/null)" \
-                || { DISCO_VM_ERRO="Não foi possível resolver o disco protegido '$descricao': $protegido"; return 1; }
+        if [ -n "$disco_sistema" ]; then
+            real="$(readlink -f -- "$disco_sistema" 2>/dev/null)" \
+                || { DISCO_VM_ERRO="Não foi possível resolver o disco do sistema: $disco_sistema"; return 1; }
             [ -b "$real" ] \
-                || { DISCO_VM_ERRO="O disco protegido '$descricao' deixou de ser dispositivo de bloco: $protegido"; return 1; }
+                || { DISCO_VM_ERRO="O disco do sistema deixou de ser dispositivo de bloco: $disco_sistema"; return 1; }
             [ "$atual" != "$real" ] \
-                || { DISCO_VM_ERRO="BLOQUEADO: o HD1 coincide com o disco protegido '$descricao' ($real)."; return 1; }
-        done
+                || { DISCO_VM_ERRO="BLOQUEADO: o HD1 coincide com o disco do sistema ($real)."; return 1; }
+        fi
 
         if [ -n "$esperado" ]; then
             real="$(readlink -f -- "$esperado" 2>/dev/null)" \
@@ -1395,7 +1964,11 @@ validar_disco_fisico_vm() {
 }
 
 # --- Memória ---------------------------------------------------------------------
-ram_total_mib() { awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo; }
+ram_total_mib() {
+    local meminfo
+    meminfo="$(caminho_sistema /proc/meminfo)" || return 1
+    awk '/MemTotal/{printf "%d", $2/1024}' "$meminfo"
+}
 
 ram_reserva_host_mib() {
     # Reserva mínima do host: 25% do total, nunca abaixo de 4 GiB nem acima de 8.
@@ -1420,17 +1993,28 @@ ram_max_vm_mib() {
 }
 
 # --- Bootloader e parâmetros de kernel (Capítulos 15 e 16) --------------------
+BOOTLOADER_VALIDACAO_ERRO=""
+BOOTLOADER_ATIVO=""
 detectar_bootloader() {
     # Prefere evidência do loader que iniciou a sessão. A simples presença do
-    # binário kernelstub não basta: ele pode coexistir com um GRUB ativo.
-    local bootctl_status="" tem_kernelstub=0 tem_grub=0
+    # binário kernelstub não basta: ele pode coexistir com um GRUB ativo. O
+    # argumento opcional injeta a evidência apenas em chamadas unitárias.
+    local bootctl_status="" tem_kernelstub=0 tem_grub=0 injetado="${1:-}"
+    if [ -n "$injetado" ]; then
+        case "$injetado" in grub|kernelstub|desconhecido) printf '%s\n' "$injetado"; return ;; esac
+        printf '%s\n' desconhecido
+        return
+    fi
     command -v kernelstub >/dev/null 2>&1 && tem_kernelstub=1
     [ -f "$GRUB_CFG_ARQUIVO" ] && tem_grub=1
     if command -v bootctl >/dev/null 2>&1; then
         bootctl_status="$(LC_ALL=C bootctl status --no-pager 2>/dev/null || true)"
-        if grep -A4 -F 'Current Boot Loader:' <<< "$bootctl_status" | grep -qi 'systemd-boot'; then
+        if grep -A6 -F 'Current Boot Loader:' <<< "$bootctl_status" | grep -qi 'systemd-boot'; then
             [ "$tem_kernelstub" -eq 1 ] && { echo kernelstub; return; }
             echo desconhecido
+            return
+        elif grep -A6 -F 'Current Boot Loader:' <<< "$bootctl_status" | grep -qi 'grub'; then
+            echo grub
             return
         fi
     fi
@@ -1444,6 +2028,65 @@ detectar_bootloader() {
     else
         echo desconhecido
     fi
+}
+
+validar_bootloader_configurado() {
+    local persistido="${1:-${BOOTLOADER:-}}" efetivo_injetado="${2:-}" efetivo
+    BOOTLOADER_VALIDACAO_ERRO=""
+    BOOTLOADER_ATIVO=""
+    [ -n "$persistido" ] \
+        || { BOOTLOADER_VALIDACAO_ERRO="BOOTLOADER não está definido em $CONF_ARQUIVO."; return 1; }
+    [ "$PLATAFORMA_CARREGADA" -eq 1 ] || plataforma_carregar \
+        || { BOOTLOADER_VALIDACAO_ERRO="$PLATAFORMA_ERRO"; return 1; }
+    efetivo="$(detectar_bootloader "$efetivo_injetado")"
+    case "$efetivo" in
+        grub|kernelstub) ;;
+        *) BOOTLOADER_VALIDACAO_ERRO="Bootloader efetivo não pôde ser determinado sem ambiguidade."; return 1 ;;
+    esac
+    plataforma_boot_backend_suportado "$efetivo" \
+        || { BOOTLOADER_VALIDACAO_ERRO="Bootloader efetivo '$efetivo' não é suportado pelo perfil $PLATAFORMA_PERFIL."; return 1; }
+    [ "$persistido" = "$efetivo" ] \
+        || { BOOTLOADER_VALIDACAO_ERRO="Divergência de boot: passthrough.conf registra '$persistido', mas o boot efetivo é '$efetivo'. Execute a etapa 02 e confirme a migração com backup."; return 1; }
+    BOOTLOADER_ATIVO="$efetivo"
+}
+
+_kernelstub_entries_diretas_legiveis() {
+    local entrada restaurar_nullglob=0
+    local -a entradas=()
+    [ -d "$KERNELSTUB_ENTRIES_DIR" ] || return 1
+    shopt -q nullglob || { shopt -s nullglob; restaurar_nullglob=1; }
+    entradas=("$KERNELSTUB_ENTRIES_DIR"/*.conf)
+    [ "$restaurar_nullglob" -eq 0 ] || shopt -u nullglob
+    [ "${#entradas[@]}" -gt 0 ] || return 1
+    for entrada in "${entradas[@]}"; do
+        [ -f "$entrada" ] && [ -r "$entrada" ] || return 1
+    done
+}
+
+boot_backend_observavel() {
+    # Retornos: 0=observável, 1=backend inválido/ausente, 2=leitura
+    # privilegiada indisponível. Nunca solicita senha.
+    validar_bootloader_configurado "${1:-${BOOTLOADER:-}}" || return 1
+    case "$BOOTLOADER_ATIVO" in
+        grub)
+            [ -r "$GRUB_DEFAULT_ARQUIVO" ] || return 2
+            [ -r "$GRUB_CFG_ARQUIVO" ] && return 0
+            command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && return 0
+            return 2
+            ;;
+        kernelstub)
+            command -v kernelstub >/dev/null 2>&1 || return 1
+            [ -d "$KERNELSTUB_ENTRIES_DIR" ] || return 1
+            _kernelstub_entries_diretas_legiveis && return 0
+            command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && return 0
+            return 2
+            ;;
+    esac
+    return 1
+}
+
+exigir_bootloader_coerente() {
+    validar_bootloader_configurado || falhar "$BOOTLOADER_VALIDACAO_ERRO"
 }
 
 cmdline_tem() {
@@ -1586,22 +2229,41 @@ _cmdline_sem_chaves() {
     printf '%s\n' "$saida"
 }
 
-_kernelstub_parametros_por_chaves() {
-    # Lê todas as entradas pendentes e só retorna um estado quando cada entrada
-    # possui, para as chaves gerenciadas, exatamente o mesmo conjunto sem
-    # duplicações. sudo -n impede prompts durante --verificar; etapas mutáveis
-    # já obtiveram o ticket antes de chamar esta função.
-    local params="$1" linhas linha opcoes estado referencia="" primeira=1
-    linhas="$(sudo -n bash -c '
+_kernelstub_linhas_opcoes() {
+    # Prefere leitura direta; somente usa sudo não interativo quando os entries
+    # existem mas não são legíveis pelo operador. O diretório é argumento de
+    # bash -c, nunca interpolado como código.
+    local entrada
+    local -a entradas=() opcoes=()
+    if _kernelstub_entries_diretas_legiveis; then
+        entradas=("$KERNELSTUB_ENTRIES_DIR"/*.conf)
+        for entrada in "${entradas[@]}"; do
+            mapfile -t opcoes < <(grep -E '^[[:space:]]*options[[:space:]]+' -- "$entrada")
+            [ "${#opcoes[@]}" -eq 1 ] || return 3
+            printf '%s\n' "${opcoes[0]}"
+        done
+        return 0
+    fi
+    command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || return 2
+    sudo -n bash -c '
         shopt -s nullglob
-        entradas=(/boot/efi/loader/entries/*.conf)
+        entradas=("$1"/*.conf)
         ((${#entradas[@]} > 0)) || exit 2
         for entrada in "${entradas[@]}"; do
             mapfile -t opcoes < <(grep -E "^[[:space:]]*options[[:space:]]+" -- "$entrada")
             ((${#opcoes[@]} == 1)) || exit 3
             printf "%s\n" "${opcoes[0]}"
         done
-    ')" || return 1
+    ' _ "$KERNELSTUB_ENTRIES_DIR"
+}
+
+_kernelstub_parametros_por_chaves() {
+    # Lê todas as entradas pendentes e só retorna um estado quando cada entrada
+    # possui, para as chaves gerenciadas, exatamente o mesmo conjunto sem
+    # duplicações. sudo -n impede prompts durante --verificar; etapas mutáveis
+    # já obtiveram o ticket antes de chamar esta função.
+    local params="$1" linhas linha opcoes estado referencia="" primeira=1
+    linhas="$(_kernelstub_linhas_opcoes)" || return 1
     [ -n "$linhas" ] || return 1
 
     while IFS= read -r linha || [ -n "$linha" ]; do
@@ -1624,16 +2286,7 @@ _kernelstub_parametros_para_mutacao() {
     # para que o SET/DEL consiga saneá-las. Entries divergentes continuam
     # bloqueadas antes de qualquer mutação.
     local params="$1" linhas linha opcoes estado referencia="" primeira=1
-    linhas="$(sudo -n bash -c '
-        shopt -s nullglob
-        entradas=(/boot/efi/loader/entries/*.conf)
-        ((${#entradas[@]} > 0)) || exit 2
-        for entrada in "${entradas[@]}"; do
-            mapfile -t opcoes < <(grep -E "^[[:space:]]*options[[:space:]]+" -- "$entrada")
-            ((${#opcoes[@]} == 1)) || exit 3
-            printf "%s\n" "${opcoes[0]}"
-        done
-    ')" || return 1
+    linhas="$(_kernelstub_linhas_opcoes)" || return 1
     [ -n "$linhas" ] || return 1
     while IFS= read -r linha || [ -n "$linha" ]; do
         [[ "$linha" =~ ^[[:space:]]*options[[:space:]]+(.+)$ ]] || return 1
@@ -1722,28 +2375,50 @@ _grub_cmdline_atual() {
 }
 
 KERNEL_PERSISTENCIA_ERRO=""
+KERNEL_PERSISTENCIA_TIPO="pendente"
 KERNEL_PARAMETROS_PERSISTENTES=""
 kernel_parametros_persistentes() {
     # kernel_parametros_persistentes "chave ..."
     # Preenche KERNEL_PARAMETROS_PERSISTENTES e rejeita duplicações ou loader
     # entries divergentes. Não solicita senha durante verificadores.
-    local chaves="${1:-}" bl="${BOOTLOADER:-$(detectar_bootloader)}" cmdline estado
+    local chaves="${1:-}" bl cmdline estado observavel_rc
     KERNEL_PERSISTENCIA_ERRO=""
+    KERNEL_PERSISTENCIA_TIPO="pendente"
     KERNEL_PARAMETROS_PERSISTENTES=""
     kernel_parametros_validos "$chaves" \
-        || { KERNEL_PERSISTENCIA_ERRO="Lista de chaves de kernel inválida: '$chaves'."; return 1; }
+        || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="Lista de chaves de kernel inválida: '$chaves'."; return 1; }
+    if ! validar_bootloader_configurado; then
+        KERNEL_PERSISTENCIA_TIPO="erro"
+        KERNEL_PERSISTENCIA_ERRO="$BOOTLOADER_VALIDACAO_ERRO"
+        return 1
+    fi
+    bl="$BOOTLOADER_ATIVO"
+    if boot_backend_observavel "$bl"; then
+        :
+    else
+        observavel_rc=$?
+        if [ "$observavel_rc" -eq 2 ]; then
+            KERNEL_PERSISTENCIA_TIPO="indeterminado"
+            KERNEL_PERSISTENCIA_ERRO="Backend $bl não pode ser lido sem privilégio já autorizado."
+        else
+            KERNEL_PERSISTENCIA_TIPO="erro"
+            KERNEL_PERSISTENCIA_ERRO="Backend $bl não está disponível para inspeção segura."
+        fi
+        return 1
+    fi
     case "$bl" in
         kernelstub)
             estado="$(_kernelstub_parametros_por_chaves "$chaves")" \
-                || { KERNEL_PERSISTENCIA_ERRO="Loader entries indisponíveis, duplicados ou divergentes para as chaves gerenciadas."; return 1; }
+                || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="Loader entries indisponíveis, duplicados ou divergentes para as chaves gerenciadas."; return 1; }
             ;;
         grub)
             cmdline="$(_grub_cmdline_atual)" \
-                || { KERNEL_PERSISTENCIA_ERRO="GRUB_CMDLINE_LINUX_DEFAULT ausente, duplicado ou ilegível."; return 1; }
+                || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="GRUB_CMDLINE_LINUX_DEFAULT ausente, duplicado ou ilegível."; return 1; }
             estado="$(_parametros_por_chaves_cmdline "$cmdline" "$chaves")" \
-                || { KERNEL_PERSISTENCIA_ERRO="Uma chave gerenciada está duplicada no GRUB."; return 1; }
+                || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="Uma chave gerenciada está duplicada no GRUB."; return 1; }
             ;;
         *)
+            KERNEL_PERSISTENCIA_TIPO="erro"
             KERNEL_PERSISTENCIA_ERRO="Bootloader não identificado."
             return 1
             ;;
@@ -1752,30 +2427,43 @@ kernel_parametros_persistentes() {
 }
 
 kernel_parametros_persistentes_exatos() {
-    local esperados="${1:-}" bl="${BOOTLOADER:-$(detectar_bootloader)}"
+    local esperados="${1:-}" bl
     kernel_parametros_persistentes "$esperados" || return 1
+    bl="$BOOTLOADER_ATIVO"
     [ "$KERNEL_PARAMETROS_PERSISTENTES" = "$esperados" ] \
-        || { KERNEL_PERSISTENCIA_ERRO="Persistência atual: '${KERNEL_PARAMETROS_PERSISTENTES:-ausente}'; esperado: '$esperados'."; return 1; }
+        || { KERNEL_PERSISTENCIA_TIPO="pendente"; KERNEL_PERSISTENCIA_ERRO="Persistência atual: '${KERNEL_PARAMETROS_PERSISTENTES:-ausente}'; esperado: '$esperados'."; return 1; }
     if [ "$bl" = grub ] && ! _grub_cfg_parametros_exatos "$esperados"; then
+        KERNEL_PERSISTENCIA_TIPO="pendente"
         KERNEL_PERSISTENCIA_ERRO="O grub.cfg efetivo não contém exatamente os parâmetros esperados em todas as entradas Linux."
         return 1
     fi
 }
 
 kernel_param_chaves_persistentes_ausentes() {
-    local chaves="${1:-}" bl="${BOOTLOADER:-$(detectar_bootloader)}"
+    local chaves="${1:-}" bl
     kernel_parametros_persistentes "$chaves" || return 1
+    bl="$BOOTLOADER_ATIVO"
     [ -z "$KERNEL_PARAMETROS_PERSISTENTES" ] \
-        || { KERNEL_PERSISTENCIA_ERRO="Ainda persistem parâmetros: $KERNEL_PARAMETROS_PERSISTENTES"; return 1; }
+        || { KERNEL_PERSISTENCIA_TIPO="pendente"; KERNEL_PERSISTENCIA_ERRO="Ainda persistem parâmetros: $KERNEL_PARAMETROS_PERSISTENTES"; return 1; }
     if [ "$bl" = grub ] && ! _grub_cfg_chaves_ausentes "$chaves"; then
+        KERNEL_PERSISTENCIA_TIPO="pendente"
         KERNEL_PERSISTENCIA_ERRO="O grub.cfg efetivo ainda contém uma das chaves gerenciadas."
         return 1
     fi
 }
 
+_grub_cfg_linhas_linux() {
+    if [ -r "$GRUB_CFG_ARQUIVO" ]; then
+        awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO"
+        return
+    fi
+    command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || return 2
+    sudo -n awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO" 2>/dev/null
+}
+
 _grub_cfg_parametros_exatos() {
     local esperados="$1" linhas linha estado encontrou=0
-    linhas="$(sudo -n awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO" 2>/dev/null)" \
+    linhas="$(_grub_cfg_linhas_linux)" \
         || return 1
     [ -n "$linhas" ] || return 1
     while IFS= read -r linha || [ -n "$linha" ]; do
@@ -1792,7 +2480,7 @@ _grub_cfg_parametros_exatos() {
 
 _grub_cfg_chaves_ausentes() {
     local chaves="$1" linhas linha estado encontrou=0
-    linhas="$(sudo -n awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO" 2>/dev/null)" \
+    linhas="$(_grub_cfg_linhas_linux)" \
         || return 1
     [ -n "$linhas" ] || return 1
     while IFS= read -r linha || [ -n "$linha" ]; do
@@ -1880,9 +2568,11 @@ _grub_aplicar_cmdline() {
 kernel_param_add() {
     # Apesar do nome histórico, esta operação é SET por chave: qualquer valor
     # anterior de hugepages, isolcpus, iommu etc. é removido antes do novo.
-    local params="$1" bl="${BOOTLOADER:-$(detectar_bootloader)}" atual novo
+    local params="$1" bl atual novo
     kernel_parametros_validos "$params" \
         || falhar "Lista de parâmetros de kernel inválida ou com chaves duplicadas: '$params'."
+    exigir_bootloader_coerente
+    bl="$BOOTLOADER_ATIVO"
     case "$bl" in
         kernelstub)
             _kernelstub_aplicar_estado "$params" "$params" \
@@ -1905,9 +2595,11 @@ kernel_param_add() {
 kernel_param_del() {
     # Remove todos os valores das chaves informadas, mesmo que sejam diferentes
     # daqueles registrados na chamada (ex.: hugepages=16 remove hugepages=8).
-    local params="$1" bl="${BOOTLOADER:-$(detectar_bootloader)}" atual novo
+    local params="$1" bl atual novo
     kernel_parametros_validos "$params" \
         || falhar "Lista de parâmetros de kernel inválida ou com chaves duplicadas: '$params'."
+    exigir_bootloader_coerente
+    bl="$BOOTLOADER_ATIVO"
     case "$bl" in
         kernelstub)
             _kernelstub_aplicar_estado "$params" "" \
@@ -1955,6 +2647,70 @@ fstab_tem_linha() {
 }
 
 # --- XML da VM ------------------------------------------------------------------
+DISCARD_XML_ERRO=""
+DISCARD_XML_ESTADO=""
+xml_disco_qcow2_estado() {
+    # Retornos: 0=discard ativo no único disco alvo; 1=alvo único sem unmap;
+    # 2=XML inválido, alvo ausente/duplicado ou estrutura ambígua.
+    local arquivo="${1:-}" qcow2="${2:-}" saida rc
+    DISCARD_XML_ERRO=""
+    DISCARD_XML_ESTADO=""
+    [ -f "$arquivo" ] && caminho_absoluto_seguro "$qcow2" \
+        || { DISCARD_XML_ERRO="XML ou QCOW2_PATH inválido."; DISCARD_XML_ESTADO=erro; return 2; }
+    if saida="$(python3 - "$arquivo" "$qcow2" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path, target = sys.argv[1:]
+try:
+    root = ET.parse(path).getroot()
+except Exception as exc:
+    print(f'XML ilegível: {exc}')
+    raise SystemExit(2)
+if root.tag != 'domain':
+    print('raiz XML não é <domain>')
+    raise SystemExit(2)
+devices = [child for child in list(root) if child.tag == 'devices']
+if len(devices) != 1:
+    print(f'quantidade de <devices>={len(devices)}; esperado 1')
+    raise SystemExit(2)
+matches = []
+for disk in [child for child in list(devices[0]) if child.tag == 'disk' and child.get('device') == 'disk']:
+    all_sources = [child for child in list(disk) if child.tag == 'source']
+    exact_sources = [child for child in all_sources if child.get('file') == target]
+    if exact_sources:
+        if len(all_sources) != 1 or len(exact_sources) != 1:
+            print(f'fontes no disco alvo: total={len(all_sources)}, exatas={len(exact_sources)}; esperado 1/1')
+            raise SystemExit(2)
+        matches.append(disk)
+if len(matches) != 1:
+    print(f'discos device=disk com source/@file exato {target!r}: {len(matches)}; esperado 1')
+    raise SystemExit(2)
+drivers = [child for child in list(matches[0]) if child.tag == 'driver']
+if len(drivers) != 1:
+    print(f'drivers no disco alvo: {len(drivers)}; esperado 1')
+    raise SystemExit(2)
+if drivers[0].get('discard') == 'unmap':
+    print('ativo')
+    raise SystemExit(0)
+print('ausente')
+raise SystemExit(1)
+PY
+)"; then
+        DISCARD_XML_ESTADO=ativo
+        return 0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -eq 1 ] && [ "$saida" = ausente ]; then
+        DISCARD_XML_ESTADO=ausente
+        return 1
+    fi
+    DISCARD_XML_ESTADO=erro
+    DISCARD_XML_ERRO="${saida:-Falha ao analisar o disco QCOW2 alvo.}"
+    return 2
+}
+
 xml_backup() {
     # Backup único e validado do XML inativo. O caminho também fica em
     # XML_BACKUP_PATH para consumidores que precisem mostrá-lo em rollback.
@@ -2509,9 +3265,41 @@ pedir_reboot() {
 }
 
 # --- Protocolo do modo --verificar ---------------------------------------------------
-# Cada etapa implementa uma função verificar() usando v_ok/v_falta e termina
-# com v_fim: código de saída 0 = etapa concluída, 1 = pendente.
+# 0=concluído, 1=pendente, 2=indeterminado, 3=erro. A precedência é
+# erro > indeterminado > pendência, mantendo compatibilidade com etapas que
+# usam apenas v_ok/v_falta.
+STATUS_CONCLUIDO=0
+STATUS_PENDENTE=1
+STATUS_INDETERMINADO=2
+STATUS_ERRO=3
+STATUS_SENTINEL_PREFIX='__PASSTHROUGH_STATUS_V1__:'
 V_FALHAS=0
-v_ok()    { ok "$*"; }
-v_falta() { aviso "$*"; V_FALHAS=$((V_FALHAS+1)); }
-v_fim()   { if [ "$V_FALHAS" -eq 0 ]; then exit 0; else exit 1; fi; }
+V_INDETERMINADOS=0
+V_ERROS=0
+v_ok()             { ok "$*"; }
+v_falta()          { aviso "$*"; V_FALHAS=$((V_FALHAS + 1)); }
+v_indeterminado()  { aviso "Indeterminado: $*"; V_INDETERMINADOS=$((V_INDETERMINADOS + 1)); }
+v_erro()           { erro "$*"; V_ERROS=$((V_ERROS + 1)); }
+v_kernel_persistencia_falhou() {
+    case "${KERNEL_PERSISTENCIA_TIPO:-erro}" in
+        pendente) v_falta "$*" ;;
+        indeterminado) v_indeterminado "$*" ;;
+        *) v_erro "$*" ;;
+    esac
+}
+v_fim() {
+    local rc="$STATUS_CONCLUIDO"
+    if [ "$V_ERROS" -gt 0 ]; then
+        rc="$STATUS_ERRO"
+    elif [ "$V_INDETERMINADOS" -gt 0 ]; then
+        rc="$STATUS_INDETERMINADO"
+    elif [ "$V_FALHAS" -gt 0 ]; then
+        rc="$STATUS_PENDENTE"
+    fi
+    # O token é criado pelo menu para cada subprocesso. Um RC 0/1/2/3 sem esta
+    # linha final não prova que o verificador chegou deliberadamente a v_fim.
+    if [[ "${V_STATUS_TOKEN:-}" =~ ^[0-9a-f]{48}$ ]]; then
+        printf '%s%s:%s\n' "$STATUS_SENTINEL_PREFIX" "$V_STATUS_TOKEN" "$rc"
+    fi
+    exit "$rc"
+}

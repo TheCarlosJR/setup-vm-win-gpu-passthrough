@@ -10,6 +10,7 @@ PROJETO_TESTE="$TMPDIR_TESTE/projeto"
 BIN="$TMPDIR_TESTE/bin"
 mkdir -p "$PROJETO_TESTE/lib" "$PROJETO_TESTE/etapas" "$BIN"
 cp "$RAIZ/lib/common.sh" "$PROJETO_TESTE/lib/common.sh"
+cp "$RAIZ/lib/platform.sh" "$PROJETO_TESTE/lib/platform.sh"
 cp "$RAIZ/etapas/01-verificar-bios.sh" "$PROJETO_TESTE/etapas/01-verificar-bios.sh"
 
 cat > "$BIN/sudo" <<'SCRIPT'

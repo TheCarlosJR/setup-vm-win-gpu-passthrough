@@ -15,6 +15,37 @@ trap 'rm -rf -- "$TMPDIR_TESTE"' EXIT
 DIR_INV="$TMPDIR_TESTE/inventarios"
 mkdir -p "$DIR_INV"
 
+# Contenção física do workingDisk: destino final pode ainda não existir, alias
+# externo para dentro continua dependente, e filho simbólico que escapa falha
+# com estado distinto de um destino externo legítimo.
+WORKING_DISK_FIXTURE="$TMPDIR_TESTE/workingDisk"
+FORA_WORKING_DISK="$TMPDIR_TESTE/fora-working-disk"
+ALIAS_WORKING_DISK="$TMPDIR_TESTE/alias-working-disk"
+mkdir -p "$WORKING_DISK_FIXTURE" "$FORA_WORKING_DISK"
+caminho_dentro_working_disk "$WORKING_DISK_FIXTURE/backups-vm/futuro" "$WORKING_DISK_FIXTURE" \
+    || falha "filho ainda inexistente não foi reconhecido dentro do workingDisk"
+ln -s "$WORKING_DISK_FIXTURE" "$ALIAS_WORKING_DISK"
+caminho_dentro_working_disk "$ALIAS_WORKING_DISK/backups-vm" "$WORKING_DISK_FIXTURE" \
+    || falha "alias externo que resolve para dentro não armou a dependência do workingDisk"
+ln -s "$FORA_WORKING_DISK" "$WORKING_DISK_FIXTURE/escape"
+if caminho_dentro_working_disk "$WORKING_DISK_FIXTURE/escape/backups-vm" "$WORKING_DISK_FIXTURE"; then
+    falha "filho lexical que resolve para fora foi aceito"
+else
+    RC_CONTENCAO=$?
+fi
+[ "$RC_CONTENCAO" -eq 2 ] || falha "escape simbólico retornou $RC_CONTENCAO em vez de erro de contenção"
+[[ "$WORKING_DISK_CONTENCAO_ERRO" == *'resolve para fora'* ]] \
+    || falha "escape simbólico não produziu diagnóstico acionável"
+if caminho_dentro_working_disk "$FORA_WORKING_DISK/backups-vm" "$WORKING_DISK_FIXTURE"; then
+    falha "destino externo foi classificado como interno"
+else
+    RC_CONTENCAO=$?
+fi
+[ "$RC_CONTENCAO" -eq 1 ] || falha "destino externo legítimo retornou $RC_CONTENCAO"
+esperar_falha "WORKING_DISK_PATH simbólico" validar_working_disk_montado "$ALIAS_WORKING_DISK"
+[[ "$WORKING_DISK_ERRO" == *'componentes simbólicos'* ]] \
+    || falha "base simbólica não foi rejeitada antes da validação de mountpoint"
+
 SNAPSHOT=$'CPU|Architecture|x86_64\nCPU|CPU(s)|8\nCPU|On-line CPU(s) list|0-7\nCPU|Thread(s) per core|2\nCPU|Core(s) per socket|4\nCPU|Socket(s)|1\nCPU|Model name|Fixture CPU\nRAM_MIB|32768\nPCI|0000:01:00.0|0300|1234:5678\nDISK|BYTES="1073741824" MODEL="Fixture Disk" SERIAL="SER001" TYPE="disk"'
 criar_inventario() {
     local caminho="$1" snapshot="${2:-$SNAPSHOT}"
@@ -168,7 +199,8 @@ USUARIO_LINUX="antigo"
 VM_NAME="antiga"
 GPU_PCI_ID="0000:01:00.0"
 HD1_DISPENSADO="sim"
-UUID_HD2="ABC-123"
+WORKING_DISK_PATH="/mnt/workingDisk"
+WORKING_DISK_DISPENSADO=""
 CPUS_VM="2-7"
 VM_RAM_MB="8192"
 INTERFACE_FISICA="eth0"
@@ -176,9 +208,8 @@ REDE_MODO="nat"
 VM_IP_FIXO="192.168.100.2"
 TRANSFER_USER="antigo"
 AIRLOCK_DIR="/tmp/antigo"
-ISO_WINDOWS="/tmp/windows.iso"
+ISO_WINDOWS="/vm/windows.iso"
 IOMMU_GROUP_GPU="7"
-DOCS4_MONTAGEM="/mnt/preservado"
 QCOW2_PATH="/vm/preservado.qcow2"
 QCOW2_TAMANHO="300G"
 REDE_BRIDGE="br9"
@@ -199,7 +230,7 @@ carregar_conf
 CHAVES_RESET_ESPERADAS=(
     USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_AUDIO_PCI_ID
     GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID IOMMU_GROUP_GPU DM_SERVICE
-    NVME_DEVICE UUID_HD2 HD2_DISCO_PAI HD2_DISPENSADO DOCS4_DISPENSADO
+    NVME_DEVICE WORKING_DISK_PATH WORKING_DISK_DISPENSADO
     HD1_BY_ID_PATH HD1_DISPENSADO CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS
     VM_RAM_MB HUGEPAGES_1G INTERFACE_FISICA REDE_MODO VM_IP_FIXO IP_FIXO_HOST
     REDE_NAT_CIDR TRANSFER_USER AIRLOCK_DIR ISO_WINDOWS ISO_VIRTIO
@@ -208,12 +239,12 @@ for chave in "${CHAVES_RESET_ESPERADAS[@]}"; do
     grep -q "^${chave}=\"\"$" "$CONF_ARQUIVO" || falha "$chave não participou do reset atômico"
     [ -z "${!chave:-}" ] || falha "$chave não foi limpa"
 done
-for chave in USUARIO_LINUX VM_NAME GPU_PCI_ID HD1_DISPENSADO UUID_HD2 CPUS_VM VM_RAM_MB \
-             INTERFACE_FISICA REDE_MODO VM_IP_FIXO TRANSFER_USER AIRLOCK_DIR ISO_WINDOWS IOMMU_GROUP_GPU; do
+for chave in USUARIO_LINUX VM_NAME GPU_PCI_ID HD1_DISPENSADO WORKING_DISK_PATH \
+             WORKING_DISK_DISPENSADO CPUS_VM VM_RAM_MB INTERFACE_FISICA REDE_MODO \
+             VM_IP_FIXO TRANSFER_USER AIRLOCK_DIR ISO_WINDOWS IOMMU_GROUP_GPU; do
     [ -z "${!chave:-}" ] || falha "$chave não foi limpa"
 done
-[ "$DOCS4_MONTAGEM" = /mnt/preservado ] \
-    && [ "$QCOW2_PATH" = /vm/preservado.qcow2 ] \
+[ "$QCOW2_PATH" = /vm/preservado.qcow2 ] \
     && [ "$QCOW2_TAMANHO" = 300G ] \
     && [ "$REDE_BRIDGE" = br9 ] \
     && [ "$REDE_LIBVIRT" = rede-preservada ] \

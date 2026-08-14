@@ -49,6 +49,7 @@ RENDER="$TMPDIR_TESTE/render"
 BIN="$TMPDIR_TESTE/bin"
 mkdir -p "$PROJETO_TESTE/lib" "$PROJETO_TESTE/etapas" "$RENDER" "$BIN" "$TMPDIR_TESTE/state"
 cp "$RAIZ/lib/common.sh" "$PROJETO_TESTE/lib/common.sh"
+cp "$RAIZ/lib/platform.sh" "$PROJETO_TESTE/lib/platform.sh"
 cp "$RAIZ/etapas/50-hooks-gpu-hd1.sh" "$PROJETO_TESTE/etapas/50-hooks-gpu-hd1.sh"
 cat > "$PROJETO_TESTE/passthrough.conf" <<'CONF'
 VM_NAME="fixture"

@@ -12,9 +12,10 @@
 #     roda) e obriga a escolher quando existe mais de uma.
 #   - CPU: pelo menos 1 núcleo físico fica sempre com o host.
 #   - RAM: teto = total menos a reserva do host (25%, entre 4 e 8 GiB).
-#   - Disco da VM: o disco da RAIZ do Linux e o disco do HD2 nunca entram na
-#     lista de candidatos; discos montados no host são recusados; "nenhum" é
-#     uma escolha válida (a VM fica só com o QCOW2).
+#   - Disco da VM: o disco da RAIZ do Linux e qualquer disco montado/em uso no
+#     host nunca entram como candidatos; o workingDisk é apenas um caminho
+#     externo e não é persistido como dispositivo físico; "nenhum" é uma
+#     escolha válida (a VM fica só com o QCOW2).
 #   - Toda entrada numérica é validada e reperguntada em vez de derrubar o
 #     script.
 #
@@ -29,6 +30,11 @@ carregar_conf
 
 verificar() {
     local inventario
+    if plataforma_carregar; then
+        v_ok "Plataforma suportada: $PLATAFORMA_PERFIL ${PLATAFORMA_VERSION_ID:-}."
+    else
+        v_erro "$PLATAFORMA_ERRO"
+    fi
     if resolver_ultimo_inventario >/dev/null && inventario="$INVENTARIO_RESOLVIDO" \
        && validar_inventario_principal "$inventario"; then
         v_ok "Inventário de referência válido: $inventario"
@@ -38,7 +44,25 @@ verificar() {
     [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
     local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0 topologia ram_max
     local cpu_completa=1 memoria_completa=1
-    for var in USUARIO_LINUX VM_NAME BOOTLOADER GPU_PCI_ID GPU_VENDOR_DEVICE_ID \
+    if [ -z "${USUARIO_LINUX:-}" ]; then
+        v_falta "USUARIO_LINUX ainda não definido."
+    elif validar_usuario_linux "$USUARIO_LINUX"; then
+        if [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ]; then
+            v_erro "USUARIO_LINUX='$USUARIO_LINUX' é válido, mas difere do operador efetivo '$USUARIO_OPERADOR'; a execução exigirá confirmação reforçada."
+        else
+            v_ok "USUARIO_LINUX=$USUARIO_LINUX (uid=$USUARIO_VALIDADO_UID gid=$USUARIO_VALIDADO_GID home=$USUARIO_VALIDADO_HOME)."
+        fi
+    else
+        v_erro "$USUARIO_VALIDACAO_ERRO"
+    fi
+    if [ -z "${BOOTLOADER:-}" ]; then
+        v_falta "BOOTLOADER ainda não definido."
+    elif validar_bootloader_configurado; then
+        v_ok "BOOTLOADER=$BOOTLOADER coincide com o boot efetivo."
+    else
+        v_erro "$BOOTLOADER_VALIDACAO_ERRO"
+    fi
+    for var in VM_NAME GPU_PCI_ID GPU_VENDOR_DEVICE_ID \
                CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS \
                VM_RAM_MB HUGEPAGES_1G DM_SERVICE; do
         if [ -n "${!var:-}" ]; then
@@ -110,30 +134,25 @@ verificar() {
     else
         v_ok "GPU sem função de áudio HDMI em passthrough (escolha registrada)."
     fi
-    # HD2 de documentos: opcional, mas a decisão precisa ser explícita e
-    # relacionalmente consistente.
-    if [ -n "${UUID_HD2:-}" ] && [ "${HD2_DISPENSADO:-}" = "sim" ]; then
-        v_falta "Configuração contraditória: UUID_HD2 definido e HD2_DISPENSADO=sim."
-    elif [ -n "${UUID_HD2:-}" ]; then
-        if [ -n "${HD2_DISCO_PAI:-}" ]; then
-            v_ok "HD2 de documentos: UUID=$UUID_HD2; disco pai=$HD2_DISCO_PAI."
+    # workingDisk: caminho opcional, já montado externamente pelo operador.
+    if [ -n "${WORKING_DISK_PATH:-}" ] && [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
+        v_falta "Configuração contraditória: WORKING_DISK_PATH definido e WORKING_DISK_DISPENSADO=sim."
+    elif [ -n "${WORKING_DISK_PATH:-}" ]; then
+        if validar_working_disk_montado "$WORKING_DISK_PATH"; then
+            v_ok "workingDisk ativo em $WORKING_DISK_PATH (source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE)."
         else
-            v_falta "UUID_HD2 definido sem HD2_DISCO_PAI; rode --redetectar."
+            v_falta "$WORKING_DISK_ERRO"
         fi
-    elif [ "${HD2_DISPENSADO:-}" = "sim" ]; then
-        if [ -z "${HD2_DISCO_PAI:-}" ]; then
-            v_ok "Sem HD2 de documentos (escolha registrada)."
-        else
-            v_falta "HD2 dispensado, mas HD2_DISCO_PAI ainda está definido."
-        fi
+    elif [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
+        v_ok "workingDisk dispensado explicitamente."
     else
-        v_falta "HD2 de documentos ainda não decidido (UUID ou opção 0)."
+        v_falta "workingDisk ainda não decidido (caminho absoluto ou opção 0)."
     fi
     # Disco físico da VM: opcional por decisão do usuário.
     if [ -n "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
         v_falta "Configuração contraditória: HD1_BY_ID_PATH definido e HD1_DISPENSADO=sim."
     elif [ -n "${HD1_BY_ID_PATH:-}" ]; then
-        if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" "${HD2_DISCO_PAI:-}"; then
+        if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}"; then
             v_ok "HD1 válido, livre e exclusivo da VM: $HD1_BY_ID_PATH -> $DISCO_VM_ALVO."
         else
             v_falta "HD1 inválido ou inseguro no estado atual: $DISCO_VM_ERRO"
@@ -153,9 +172,10 @@ MODO_EXECUCAO="$(modo_execucao_etapa02 "${1:-}")" \
 # retomada implícita de escolhas administradas por esta etapa.
 REDETECTAR=1
 
+exigir_plataforma_suportada
 exigir_nao_root
 exigir_sudo
-exigir_comando lscpu lspci lsblk ip awk sed findmnt
+exigir_comando lscpu lspci lsblk ip awk sed findmnt mountpoint
 
 if ! resolver_ultimo_inventario >/dev/null; then
     falhar "$INVENTARIO_ERRO Execute primeiro a opção 1 (etapa 00)."
@@ -169,6 +189,25 @@ if ! comparar_inventario_com_hardware "$INVENTARIO_USADO"; then
     falhar "O passthrough.conf foi preservado. Execute novamente a opção 1 antes de reconfigurar."
 fi
 info "Inventário de hardware utilizado: $INVENTARIO_USADO"
+
+# Reconciliar o valor antigo antes do reset evita que uma migração de backend
+# seja silenciosa. A confirmação vem antes de qualquer escrita; o backup
+# restrito é criado imediatamente depois por backup_e_resetar_config_etapa02.
+BOOTLOADER_ANTIGO="${BOOTLOADER:-}"
+BL_EFETIVO_INICIAL="$(detectar_bootloader)"
+case "$BL_EFETIVO_INICIAL" in
+    grub|kernelstub) ;;
+    *) falhar "Bootloader efetivo não pôde ser identificado sem ambiguidade; passthrough.conf foi preservado." ;;
+esac
+plataforma_boot_backend_suportado "$BL_EFETIVO_INICIAL" \
+    || falhar "Bootloader '$BL_EFETIVO_INICIAL' não é suportado pelo perfil $PLATAFORMA_PERFIL."
+if [ -n "$BOOTLOADER_ANTIGO" ] && [ "$BOOTLOADER_ANTIGO" != "$BL_EFETIVO_INICIAL" ]; then
+    erro "Divergência detectada: passthrough.conf registra BOOTLOADER='$BOOTLOADER_ANTIGO', mas o boot efetivo é '$BL_EFETIVO_INICIAL'."
+    aviso "A configuração atual será preservada em backup 0600 antes de gravar o backend efetivo."
+    confirmar_digitando MIGRAR-BOOTLOADER \
+        "Confirmar conscientemente a migração de '$BOOTLOADER_ANTIGO' para '$BL_EFETIVO_INICIAL'?" \
+        || falhar "Migração de bootloader cancelada; passthrough.conf não foi alterado."
+fi
 
 # ja_definido permanece como estrutura dos blocos, mas após o reset sempre
 # retorna falso para as escolhas desta etapa.
@@ -198,16 +237,19 @@ info "O inventário recente acima é a referência automática; as validações 
 # ----------------------------------------------------------------------------
 titulo "1/8 Identidade"
 if ja_definido USUARIO_LINUX; then
-    info "USUARIO_LINUX já definido: $USUARIO_LINUX"
+    RESPOSTA="$USUARIO_LINUX"
+    info "USUARIO_LINUX já definido: $RESPOSTA"
 else
     # $USER pode não estar exportada (sessões não interativas): id -un é a fonte
     # confiável, e com set -u a forma direta abortaria o script.
     RESPOSTA="$(perguntar 'Usuário Linux principal' "${USER:-$(id -un)}")"
-    [ -n "$RESPOSTA" ] || falhar "Nome de usuário vazio."
-    salvar_conf USUARIO_LINUX "$RESPOSTA"
 fi
-getent passwd "$USUARIO_LINUX" >/dev/null \
-    || falhar "Usuário '$USUARIO_LINUX' não existe neste sistema. Rode com --redetectar e corrija."
+[ -n "$RESPOSTA" ] || falhar "Nome de usuário vazio."
+validar_usuario_linux "$RESPOSTA" || falhar "$USUARIO_VALIDACAO_ERRO"
+confirmar_usuario_linux_diferente "$RESPOSTA" \
+    || falhar "Conta diferente do operador não foi autorizada."
+salvar_conf USUARIO_LINUX "$RESPOSTA"
+ok "Conta validada: $USUARIO_LINUX (uid=$USUARIO_VALIDADO_UID gid=$USUARIO_VALIDADO_GID home=$USUARIO_VALIDADO_HOME; operador=$USUARIO_OPERADOR)."
 if ja_definido VM_NAME; then
     info "VM_NAME já definido: $VM_NAME"
 else
@@ -219,20 +261,29 @@ fi
 # ----------------------------------------------------------------------------
 titulo "2/8 Bootloader (Capítulo 15)"
 if ja_definido BOOTLOADER; then
-    info "BOOTLOADER já definido: $BOOTLOADER"
+    BL="$BOOTLOADER"
 else
-    BL="$(detectar_bootloader)"
-    if [ "$BL" = "desconhecido" ]; then
-        erro "Não identifiquei kernelstub nem GRUB. Diagnóstico:"
+    BL="$BL_EFETIVO_INICIAL"
+fi
+case "$BL" in
+    grub|kernelstub) ;;
+    *)
+        erro "Não identifiquei com segurança kernelstub nem GRUB. Diagnóstico:"
         echo "  - modo de firmware: $([ -d /sys/firmware/efi ] && echo UEFI || echo Legacy/BIOS)"
         echo "  - kernelstub: $(command -v kernelstub || echo 'não encontrado')"
         echo "  - /boot/efi/loader/entries: $(ls /boot/efi/loader/entries/ 2>/dev/null || echo 'não encontrado')"
         echo "  - /boot/grub/grub.cfg: $([ -f /boot/grub/grub.cfg ] && echo existe || echo 'não encontrado')"
-        falhar "Sem bootloader identificado não há como aplicar parâmetros de kernel (etapa 30)."
-    fi
-    ok "Bootloader detectado: $BL"
-    salvar_conf BOOTLOADER "$BL"
-fi
+        falhar "Sem bootloader efetivo não há como aplicar parâmetros de kernel (etapa 30)."
+        ;;
+esac
+[ "$BL" = "$(detectar_bootloader)" ] \
+    || falhar "O bootloader mudou durante a detecção; configuração não será gravada."
+plataforma_boot_backend_suportado "$BL" \
+    || falhar "Bootloader '$BL' não é suportado pelo perfil $PLATAFORMA_PERFIL."
+salvar_conf BOOTLOADER "$BL"
+validar_bootloader_configurado \
+    || falhar "A pós-condição de bootloader falhou: $BOOTLOADER_VALIDACAO_ERRO"
+ok "Bootloader efetivo reconciliado e salvo: $BOOTLOADER"
 
 # ----------------------------------------------------------------------------
 # 3. GPU (Capítulo 16)
@@ -368,96 +419,46 @@ else
     fi
 fi
 
-# 5b. HD2 de documentos do Linux (opcional) - identificado por UUID
-if ja_definido UUID_HD2; then
-    [ "${HD2_DISPENSADO:-}" != "sim" ] \
-        || falhar "Configuração contraditória: UUID_HD2 definido e HD2_DISPENSADO=sim. Rode --redetectar."
-    DEV_HD2_ATUAL="$({ sudo blkid -t "UUID=$UUID_HD2" -o device 2>/dev/null || true; } | head -n1)"
-    [ -n "$DEV_HD2_ATUAL" ] && [ -b "$DEV_HD2_ATUAL" ] \
-        || falhar "O UUID persistido do HD2 ($UUID_HD2) não resolve para uma partição atual. Rode --redetectar."
-    HD2_PAI_ATUAL="$(disco_de "$DEV_HD2_ATUAL" 2>/dev/null || true)"
-    [ -n "$HD2_PAI_ATUAL" ] \
-        || falhar "Não foi possível identificar o disco pai atual de $DEV_HD2_ATUAL."
-    HD1_ATUAL_ALVO="$(readlink -f -- "${HD1_BY_ID_PATH:-}" 2>/dev/null || true)"
-    if [ -n "$HD1_ATUAL_ALVO" ] && [ "$HD1_ATUAL_ALVO" = "$HD2_PAI_ATUAL" ]; then
-        aviso "O HD2 atual coincide com o HD1 anteriormente salvo; a decisão insegura do HD1 será limpa."
-        salvar_conf_lote HD2_DISCO_PAI "$HD2_PAI_ATUAL" HD1_BY_ID_PATH "" HD1_DISPENSADO ""
-    elif [ "${HD2_DISCO_PAI:-}" != "$HD2_PAI_ATUAL" ]; then
-        aviso "O nome do disco pai do HD2 mudou: ${HD2_DISCO_PAI:-não registrado} -> $HD2_PAI_ATUAL."
-        salvar_conf HD2_DISCO_PAI "$HD2_PAI_ATUAL"
-    fi
-    info "HD2 de documentos já definido: $DEV_HD2_ATUAL (UUID=$UUID_HD2; pai=$HD2_DISCO_PAI)"
-elif [ "$REDETECTAR" -eq 0 ] && [ "${HD2_DISPENSADO:-}" = "sim" ]; then
-    info "Sem HD2/Docs4 do host (dispensa salva; use --redetectar para rever)."
-else
-    titulo "HD2/Docs4 do host (partição NTFS opcional; não vai para o Windows)"
-    cat <<'EXPLICA_HD2'
-Este primeiro seletor registra, opcionalmente, uma PARTIÇÃO NTFS usada pelo host
-como Docs4 em /mnt/docs4. Ela não será entregue ao Windows; o seletor do disco
-físico adicional da VM aparece logo depois.
+# 5b. workingDisk opcional, já montado externamente pelo operador
+# O projeto registra somente o caminho do mountpoint; não identifica nem
+# persiste o dispositivo físico subjacente.
+titulo "workingDisk do host (mountpoint externo opcional)"
+cat <<'EXPLICA_WORKING_DISK'
+O workingDisk é um caminho absoluto que o operador já montou por meios externos.
+Este projeto apenas valida que o diretório existe e é exatamente um mountpoint
+ativo; nunca cria o caminho-base, monta, formata, descobre UUID ou grava sua
+montagem no fstab.
 
-Esta escolha apenas registra o UUID e o disco pai: nada é formatado, montado ou
-migrado agora. A etapa 14 fará a montagem, a migração e os binds de Docs4.
-Somente partições NTFS aparecem porque essa etapa usa ntfs-3g; uma partição ext4
-como /dev/sdb1 não é candidata neste seletor.
-
-Digite 0 para dispensar HD2/Docs4. A dispensa fica salva e será reutilizada até
-você executar esta etapa com --redetectar.
-EXPLICA_HD2
-    mapfile -t NTFS_DEVS < <({ sudo blkid -t TYPE=ntfs -o device 2>/dev/null || true; \
-                               sudo blkid -t TYPE=ntfs3 -o device 2>/dev/null || true; } | sort -u)
-    DESCRICOES=()
-    for d in "${NTFS_DEVS[@]}"; do
-        TAM="$(lsblk -no SIZE "$d" 2>/dev/null | head -n1 | tr -d ' ')"
-        DISCO_PAI="$(disco_de "$d" 2>/dev/null || echo '?')"
-        MODELO="$(lsblk -dno MODEL "$DISCO_PAI" 2>/dev/null | head -n1 | sed 's/ *$//')"
-        UUID_CANDIDATO="$(sudo blkid -s UUID -o value "$d" 2>/dev/null || true)"
-        MARCA=""
-        [ -n "$DISCO_RAIZ" ] && [ "$DISCO_PAI" = "$DISCO_RAIZ" ] && MARCA="  <-- MESMO DISCO DO SISTEMA"
-        DESCRICOES+=("$d  (${TAM:-?}; disco $DISCO_PAI ${MODELO:-?})  UUID=${UUID_CANDIDATO:-?}${MARCA}")
-    done
-    if [ "${#DESCRICOES[@]}" -eq 0 ]; then
-        aviso "Nenhuma partição NTFS foi encontrada; a opção 0 continua disponível."
-    else
-        echo "Partições NTFS candidatas ao HD2 de documentos:"
+Digite 0 para dispensar o workingDisk. A dispensa explícita será salva e os
+consumidores que precisarem de armazenamento exigirão um caminho alternativo.
+EXPLICA_WORKING_DISK
+while :; do
+    CAMINHO="$(perguntar 'Caminho absoluto do workingDisk já montado (ou 0 para dispensar)' '/mnt/workingDisk')"
+    if [ "$CAMINHO" = 0 ]; then
+        salvar_conf_lote WORKING_DISK_PATH "" WORKING_DISK_DISPENSADO "sim"
+        info "workingDisk dispensado explicitamente; nenhum mountpoint foi criado ou alterado."
+        break
     fi
-    aviso "Para escolher o disco físico da VM, use 0 aqui e continue para o próximo seletor."
-    IDX="$(escolher_da_lista 'HD2 de documentos (número, ou 0 para não usar)' sim "${DESCRICOES[@]}")"
-    if [ "$IDX" -eq 0 ]; then
-        info "HD2/Docs4 dispensado; a decisão fica salva até você usar --redetectar."
-        info "Os arquivos permanecem nos caminhos atuais do host; nada foi formatado, montado ou migrado."
-        aviso "O airlock padrão /mnt/docs4/airlock depende de /mnt/docs4; informe outro AIRLOCK_DIR na seção 8."
-        salvar_conf_lote \
-            UUID_HD2 "" HD2_DISCO_PAI "" HD2_DISPENSADO "sim" DOCS4_DISPENSADO "sim"
-    else
-        DEV_HD2="${NTFS_DEVS[$((IDX - 1))]}"
-        UUID_ESCOLHIDO="$(sudo blkid -s UUID -o value "$DEV_HD2")"
-        [ -n "$UUID_ESCOLHIDO" ] || falhar "Não consegui ler o UUID de $DEV_HD2."
-        HD2_DISCO_PAI="$(disco_de "$DEV_HD2" || echo '')"
-        [ -n "$HD2_DISCO_PAI" ] || falhar "Não consegui identificar o disco pai de $DEV_HD2."
-        if [ -n "$DISCO_RAIZ" ] && [ "$HD2_DISCO_PAI" = "$DISCO_RAIZ" ]; then
-            aviso "Essa partição está no MESMO disco do sistema: você perde a separação física"
-            aviso "entre sistema e documentos (uma falha do disco leva os dois)."
-            confirmar "Seguir mesmo assim?" \
-                || cancelar_etapa "Escolha do HD2 cancelada; nenhuma decisão de armazenamento foi salva."
-        fi
-        confirmar "Confirmar HD2 de documentos = $DEV_HD2 (UUID=$UUID_ESCOLHIDO)?" \
-            || cancelar_etapa "Escolha do HD2 cancelada; nenhuma decisão de armazenamento foi salva."
-        HD1_ANTIGO_ALVO="$(readlink -f -- "${HD1_BY_ID_PATH:-}" 2>/dev/null || true)"
-        if [ -n "$HD1_ANTIGO_ALVO" ] && [ "$HD1_ANTIGO_ALVO" = "$HD2_DISCO_PAI" ]; then
-            aviso "O novo HD2 ocupa o mesmo disco do HD1 anteriormente salvo."
-            aviso "A decisão antiga do HD1 será invalidada no MESMO update para impedir sobreposição."
-            salvar_conf_lote \
-                UUID_HD2 "$UUID_ESCOLHIDO" HD2_DISCO_PAI "$HD2_DISCO_PAI" \
-                HD2_DISPENSADO "" DOCS4_DISPENSADO "" \
-                HD1_BY_ID_PATH "" HD1_DISPENSADO ""
-        else
-            salvar_conf_lote \
-                UUID_HD2 "$UUID_ESCOLHIDO" HD2_DISCO_PAI "$HD2_DISCO_PAI" \
-                HD2_DISPENSADO "" DOCS4_DISPENSADO ""
-        fi
+    if ! caminho_absoluto_seguro "$CAMINHO"; then
+        aviso "Caminho inseguro. Informe um caminho absoluto sem componentes relativos ou metacaracteres."
+        continue
     fi
-fi
+    if [ ! -d "$CAMINHO" ]; then
+        aviso "Diretório inexistente: $CAMINHO. Monte-o externamente antes de continuar."
+        continue
+    fi
+    if ! validar_working_disk_montado "$CAMINHO"; then
+        aviso "$WORKING_DISK_ERRO"
+        continue
+    fi
+    WORKING_DISK="$CAMINHO"
+    info "workingDisk confirmado: $WORKING_DISK"
+    info "Diagnóstico: source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE"
+    confirmar "Registrar esse mountpoint externo como workingDisk?" \
+        || cancelar_etapa "Escolha do workingDisk cancelada; nenhuma decisão de armazenamento foi salva."
+    salvar_conf_lote WORKING_DISK_PATH "$WORKING_DISK" WORKING_DISK_DISPENSADO ""
+    break
+done
 
 # 5c. Disco físico inteiro e exclusivo da VM (HD1) - opcional
 if ja_definido HD1_BY_ID_PATH; then
@@ -492,7 +493,6 @@ EXPLICA_HD1
         [ -b "$ALVO" ] || continue
         [ "$(lsblk -dno TYPE "$ALVO" 2>/dev/null | tr -d ' ')" = "disk" ] || continue
         [ -n "$DISCO_RAIZ" ] && [ "$ALVO" = "$DISCO_RAIZ" ] && continue
-        [ -n "${HD2_DISCO_PAI:-}" ] && [ "$ALVO" = "$HD2_DISCO_PAI" ] && continue
         # Evita listar o mesmo disco várias vezes (ata-, nvme-, scsi-, wwn-...).
         JA=0
         for c in "${CANDIDATOS[@]}"; do
@@ -541,10 +541,6 @@ EXPLICA_HD1
         SISTEMA_REAL="$(readlink -f -- "${NVME_DEVICE:-}" 2>/dev/null || true)"
         [ -n "$SISTEMA_REAL" ] && [ "$HD1_ALVO" = "$SISTEMA_REAL" ] \
             && falhar "O caminho escolhido aponta para o disco do sistema. Abortado."
-        HD2_REAL="$(readlink -f -- "${HD2_DISCO_PAI:-}" 2>/dev/null || true)"
-        if [ -n "$HD2_REAL" ] && [ "$HD1_ALVO" = "$HD2_REAL" ]; then
-            falhar "O caminho escolhido aponta para o disco do HD2 de documentos. Abortado."
-        fi
         if disco_em_uso_pelo_host "$HD1_ALVO"; then
             erro "Esse disco tem partição montada ou em uso no host agora:"
             lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS "$HD1_ALVO"
@@ -823,7 +819,7 @@ exigir_config_rede
 ok "Rede selecionada: modo=$REDE_MODO, uplink=$INTERFACE_FISICA ($TIPO_UPLINK)."
 
 # Transferência de arquivos (airlock): local configurável
-DOCS4="${DOCS4_MONTAGEM:-/mnt/docs4}"
+WORKING_DISK="${WORKING_DISK_PATH:-}"
 if ! ja_definido TRANSFER_USER; then
     salvar_conf TRANSFER_USER "$(perguntar 'Usuário de transferência do airlock' 'vmtransfer')"
 fi
@@ -833,12 +829,16 @@ aviso "Essa é uma política recomendada, não uma garantia técnica de que outr
 if ja_definido AIRLOCK_DIR; then
     info "AIRLOCK_DIR já definido: $AIRLOCK_DIR"
 else
-    info "O padrão /mnt/docs4/airlock depende de HD2/Docs4; se você o dispensou, informe outro caminho."
-    CAMINHO="$(perguntar 'Pasta de trânsito do airlock' "$DOCS4/airlock")"
-    case "$CAMINHO" in
-        /*) : ;;
-        *)  falhar "Informe um caminho absoluto (começando com /)." ;;
-    esac
+    if [ -n "$WORKING_DISK" ]; then
+        AIRLOCK_PADRAO="$WORKING_DISK/airlock"
+        info "O padrão do airlock fica dentro do workingDisk já validado: $AIRLOCK_PADRAO"
+    else
+        AIRLOCK_PADRAO="/var/lib/vm-passthrough/airlock"
+        info "Sem workingDisk, o padrão do airlock usa armazenamento local: $AIRLOCK_PADRAO"
+    fi
+    CAMINHO="$(perguntar 'Pasta de trânsito do airlock' "$AIRLOCK_PADRAO")"
+    caminho_absoluto_seguro "$CAMINHO" \
+        || falhar "AIRLOCK_DIR precisa ser um caminho absoluto seguro."
     salvar_conf AIRLOCK_DIR "$CAMINHO"
 fi
 

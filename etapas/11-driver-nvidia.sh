@@ -2,15 +2,19 @@
 # ============================================================================
 # etapas/11-driver-nvidia.sh - Capítulo 8: Drivers NVIDIA no Host
 # ============================================================================
-# Garante o driver proprietário NVIDIA funcionando no Pop!_OS. Este é o
-# estado "de repouso" da GPU: ela volta para este driver sempre que a VM
-# desliga (hooks da etapa 50).
+# Garante o driver proprietário NVIDIA funcionando no Ubuntu/Pop!_OS. Este é
+# o estado de repouso da GPU enquanto a VM está desligada.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 verificar() {
+    if plataforma_carregar; then
+        v_ok "Estratégia NVIDIA do perfil $PLATAFORMA_PERFIL: $PLATAFORMA_NVIDIA_ESTRATEGIA."
+    else
+        v_erro "$PLATAFORMA_ERRO"
+    fi
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
         v_ok "nvidia-smi funcional: $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -n1)"
     else
@@ -25,10 +29,14 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+exigir_plataforma_suportada
+[ "$PLATAFORMA_GERENCIADOR_PACOTES" = apt ] \
+    || falhar "A etapa 11 requer o perfil APT de Ubuntu/Pop!_OS."
 exigir_nao_root
 
 titulo "Antes de continuar"
 info "Finalidade: manter a GPU no driver proprietário NVIDIA enquanto a VM estiver desligada."
+info "Plataforma: $PLATAFORMA_PERFIL; estratégia selecionada por ID: $PLATAFORMA_NVIDIA_ESTRATEGIA."
 info "Pré-requisitos: etapa 10 concluída, GPU NVIDIA presente, rede/repositórios funcionais e sudo."
 info "Alterações: se nvidia-smi já funciona, nenhuma; caso contrário, o APT é atualizado e pacotes NVIDIA são instalados."
 info "Recomendação: mantenha acesso a TTY ou mídia de recuperação e não interrompa a instalação."
@@ -48,26 +56,43 @@ fi
 info "nvidia-smi ausente ou não funcional. Consultando os repositórios..."
 sudo apt update
 
-# Usa uma única estratégia: o meta-pacote do Pop!_OS tem precedência. Em
-# Ubuntu, instala somente o driver que ubuntu-drivers marcar como recomendado.
 PACOTE=""
-if apt-cache show system76-driver-nvidia >/dev/null 2>&1; then
-    PACOTE="system76-driver-nvidia"
-    info "Pacote do Pop!_OS disponível: system76-driver-nvidia"
-else
-    command -v ubuntu-drivers >/dev/null 2>&1 \
-        || falhar "'ubuntu-drivers' não está disponível e system76-driver-nvidia não existe nos repositórios. Instale ubuntu-drivers-common ou use a ferramenta recomendada pela sua distribuição."
-    PACOTE="$(ubuntu-drivers devices 2>/dev/null | awk '/driver[[:space:]]*:/ && /recommended/ {print $3; exit}')"
-    [ -n "$PACOTE" ] && apt-cache show "$PACOTE" >/dev/null 2>&1 \
-        || falhar "Nenhum driver NVIDIA recomendado foi informado por ubuntu-drivers. Revise os repositórios e o hardware antes de continuar."
-    info "Driver recomendado por ubuntu-drivers: $PACOTE"
-fi
+case "$PLATAFORMA_NVIDIA_ESTRATEGIA" in
+    system76)
+        # A estratégia System76 é permitida somente quando ID=pop. A mera
+        # visibilidade do pacote num Ubuntu nunca muda esta decisão.
+        [ "$PLATAFORMA_ID" = pop ] \
+            || falhar "Estratégia System76 recusada fora do Pop!_OS."
+        apt-cache show system76-driver-nvidia >/dev/null 2>&1 \
+            || falhar "O perfil Pop!_OS requer system76-driver-nvidia, mas o pacote não está disponível."
+        PACOTE=system76-driver-nvidia
+        info "Pop!_OS detectado: usando o meta-pacote oficial System76."
+        ;;
+    ubuntu-drivers)
+        [ "$PLATAFORMA_ID" = ubuntu ] \
+            || falhar "Estratégia ubuntu-drivers recusada fora do Ubuntu."
+        if ! command -v ubuntu-drivers >/dev/null 2>&1; then
+            info "Instalando ubuntu-drivers-common para consultar a recomendação oficial do Ubuntu."
+            sudo apt install -y ubuntu-drivers-common
+        fi
+        PACOTE="$(LC_ALL=C ubuntu-drivers devices 2>/dev/null | awk '
+            /^[[:space:]]*driver[[:space:]]*:/ && /recommended/ {
+                for (i = 1; i <= NF; i++) if ($i == ":" && (i + 1) <= NF) { print $(i + 1); exit }
+            }
+        ')"
+        [ -n "$PACOTE" ] && apt-cache show "$PACOTE" >/dev/null 2>&1 \
+            || falhar "Nenhum driver NVIDIA recomendado foi informado por ubuntu-drivers. Revise repositórios e hardware."
+        info "Ubuntu detectado; driver recomendado por ubuntu-drivers: $PACOTE"
+        ;;
+    *) falhar "Estratégia NVIDIA desconhecida no perfil: $PLATAFORMA_NVIDIA_ESTRATEGIA" ;;
+esac
 
 echo
 info "Instalando: $PACOTE"
 if ! sudo apt install -y "$PACOTE"; then
     erro "A instalação falhou."
-    info "Tente: sudo ubuntu-drivers install"
+    [ "$PLATAFORMA_NVIDIA_ESTRATEGIA" != ubuntu-drivers ] \
+        || info "Após corrigir repositórios, a alternativa oficial é: sudo ubuntu-drivers install"
     falhar "Driver não instalado; sem ele o passthrough dinâmico (etapa 50) não funciona."
 fi
 

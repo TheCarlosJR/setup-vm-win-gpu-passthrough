@@ -14,10 +14,20 @@ rejeitar_texto() {
 }
 
 bash -n "$RAIZ/etapas/11-driver-nvidia.sh" "$RAIZ/etapas/12-pacotes-base.sh" \
-    "$RAIZ/etapas/14-docs4.sh" "$RAIZ/etapas/61-airlock.sh" \
-    "$RAIZ/util/snapshot-vm.sh" "$RAIZ/util/atualizar-host.sh" "$RAIZ/util/backup-vm.sh"
+    "$RAIZ/etapas/14-working-disk.sh" "$RAIZ/etapas/61-airlock.sh" \
+    "$RAIZ/etapas/70-trim-discard.sh" "$RAIZ/util/snapshot-vm.sh" \
+    "$RAIZ/util/atualizar-host.sh" "$RAIZ/util/backup-vm.sh"
 
-exigir_texto etapas/14-docs4.sh 'rsync -a --checksum --itemize-changes --dry-run'
+exigir_texto etapas/14-working-disk.sh 'validar_working_disk_montado'
+for texto_proibido in sudo mkdir fstab rsync xdg-user-dir; do
+    rejeitar_texto etapas/14-working-disk.sh "$texto_proibido"
+done
+if grep -Eq -- '(^|[;&|[:space:]])mount([[:space:]]|$)' "$RAIZ/etapas/14-working-disk.sh"; then
+    falha 'etapas/14-working-disk.sh ainda executa mount'
+fi
+if grep -Eq -- 'find[[:space:]].*-delete' "$RAIZ/etapas/14-working-disk.sh"; then
+    falha 'etapas/14-working-disk.sh ainda contém remoção via find -delete'
+fi
 exigir_texto util/backup-vm.sh 'qemu-img check'
 exigir_texto util/backup-vm.sh 'backing-filename'
 exigir_texto util/snapshot-vm.sh 'vm_desligada "$VM_NAME" || falhar'
@@ -26,9 +36,13 @@ rejeitar_texto util/snapshot-vm.sh '--disk-only'
 exigir_texto util/atualizar-host.sh 'CONTINUAR SEM SNAPSHOT'
 exigir_texto util/atualizar-host.sh 'util/snapshot-vm.sh'
 rejeitar_texto util/atualizar-host.sh 'snapshot-create-as'
-exigir_texto etapas/12-pacotes-base.sh 'rsync)'
+exigir_texto etapas/12-pacotes-base.sh 'acl)'
 exigir_texto etapas/11-driver-nvidia.sh 'ubuntu-drivers devices'
 exigir_texto etapas/61-airlock.sh 'ssh-keygen -l -f'
 exigir_texto etapas/61-airlock.sh 'airlock_rollback()'
+exigir_texto etapas/61-airlock.sh 'classificar_airlock_working_disk'
+exigir_texto etapas/61-airlock.sh 'readlink -m -- "$AIRLOCK_TRANSITO"'
+exigir_texto etapas/70-trim-discard.sh 'classificar_destino_backups'
+exigir_texto util/backup-vm.sh 'classificar_destino_backup "$alvo"'
 
 echo "AUDIT_SAFETY_TESTS_OK"

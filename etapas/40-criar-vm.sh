@@ -16,21 +16,189 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
-
-APPARMOR_LOCAL="/etc/apparmor.d/local/abstractions/libvirt-qemu"
+VM_STORAGE_GROUP="${VM_STORAGE_GROUP:-vm-passthrough}"
+QEMU_USUARIO=""
+VM_DIR="$(caminho_sistema /vm)" || falhar "Não foi possível resolver /vm."
+QEMU_CONF_ARQUIVO="$(caminho_sistema /etc/libvirt/qemu.conf)" \
+    || falhar "Não foi possível resolver qemu.conf."
+APPARMOR_LOCAL="$(caminho_sistema /etc/apparmor.d/local/abstractions/libvirt-qemu)" \
+    || falhar "Não foi possível resolver a configuração AppArmor."
+HOOKS_QEMU_DIR="$(caminho_sistema /etc/libvirt/hooks/qemu.d)" \
+    || falhar "Não foi possível resolver os hooks libvirt."
 REGRA_APPARMOR='/vm/** rwk,'
+QCOW2_USO=""
+QCOW2_ESTADO_INICIAL=""
+QCOW2_FINGERPRINT_ESPERADO=""
+ISO_WINDOWS_USO=""
+ISO_WINDOWS_FINGERPRINT=""
+ISO_VIRTIO_USO=""
+ISO_VIRTIO_FINGERPRINT=""
+VM_DIR_SELADO=0
+
+restaurar_selo_etapa40() {
+    [ "$VM_DIR_SELADO" -eq 1 ] || return 0
+    if restaurar_diretorio_vm "$VM_DIR" "$VM_STORAGE_GROUP"; then
+        VM_DIR_SELADO=0
+        return 0
+    fi
+    erro "Falha ao restaurar /vm após a janela protegida: $SELO_VM_ERRO"
+    return 1
+}
+
+finalizar_etapa40() {
+    local rc=$?
+    trap - EXIT INT TERM
+    if ! restaurar_selo_etapa40; then
+        rc=3
+    fi
+    encerrar_sudo_keepalive
+    exit "$rc"
+}
+
+pedir_iso() {
+    # Valida arquivo regular/canônico antes de qualquer sudo. Não copia nem
+    # altera permissões automaticamente; uma falha exige correção consciente.
+    local var="$1" desc="$2" dica="$3" caminho tentativas=0
+    caminho="${!var:-}"
+    while ! validar_iso_configurada "$caminho"; do
+        if [ -n "$caminho" ]; then
+            erro "$ARMAZENAMENTO_ERRO"
+            info "Copie a ISO como operador para um nome direto e exclusivo em /vm, com grupo $VM_STORAGE_GROUP e modo 0660; depois informe esse caminho."
+        fi
+        info "$dica"
+        caminho="$(perguntar "Caminho da $desc (ENTER cancela)" '')"
+        [ -n "$caminho" ] || falhar "Sem a $desc não há como instalar o Windows. Cancelado."
+        caminho="${caminho/#\~/$HOME}"
+        tentativas=$((tentativas + 1))
+        [ "$tentativas" -lt 5 ] \
+            || falhar "Cinco tentativas sem uma $desc regular, canônica e segura. Cancelado."
+    done
+    salvar_conf "$var" "$caminho"
+    ok "$desc validada sem links: $caminho"
+}
+
+preparar_iso_para_uso() {
+    local var="$1" caminho uso fingerprint
+    caminho="${!var}"
+    validar_iso_configurada "$caminho" || falhar "$ARMAZENAMENTO_ERRO"
+    uso="$ARMAZENAMENTO_CAMINHO_FISICO"
+    fingerprint="$ARMAZENAMENTO_FINGERPRINT"
+    printf -v "${var}_USO" '%s' "$uso"
+    printf -v "${var}_FINGERPRINT" '%s' "$fingerprint"
+}
+
+comprovar_fingerprint() {
+    local caminho="$1" esperado="$2" descricao="$3" atual
+    atual="$(armazenamento_fingerprint_atual "$caminho" 2>/dev/null || true)"
+    [ -n "$atual" ] && [ "$atual" = "$esperado" ] \
+        || falhar "$descricao foi trocado após a validação; nenhuma operação continuará."
+}
+
+revalidar_artefatos_vm() {
+    local fingerprint_original="$QCOW2_FINGERPRINT_ESPERADO"
+    validar_qcow2_configurado "$QCOW2_PATH" "$VM_STORAGE_GROUP" \
+        || falhar "QCOW2 deixou de ser seguro: $ARMAZENAMENTO_ERRO"
+    [ "$ARMAZENAMENTO_QCOW2_ESTADO" = existente ] \
+        || falhar "QCOW2 desapareceu após a preparação."
+    [ -n "$fingerprint_original" ] && [ "$ARMAZENAMENTO_FINGERPRINT" = "$fingerprint_original" ] \
+        || falhar "QCOW2 foi trocado após a validação; recusei a janela TOCTOU."
+    comprovar_fingerprint "$ISO_WINDOWS_USO" "$ISO_WINDOWS_FINGERPRINT" "ISO do Windows"
+    comprovar_fingerprint "$ISO_VIRTIO_USO" "$ISO_VIRTIO_FINGERPRINT" "ISO VirtIO"
+}
+
+criar_qcow2_novo() {
+    # O temporário nasce como a identidade QEMU dentro do diretório setgid. O
+    # hardlink publica o nome final de forma atômica e falha se alguém criar o
+    # destino durante a janela; nenhum chmod/chgrp root toca o pathname final.
+    sudo -u "$QEMU_USUARIO" sh -c '
+        set -eu
+        destino=$1
+        tamanho=$2
+        diretorio=${destino%/*}
+        nome=${destino##*/}
+        temporario=$(mktemp "$diretorio/.${nome}.novo.XXXXXX")
+        limpar() { rm -f -- "$temporario"; }
+        trap limpar EXIT HUP INT TERM
+        umask 0007
+        qemu-img create -f qcow2 "$temporario" "$tamanho"
+        chmod 0660 "$temporario"
+        qemu-img info --output=json "$temporario" | grep -Eq '"'"'"format"'"'"[[:space:]]*:[[:space:]]*"'"'"qcow2"'"'"'
+        ln -- "$temporario" "$destino"
+        rm -f -- "$temporario"
+        trap - EXIT HUP INT TERM
+    ' _ "$QCOW2_USO" "$QCOW2_TAMANHO" \
+        || falhar "Não foi possível criar/publicar o QCOW2 atomicamente como $QEMU_USUARIO."
+}
 
 verificar() {
     [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido (etapa 02)."; v_fim; }
+    local usuario_ok=0 qemu_ok=0 qemu_rc
+    if ! plataforma_carregar; then
+        v_erro "$PLATAFORMA_ERRO"
+    elif [ -z "${USUARIO_LINUX:-}" ]; then
+        v_falta "USUARIO_LINUX não definido."
+    elif validar_usuario_linux "$USUARIO_LINUX"; then
+        usuario_ok=1
+        if [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ]; then
+            v_erro "USUARIO_LINUX='$USUARIO_LINUX' difere do operador '$USUARIO_OPERADOR'."
+        else
+            v_ok "Operador validado no NSS: $USUARIO_LINUX."
+        fi
+    else
+        v_erro "$USUARIO_VALIDACAO_ERRO"
+    fi
+    if [ "$PLATAFORMA_CARREGADA" -eq 1 ]; then
+        if plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO"; then
+            QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
+            qemu_ok=1
+            v_ok "Identidade QEMU resolvida: $QEMU_USUARIO."
+        else
+            qemu_rc=$?
+            if [ "$qemu_rc" -eq 1 ]; then
+                v_falta "$PLATAFORMA_ERRO"
+            else
+                v_erro "$PLATAFORMA_ERRO"
+            fi
+            QEMU_USUARIO=""
+        fi
+    fi
+    if [ "$usuario_ok" -eq 1 ] && [ "$qemu_ok" -eq 1 ] \
+       && validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP"; then
+        v_ok "/vm pronto para operador e QEMU via $VM_STORAGE_GROUP."
+    else
+        v_falta "Modelo de acesso a /vm pendente: ${GRUPO_VM_ERRO:-identidades indisponíveis}."
+    fi
     if validar_config_rede; then
         v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 60)."
     else
         v_falta "$REDE_CONFIG_ERRO"
     fi
-    if [ -f "${QCOW2_PATH:-/vm/Windows11.qcow2}" ]; then
-        v_ok "Disco ${QCOW2_PATH} existe."
+    if [ -z "${QCOW2_PATH:-}" ]; then
+        v_falta "QCOW2_PATH não definido."
+    elif ! command -v qemu-img >/dev/null 2>&1; then
+        v_falta "qemu-img ausente para validar o QCOW2."
+    elif validar_qcow2_configurado "$QCOW2_PATH" "$VM_STORAGE_GROUP"; then
+        if [ "$ARMAZENAMENTO_QCOW2_ESTADO" = existente ]; then
+            v_ok "QCOW2 regular, canônico e validado: $QCOW2_PATH."
+        else
+            v_falta "QCOW2 seguro ainda não existe: $QCOW2_PATH."
+        fi
     else
-        v_falta "Disco ${QCOW2_PATH:-?} não existe."
+        v_erro "$ARMAZENAMENTO_ERRO"
+    fi
+    if [ -n "${ISO_WINDOWS:-}" ]; then
+        validar_iso_configurada "$ISO_WINDOWS" \
+            && v_ok "ISO do Windows regular e sem links." \
+            || v_erro "$ARMAZENAMENTO_ERRO"
+    else
+        v_falta "ISO_WINDOWS não definida."
+    fi
+    if [ -n "${ISO_VIRTIO:-}" ]; then
+        validar_iso_configurada "$ISO_VIRTIO" \
+            && v_ok "ISO VirtIO regular e sem links." \
+            || v_erro "$ARMAZENAMENTO_ERRO"
+    else
+        v_falta "ISO_VIRTIO não definida."
     fi
     if vm_existe "$VM_NAME"; then
         v_ok "VM '$VM_NAME' definida no libvirt."
@@ -53,22 +221,50 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+exigir_plataforma_suportada
+exigir_nao_root
+exigir_conf USUARIO_LINUX VM_NAME QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS
+exigir_usuario_linux_valido "$USUARIO_LINUX"
+plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO" \
+    || falhar "$PLATAFORMA_ERRO Execute a etapa 20 antes."
+QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
+nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP" \
+    || falhar "VM_STORAGE_GROUP deve usar o namespace dedicado vm-passthrough[-sufixo]: '$VM_STORAGE_GROUP'."
+exigir_config_rede
+nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros para libvirt/caminhos."
+
 titulo "Antes de continuar"
 info "Objetivo: preparar o armazenamento e definir/iniciar a VM do Windows 11 com UEFI, TPM, VirtIO e NAT temporária."
 info "Pré-requisitos: etapas 20, 21 (já em sessão nova) e 30 fase B concluídas, ISOs oficiais disponíveis e espaço suficiente no volume do QCOW2."
-info "Alterações: salva caminhos das ISOs; a cópia opcional para /vm/iso preserva os originais; adiciona '/vm/** rwk,' à abstração local do AppArmor e a recarrega; cria o QCOW2 dinâmico se ausente; ativa a rede default; virt-install define e inicia a VM."
+info "Alterações: salva caminhos de ISOs já legíveis; adiciona '/vm/** rwk,' à abstração local do AppArmor e a recarrega; cria atomicamente o QCOW2 como QEMU se ausente; ativa a rede default; virt-install define e inicia a VM."
+info "Arquivos existentes nunca recebem chmod/chgrp/ACL automáticos; metadados ou acesso divergentes causam falha com instrução segura."
 info "Recomendação: mantenha backup de qualquer QCOW2 existente, confirme o espaço livre e use somente ISOs obtidas dos canais oficiais."
 aviso "Riscos: a regra AppArmor concede ao QEMU leitura/escrita/bloqueio sob /vm; falta de espaço pode corromper o convidado; uma interrupção pode deixar disco, configuração ou definição parciais."
 info "VM existente: a etapa aborta antes dessas alterações. 'undefine --nvram' remove a definição e a NVRAM, mas não apaga o QCOW2 sem --remove-all-storage; o arquivo existente permanece e será reutilizado."
 aviso "virsh reset é um reset forçado, equivalente ao botão físico: só é aceitável no primeiro boot, enquanto não houver dados importantes; depois use desligamento/reinício normal do Windows."
 info "Retorno/reboot: não exige reboot do host e não há rollback automático; com a VM desligada, undefine remove apenas a definição/NVRAM, enquanto QCOW2, ISOs e a regra AppArmor exigem revisão manual separada."
 
-exigir_nao_root
-exigir_sudo
-exigir_comando virt-install qemu-img virsh xmlstarlet
-exigir_conf VM_NAME QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS
-exigir_config_rede
-nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros para libvirt/caminhos."
+# Toda entrada configurável de armazenamento é validada antes da primeira
+# aquisição/execução sudo. Caminho inseguro nunca alcança um comando privilegiado.
+exigir_comando virt-install qemu-img virsh xmlstarlet getfacl readlink stat
+validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP" \
+    || falhar "Modelo de /vm inválido: $GRUPO_VM_ERRO Execute a etapa 21 e faça logout/login."
+[ -r "$VM_DIR" ] && [ -w "$VM_DIR" ] && [ -x "$VM_DIR" ] \
+    || falhar "O operador efetivo ainda não possui acesso rwx a /vm; faça logout/login após a etapa 21."
+validar_qcow2_configurado "$QCOW2_PATH" "$VM_STORAGE_GROUP" \
+    || falhar "QCOW2 recusado antes de sudo: $ARMAZENAMENTO_ERRO"
+QCOW2_USO="$ARMAZENAMENTO_CAMINHO_FISICO"
+QCOW2_ESTADO_INICIAL="$ARMAZENAMENTO_QCOW2_ESTADO"
+QCOW2_FINGERPRINT_ESPERADO="$ARMAZENAMENTO_FINGERPRINT"
+
+titulo "1/5 ISOs de instalação"
+pedir_iso ISO_WINDOWS "ISO do Windows 11" \
+    "Baixe a ISO do Windows 11 em microsoft.com (nunca de espelhos de terceiros)."
+pedir_iso ISO_VIRTIO "ISO virtio-win" \
+    "Baixe a virtio-win.iso do projeto oficial virtio-win (QEMU/Red Hat)."
+preparar_iso_para_uso ISO_WINDOWS
+preparar_iso_para_uso ISO_VIRTIO
+info "As ISOs serão usadas somente como filhos diretos de /vm e se o QEMU já puder lê-las; nenhum chmod, chgrp, ACL ou sudo install será aplicado."
 
 titulo "Capítulo 17: Criação da VM '$VM_NAME'"
 info "Modo final selecionado: $REDE_MODO via $INTERFACE_FISICA; a criação usa NAT default somente até a etapa 60."
@@ -90,57 +286,29 @@ info "Recursos: ${VM_RAM_MB} MiB de RAM (teto ${RAM_MAX}), ${VM_VCPUS} vCPUs de 
 if vm_existe "$VM_NAME"; then
     falhar "A VM '$VM_NAME' já existe. Para recriar: virsh --connect qemu:///system undefine $VM_NAME --nvram (CUIDADO: leia o Capítulo 17, 'Como desfazer')."
 fi
-HOOKS_RESIDUAIS="/etc/libvirt/hooks/qemu.d/$VM_NAME"
+
+# Só agora é permitido obter sudo. As primeiras operações são provas de acesso,
+# não correções de metadados em paths configuráveis.
+exigir_sudo
+sudo -u "$QEMU_USUARIO" test -r "$VM_DIR" \
+    && sudo -u "$QEMU_USUARIO" test -w "$VM_DIR" \
+    && sudo -u "$QEMU_USUARIO" test -x "$VM_DIR" \
+    || falhar "A identidade QEMU '$QEMU_USUARIO' não possui acesso rwx a /vm."
+sudo -u "$QEMU_USUARIO" test -r "$ISO_WINDOWS_USO" \
+    && sudo -u "$QEMU_USUARIO" test -r "$ISO_VIRTIO_USO" \
+    || falhar "QEMU não lê uma das ISOs. Copie-a como operador para um nome direto em /vm, preserve grupo $VM_STORAGE_GROUP:0660 e atualize o conf; esta etapa não mudará permissões."
+comprovar_fingerprint "$ISO_WINDOWS_USO" "$ISO_WINDOWS_FINGERPRINT" "ISO do Windows"
+comprovar_fingerprint "$ISO_VIRTIO_USO" "$ISO_VIRTIO_FINGERPRINT" "ISO VirtIO"
+if [ "$QCOW2_ESTADO_INICIAL" = existente ]; then
+    sudo -u "$QEMU_USUARIO" test -r "$QCOW2_USO" \
+        && sudo -u "$QEMU_USUARIO" test -w "$QCOW2_USO" \
+        || falhar "QEMU não possui rw no QCOW2 existente. Corrija conscientemente o arquivo após conferir inode/formato; nenhuma permissão será alterada aqui."
+    comprovar_fingerprint "$QCOW2_USO" "$QCOW2_FINGERPRINT_ESPERADO" "QCOW2"
+fi
+HOOKS_RESIDUAIS="$HOOKS_QEMU_DIR/$VM_NAME"
 if sudo test -e "$HOOKS_RESIDUAIS" || sudo test -L "$HOOKS_RESIDUAIS"; then
     falhar "Existem hooks residuais para '$VM_NAME' em $HOOKS_RESIDUAIS. Revise/arquive-os manualmente antes de recriar a VM; eles não serão removidos automaticamente."
 fi
-
-# ----------------------------------------------------------------------------
-# 1. ISOs (sempre de canais oficiais; o manual não fornece links de propósito)
-# ----------------------------------------------------------------------------
-titulo "1/5 ISOs de instalação"
-
-pedir_iso() {
-    # pedir_iso VARIAVEL "descrição" "dica"  -> pergunta até existir o arquivo
-    local var="$1" desc="$2" dica="$3" caminho tentativas=0
-    caminho="${!var:-}"
-    while [ ! -f "$caminho" ]; do
-        if [ -n "$caminho" ]; then
-            erro "Arquivo não encontrado: $caminho"
-        fi
-        info "$dica"
-        caminho="$(perguntar "Caminho da $desc (ENTER cancela)" '')"
-        [ -n "$caminho" ] || falhar "Sem a $desc não há como instalar o Windows. Cancelado."
-        # ~ digitado à mão não é expandido dentro de variáveis
-        caminho="${caminho/#\~/$HOME}"
-        tentativas=$((tentativas + 1))
-        [ "$tentativas" -ge 5 ] && falhar "Cinco tentativas sem encontrar a $desc. Cancelado."
-    done
-    salvar_conf "$var" "$caminho"
-    ok "$desc: $caminho ($(du -h "$caminho" 2>/dev/null | cut -f1))"
-}
-
-pedir_iso ISO_WINDOWS "ISO do Windows 11" \
-    "Baixe a ISO do Windows 11 em microsoft.com (nunca de espelhos de terceiros)."
-pedir_iso ISO_VIRTIO "ISO virtio-win" \
-    "Baixe a virtio-win.iso do projeto oficial virtio-win (QEMU/Red Hat)."
-
-# ISOs dentro de /home podem ficar ilegíveis para o usuário libvirt-qemu
-# (home 750 no Ubuntu/Pop recentes). Oferece mover para /vm/iso.
-for VAR in ISO_WINDOWS ISO_VIRTIO; do
-    CAMINHO="${!VAR}"
-    if [[ "$CAMINHO" == /home/* ]]; then
-        aviso "$CAMINHO está dentro de /home (o QEMU pode não conseguir ler)."
-        if confirmar "Copiar para /vm/iso/ (recomendado)?"; then
-            sudo mkdir -p /vm/iso
-            sudo cp -v "$CAMINHO" /vm/iso/
-            NOVO="/vm/iso/$(basename "$CAMINHO")"
-            sudo chown root:libvirt-qemu "$NOVO"
-            sudo chmod 640 "$NOVO"
-            salvar_conf "$VAR" "$NOVO"
-        fi
-    fi
-done
 
 # ----------------------------------------------------------------------------
 # 2. Regra AppArmor para o caminho customizado /vm
@@ -160,14 +328,13 @@ fi
 # 3. Disco QCOW2 (dinâmico, criado já com o dono correto)
 # ----------------------------------------------------------------------------
 titulo "3/5 Disco do sistema"
-if [ -f "$QCOW2_PATH" ]; then
-    info "Disco já existe: $QCOW2_PATH (mantido)."
+if [ "$QCOW2_ESTADO_INICIAL" = existente ]; then
+    info "QCOW2 existente validado e mantido sem alteração de owner/grupo/modo: $QCOW2_PATH."
 else
     # QCOW2 cresce sob demanda, mas alocar mais do que o disco tem só adia o
     # problema para o meio de uma sessão do Windows (ENOSPC = corrupção).
-    DIR_QCOW2="$(dirname "$QCOW2_PATH")"
+    DIR_QCOW2="$VM_DIR"
     LIVRE_GB="$(df -BG --output=avail "$DIR_QCOW2" 2>/dev/null | tail -n1 | tr -dc '0-9')"
-    # QCOW2_TAMANHO aceita sufixo G, T ou M (formato do qemu-img): normaliza em GiB
     NUM_ALVO="$(tr -dc '0-9' <<< "$QCOW2_TAMANHO")"
     case "${QCOW2_TAMANHO: -1}" in
         T|t) ALVO_GB=$((NUM_ALVO * 1024)) ;;
@@ -175,14 +342,23 @@ else
         *)   ALVO_GB="$NUM_ALVO" ;;
     esac
     if [ -n "$LIVRE_GB" ] && [ -n "$ALVO_GB" ] && [ "$LIVRE_GB" -lt "$ALVO_GB" ]; then
-        aviso "Espaço livre em $DIR_QCOW2: ${LIVRE_GB} GiB, menor que o disco pedido (${ALVO_GB} GiB)."
+        aviso "Espaço livre em /vm: ${LIVRE_GB} GiB, menor que o disco pedido (${ALVO_GB} GiB)."
         aviso "O QCOW2 cresce sob demanda; se o disco encher com a VM ligada, o Windows corrompe."
         confirmar "Criar assim mesmo?" \
             || falhar "Cancelado. Ajuste QCOW2_TAMANHO no passthrough.conf ou libere espaço."
     fi
-    sudo -u libvirt-qemu qemu-img create -f qcow2 "$QCOW2_PATH" "$QCOW2_TAMANHO"
+    criar_qcow2_novo
+    validar_qcow2_configurado "$QCOW2_PATH" "$VM_STORAGE_GROUP" \
+        || falhar "QCOW2 recém-criado não passou na pós-condição: $ARMAZENAMENTO_ERRO"
+    [ "$ARMAZENAMENTO_QCOW2_ESTADO" = existente ] \
+        || falhar "QCOW2 recém-criado não foi publicado."
+    QCOW2_FINGERPRINT_ESPERADO="$ARMAZENAMENTO_FINGERPRINT"
+    sudo -u "$QEMU_USUARIO" test -r "$QCOW2_USO" \
+        && sudo -u "$QEMU_USUARIO" test -w "$QCOW2_USO" \
+        || falhar "QCOW2 novo não ficou acessível à identidade QEMU."
 fi
-qemu-img info "$QCOW2_PATH" | sed 's/^/  /'
+revalidar_artefatos_vm
+qemu-img info "$QCOW2_USO" | sed 's/^/  /'
 
 # ----------------------------------------------------------------------------
 # 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 60)
@@ -203,6 +379,16 @@ if command -v osinfo-query >/dev/null 2>&1 && osinfo-query os 2>/dev/null | grep
     OSV="win11"
 fi
 info "os-variant: $OSV"
+# A raiz fica sem write de grupo desde a última validação até virt-install
+# retornar com o domínio iniciado. Assim QEMU/outro membro não pode renomear
+# nenhum dos três artefatos no intervalo check/open.
+VM_DIR_SELADO=1
+trap finalizar_etapa40 EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+selar_diretorio_vm "$VM_DIR" "$VM_STORAGE_GROUP" \
+    || falhar "Não foi possível proteger /vm contra TOCTOU: $SELO_VM_ERRO"
+revalidar_artefatos_vm
 
 virt-install \
     --connect qemu:///system \
@@ -215,14 +401,18 @@ virt-install \
     --os-variant "$OSV" \
     --boot uefi \
     --tpm model=tpm-crb,backend.type=emulator,backend.version=2.0 \
-    --disk path="$QCOW2_PATH",format=qcow2,bus=virtio,cache=none \
-    --disk path="$ISO_WINDOWS",device=cdrom,bus=sata \
-    --disk path="$ISO_VIRTIO",device=cdrom,bus=sata \
+    --disk path="$QCOW2_USO",format=qcow2,bus=virtio,cache=none \
+    --disk path="$ISO_WINDOWS_USO",device=cdrom,bus=sata \
+    --disk path="$ISO_VIRTIO_USO",device=cdrom,bus=sata \
     --network network=default,model=virtio \
     --graphics spice \
     --video qxl \
     --sound ich9 \
     --noautoconsole
+
+restaurar_selo_etapa40 \
+    || falhar "A VM foi iniciada, mas /vm não voltou ao modelo 2770/ACL: $SELO_VM_ERRO"
+trap encerrar_sudo_keepalive EXIT INT TERM
 
 VM_NIC_MAC_DETECTADO="$($VIRSH dumpxml --inactive "$VM_NAME" \
     | xmlstarlet sel -t -v "string(/domain/devices/interface[source/@network='default'][1]/mac/@address)")"

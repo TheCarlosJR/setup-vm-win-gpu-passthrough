@@ -138,7 +138,7 @@ verificar() {
         if kernel_parametros_persistentes_exatos "$params"; then
             v_ok "Persistência das três chaves é exata e coerente."
         else
-            v_falta "Persistência do isolamento não comprovada: $KERNEL_PERSISTENCIA_ERRO"
+            v_kernel_persistencia_falhou "Persistência do isolamento não comprovada: $KERNEL_PERSISTENCIA_ERRO"
         fi
         if isolamento_efetivo_exato; then
             v_ok "isolcpus/nohz_full efetivos correspondem a CPUS_VM; rcu_nocbs foi validado na cmdline."
@@ -151,8 +151,9 @@ verificar() {
 
 desfazer() {
     exigir_nao_root
-    exigir_sudo
     exigir_conf BOOTLOADER
+    exigir_bootloader_coerente
+    exigir_sudo
     titulo "Reverter isolamento opcional de CPU"
     if kernel_param_chaves_persistentes_ausentes "$CHAVES_ISOLAMENTO"; then
         ok "isolcpus, nohz_full e rcu_nocbs já estão ausentes da configuração de boot."
@@ -182,9 +183,10 @@ main() {
     esac
 
     exigir_nao_root
+    exigir_conf VM_NAME CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB BOOTLOADER
+    exigir_bootloader_coerente
     exigir_sudo
     exigir_comando python3 virsh lscpu virt-xml-validate
-    exigir_conf VM_NAME CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB BOOTLOADER
     exigir_vm_desligada "$VM_NAME"
     validar_layout_configurado || falhar "$CPU_LAYOUT_ERRO"
     validar_suporte_isolamento || falhar "$SUPORTE_ISOLAMENTO_ERRO"
