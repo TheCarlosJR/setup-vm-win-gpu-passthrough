@@ -30,8 +30,9 @@ Antes do primeiro comando, o host precisa estar assim:
 
 Opcionais, cada um adiciona um recurso:
 
-- **Segundo disco NTFS (HD2)**: guarda seus documentos no Linux e hospeda a pasta
-  de transferência com a VM. Necessário para a etapa 14 e para o airlock.
+- **workingDisk externo**: caminho absoluto opcional, já montado pelo operador,
+  que pode hospedar airlock e backups. O projeto apenas valida o mountpoint e
+  também aceita dispensa explícita.
 - **Disco inteiro para a VM**: o Windows enxerga um disco físico real (útil para
   biblioteca de jogos). Totalmente opcional.
 - **Segunda saída de vídeo (iGPU ou outra placa)**: permite manter o desktop
@@ -57,8 +58,12 @@ Regras práticas:
 
 - Identifique disco sempre por **modelo, serial e tamanho**, comparando com o
   inventário gerado na etapa 00.
-- Em configuração permanente (fstab, XML da VM), use apenas `UUID=...` ou
+- Para o disco físico inteiro entregue à VM, use somente um caminho persistente
   `/dev/disk/by-id/...`, nunca `/dev/sdX`.
+- `WORKING_DISK_PATH` não identifica um dispositivo: é apenas um caminho
+  absoluto que já precisa ser um mountpoint ativo. A montagem é responsabilidade
+  externa do operador; o projeto não cria a base, não monta, não formata e não
+  grava uma entrada de montagem no `fstab`.
 - Antes de entregar um disco à VM, confirme que ele **não tem nada montado** no
   host: `lsblk -o NAME,SIZE,MOUNTPOINT /dev/sdX`.
 - O disco da raiz do Linux nunca vai para a VM. A etapa 02 detecta a raiz com
@@ -99,7 +104,7 @@ roda nele). A etapa 02 impõe estes tetos automaticamente:
 |---|---|
 | Núcleos | host mantém 1 núcleo físico, ou 2 quando há 6 ou mais |
 | RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB) |
-| Disco | disco da raiz e disco do HD2 fora da lista de candidatos |
+| Disco | disco da raiz e qualquer disco montado/em uso ficam fora dos candidatos da VM; workingDisk não é persistido como disco físico |
 
 Cuidado específico com **HugePages** (etapa 52): a RAM reservada sai do host de
 forma permanente, no boot, mesmo com a VM desligada. Reservar demais deixa o
@@ -111,12 +116,12 @@ Windows 11 direto de `microsoft.com`; `virtio-win.iso` do projeto oficial
 virtio-win. Nunca de espelho de terceiros: uma imagem adulterada compromete a VM
 e, por consequência, o canal de arquivos com o host.
 
-### 2.5 Editar o fstab com rede de segurança
+### 2.5 Respeitar o escopo do fstab
 
-Linha malformada no `/etc/fstab` impede o boot. Os scripts fazem backup datado
-antes de qualquer edição e sempre incluem `nofail`, que faz o boot seguir mesmo
-se a montagem falhar. Se editar à mão, teste com `sudo mount -a` **antes** de
-reiniciar.
+O projeto nunca adiciona a montagem do workingDisk ao `/etc/fstab`. A única
+entrada relacionada a esse armazenamento que pode existir é a visão `bindfs`
+do airlock, gerenciada pela etapa 61; ela não monta o workingDisk. Essa etapa
+faz backup datado antes de editar e testa a visão antes de concluir.
 
 ### 2.6 Testar bridge de forma reversível
 
@@ -155,8 +160,8 @@ bash etapas/30-iommu-vfio.sh --verificar
 | 10 | atualiza sistema e firmware | reboot |
 | 11 | driver NVIDIA no host | reboot |
 | 12 | pacotes utilitários (inclui `xmlstarlet`) | |
-| 13 | cria `/vm` e o ponto de montagem do HD2 | |
-| 14 | monta o HD2 e redireciona as pastas do usuário | |
+| 13 | cria e converge somente `/vm` | |
+| 14 | preflight não destrutivo do workingDisk externo, ou confirma a dispensa | |
 | **20** | **instala QEMU/KVM/libvirt/OVMF/swtpm** | |
 | 21 | grupos do usuário e permissões de `/vm` | logout |
 | 30 | IOMMU e módulos VFIO | reboot |
@@ -246,14 +251,20 @@ Executar novamente: `bash etapas/02-detectar-config.sh` ou o alias
 `bash etapas/02-detectar-config.sh --redetectar`; ambos fazem backup e reiniciam
 todas as perguntas.
 
+Para o workingDisk, informe um caminho absoluto já montado (por exemplo,
+`/mnt/workingDisk`) ou digite `0`. A etapa valida sintaxe, diretório e mountpoint
+exato com `mountpoint`/`findmnt`, e salva somente `WORKING_DISK_PATH` e
+`WORKING_DISK_DISPENSADO`. Ela não procura partições, não registra dispositivo
+físico e não altera a montagem externa.
+
 ### 4.4 Sistema, driver e utilitários
 
 ```bash
 bash etapas/10-atualizar-sistema.sh   # apt full-upgrade + firmware; reinicia
 bash etapas/11-driver-nvidia.sh       # driver proprietário; reinicia se instalar
 bash etapas/12-pacotes-base.sh
-bash etapas/13-diretorios.sh          # /vm e /mnt/docs4
-bash etapas/14-docs4.sh               # opcional: HD2 e pastas do usuário
+bash etapas/13-diretorios.sh          # somente /vm
+bash etapas/14-working-disk.sh        # preflight opcional do mountpoint externo
 ```
 
 Depois do reboot, confirme com `uname -r` que o kernel novo está em uso e com
@@ -642,10 +653,14 @@ confirma cardinalidade zero, adiciona a atual e exige exatamente uma regra
 marcada e exata para interface, `VM_IP_FIXO`, porta 22 e TCP. O `--verificar`
 repete a cardinalidade `marcada=1/exata=1`; o WinSCP usa `IP_FIXO_HOST`.
 
-Onde fica a pasta de trânsito é configurável em `AIRLOCK_DIR`; o padrão é
-`/mnt/docs4/airlock`. A visão SFTP usa `noexec,nosuid,nodev`. Trate-a como zona
-de passagem, sem dados permanentes e fora do backup; nunca execute binários
-vindos dela nem crie exclusão do Defender para a pasta.
+Onde fica a pasta de trânsito é configurável em `AIRLOCK_DIR`. Se ela estiver
+vazia e o workingDisk estiver configurado, o padrão é
+`$WORKING_DISK_PATH/airlock`; sem workingDisk, usa
+`/var/lib/vm-passthrough/airlock`. Antes de criar ou escrever quando a pasta
+está dentro do workingDisk, a etapa e o hook exigem que o mountpoint-base esteja
+ativo e exato. A visão SFTP usa `noexec,nosuid,nodev`. Trate-a como zona de
+passagem, sem dados permanentes e fora do backup; nunca execute binários vindos
+dela nem crie exclusão do Defender para a pasta.
 
 ---
 
@@ -667,7 +682,12 @@ O utilitário de snapshot exige a VM desligada, identifica no XML o disco cujo
 explicitamente HD1 e os demais discos. Antes de `reverter` ou `apagar`, recusa
 metadados externos, que exigem consolidação manual da cadeia. O backup também
 recusa XML apontando para overlay e qualquer QCOW2 com backing file: copiar só
-a base nesse estado produziria um backup desatualizado.
+a base nesse estado produziria um backup desatualizado. `BACKUPS_VM_DIR`
+explícito tem prioridade. Sem ele, o utilitário usa
+`$WORKING_DISK_PATH/backups-vm` somente com workingDisk configurado; sem destino,
+falha com orientação. A etapa 70 apenas avisa e pula a preparação do backup,
+sem desfazer ou bloquear o TRIM. Destinos dentro do workingDisk exigem o
+mountpoint-base ativo antes de qualquer criação ou escrita.
 
 Depois de atualizar kernel ou driver NVIDIA, valide nesta ordem: `nvidia-smi`,
 parâmetros de IOMMU no `/proc/cmdline`, VM liga (hook prepare), desktop volta ao

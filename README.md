@@ -41,8 +41,8 @@ popos-win11-passthrough/
 │   ├── 10-atualizar-sistema.sh      Cap. 7   update + fwupd          <reboot>
 │   ├── 11-driver-nvidia.sh          Cap. 8   driver NVIDIA no host   <reboot>
 │   ├── 12-pacotes-base.sh           Cap. 9   utilitários (+xmlstarlet)
-│   ├── 13-diretorios.sh             Cap. 10  /vm e /mnt/docs4
-│   ├── 14-docs4.sh                  Cap. 11  fstab + binds + migração
+│   ├── 13-diretorios.sh             Cap. 10  /vm
+│   ├── 14-working-disk.sh           Cap. 11  preflight do workingDisk externo
 │   ├── 20-virtualizacao.sh          Cap. 13  KVM/QEMU/libvirt/OVMF/swtpm
 │   ├── 21-usuario-grupos.sh         Cap. 14  grupos + permissões     <logout>
 │   ├── 30-iommu-vfio.sh             Caps. 15/16  IOMMU + VFIO        <reboot>
@@ -58,7 +58,7 @@ popos-win11-passthrough/
 ├── util/                        operação contínua e emergência
 │   ├── listar-grupos-iommu.sh       Cap. 16
 │   ├── snapshot-vm.sh               Cap. 25  criar/listar/reverter/apagar
-│   ├── backup-vm.sh                 Cap. 25  backup real no HD2
+│   ├── backup-vm.sh                 Cap. 25  backup real em destino externo
 │   ├── atualizar-host.sh            Cap. 26  atualização segura (+ --validar)
 │   ├── diagnostico.sh               Cap. 28  relatório de diagnóstico
 │   └── recuperar-gpu.sh             Cap. 29  emergência: GPU de volta ao Linux
@@ -97,6 +97,10 @@ converter para CRLF, corrija com `sed -i 's/\r$//' arquivo.sh` (ou dos2unix).
    Wi-Fi station usa obrigatoriamente `nat`. Bridge Wi-Fi normalmente exige
    4addr/WDS dos dois lados e não é suportada. Reserva no roteador só existe no
    modo bridge; no NAT a etapa 60 cria a reserva DHCP libvirt automaticamente.
+5. **workingDisk opcional já montado**, se for usado: o operador cria e monta
+   externamente o caminho (por exemplo, `/mnt/workingDisk`) antes da etapa 02.
+   O projeto apenas verifica o mountpoint; não o cria, monta, formata nem grava
+   sua montagem no `fstab`.
 
 ### Senha do sudo
 
@@ -131,12 +135,12 @@ bash menu.sh --status                     # checklist completo sem menu
 |---|-------|-----------|
 | 1 | `00-inventario` | coleta somente dados do hardware (pede sudo para `dmidecode`/`dmesg`) e publica um relatório único; guarde uma cópia fora do disco do sistema |
 | 2 | `01-verificar-bios` | manual + verificação; refaça até tudo passar |
-| 3 | `02-detectar-config` | usa o último inventário completo, faz backup e reinicia todas as escolhas de GPU/discos/CPU/RAM/bootloader/rede |
+| 3 | `02-detectar-config` | usa o último inventário completo, faz backup e reinicia todas as escolhas de GPU/workingDisk/disco da VM/CPU/RAM/bootloader/rede |
 | 4 | `10-atualizar-sistema` | **reboot** ao final |
 | 5 | `11-driver-nvidia` | **reboot** se instalar; valida `nvidia-smi` |
 | 6 | `12-pacotes-base` | inclui xmlstarlet (edição segura de XML) |
-| 7 | `13-diretorios` | `/vm` e `/mnt/docs4` |
-| 8 | `14-docs4` | fstab + bind mounts + migração; o único passo destrutivo exige digitar `SIM` |
+| 7 | `13-diretorios` | cria e converge somente `/vm` |
+| 8 | `14-working-disk` | preflight não destrutivo do mountpoint externo; sucesso imediato quando dispensado |
 | 9 | `20-virtualizacao` | pilha completa + `kvm-ok` |
 | 10 | `21-usuario-grupos` | **logout/login** obrigatório ao final |
 | 11 | `30-iommu-vfio` | fase A aplica parâmetros, **reboot**, rodar de novo para a fase B validar e registrar o grupo IOMMU |
@@ -161,9 +165,15 @@ Opções externas ao fluxo, como `QCOW2_PATH`, nomes de bridge, `VM_NIC_MAC`,
 `AIRLOCK_BIND` e destinos de backup, são preservadas.
 
 O que é configurável sem editar script: nome e RAM/CPU da VM, caminho e tamanho
-do QCOW2, ponto de montagem do HD2 (`DOCS4_MONTAGEM`), pasta de trânsito do
-airlock (`AIRLOCK_DIR`), visão exposta pelo SFTP (`AIRLOCK_BIND`), destino dos
-backups (`BACKUPS_VM_DIR`), usuário de transferência, uplink físico e modo de
+do QCOW2, mountpoint externo opcional do workingDisk (`WORKING_DISK_PATH`),
+dispensa explícita (`WORKING_DISK_DISPENSADO=sim`), pasta de trânsito do
+airlock (`AIRLOCK_DIR`), visão exposta pelo SFTP (`AIRLOCK_BIND`) e destino
+dos backups (`BACKUPS_VM_DIR`). `WORKING_DISK_PATH` precisa ser absoluto,
+existir e ser exatamente um mountpoint já ativo; o projeto não cria sua base,
+não monta, não descobre dispositivo/UUID e não escreve uma entrada de montagem
+no `fstab`. `BACKUPS_VM_DIR` explícito tem prioridade; sem ele, o fallback é
+`$WORKING_DISK_PATH/backups-vm` somente quando o workingDisk está configurado.
+Também são configuráveis o usuário de transferência, uplink físico e modo de
 rede. Os campos principais são `REDE_MODO`, `INTERFACE_FISICA`, `REDE_BRIDGE`,
 `REDE_LIBVIRT`, `REDE_BRIDGE_LIBVIRT`, `REDE_NAT_CIDR` e `VM_NIC_MAC`.
 `VM_IP_FIXO` é a reserva da VM nos dois modos; `IP_FIXO_HOST` é o endereço que a
@@ -228,7 +238,7 @@ depois:
 | GPU | com uma única GPU, explica que o desktop Linux sai do ar durante a VM e exige confirmação; com duas ou mais, obriga a escolher qual vai para a VM |
 | CPU | teto de núcleos: o host sempre fica com 1 (2 quando há 6+ núcleos) |
 | RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB); valor sempre múltiplo de 1 GiB por causa das HugePages |
-| Disco da VM | o disco da **raiz do Linux** e o disco do HD2 nem aparecem na lista; disco com partição montada é recusado; **"nenhum" é opção válida** (a VM fica só com o QCOW2) |
+| Disco da VM | o disco da **raiz do Linux** e qualquer disco com partição montada/em uso são recusados; **"nenhum" é opção válida** (a VM fica só com o QCOW2). O workingDisk não é tratado como identidade de disco físico persistida. |
 | Áudio HDMI | se a placa não expõe a função, segue somente com vídeo em vez de abortar |
 | Rede | sempre enumera todas as interfaces físicas, destaca a rota IPv4 efetiva obtida por `ip route get`, rejeita bridge Wi-Fi e avisa NAT em outro uplink; trocar o uplink da bridge limpa os IPs da LAN anterior |
 | Entradas numéricas | valor fora da faixa ou não numérico é reperguntado, nunca derruba o script |
@@ -239,7 +249,7 @@ depois:
 virsh --connect qemu:///system start win11    # liga (monitor troca para o Windows)
 # desligar: pelo próprio Windows; o desktop Linux volta sozinho
 util/snapshot-vm.sh criar antes-de-algo       # ponto de restauração rápido
-util/backup-vm.sh                             # backup real no HD2
+util/backup-vm.sh                             # backup real no destino configurado
 util/atualizar-host.sh                        # atualização segura (Cap. 26)
 util/atualizar-host.sh --validar              # validação em camadas pós-reboot
 util/diagnostico.sh                           # qualquer problema: comece aqui
@@ -289,11 +299,12 @@ fi
 ### B. No Pop!_OS, etapa a etapa
 
 Cada etapa tem o modo `--verificar`, que implementa o "Como verificar" do
-capítulo correspondente e retorna código de saída 0 (ok) ou 1 (pendente):
+capítulo correspondente e retorna códigos de saída 0 (ok), 1 (pendente),
+2 (indeterminado) ou 3 (erro):
 
 ```bash
-bash menu.sh --status                # visão geral
-bash etapas/14-docs4.sh --verificar  # exemplo: montagem + 5 binds ativos
+bash menu.sh --status                       # visão geral
+bash etapas/14-working-disk.sh --verificar  # mountpoint externo ativo ou dispensa explícita
 ```
 
 Verificações chave por fase (as mesmas do manual):
@@ -301,8 +312,7 @@ Verificações chave por fase (as mesmas do manual):
 | Fase | Comando | Critério de sucesso |
 |------|---------|---------------------|
 | Driver host | `nvidia-smi` | tabela com a RTX 3060 e versão do driver |
-| Docs4 | `mount \| grep docs4` e `touch ~/Documentos/t; ls /mnt/docs4/Documentos/t` | 6 montagens; arquivo aparece nos dois caminhos |
-| windows_names | `touch "/mnt/docs4/x:y.txt"` | deve FALHAR (proteção ativa) |
+| workingDisk | `bash etapas/14-working-disk.sh --verificar` e `findmnt --mountpoint /mnt/workingDisk` | caminho configurado é diretório e mountpoint exato, ou dispensa explícita |
 | IOMMU | `cat /proc/cmdline` e `sudo dmesg \| grep AMD-Vi` | parâmetros presentes; "Found IOMMU" |
 | Grupos | `util/listar-grupos-iommu.sh` | GPU e áudio no MESMO grupo, sem intrusos |
 | VM criada | `virsh --connect qemu:///system dumpxml win11 \| grep -E "loader\|qcow2"` | OVMF + /vm/Windows11.qcow2 |
@@ -331,7 +341,8 @@ Verificações chave por fase (as mesmas do manual):
    que a própria etapa 61 executa.
 2. `sudo sshd -t` sem saída e `systemctl status ssh` ativo.
 3. Transferência real pelo WinSCP: sessão abre em `/files`; arquivo enviado
-   aparece em `/mnt/docs4/airlock` (e vice-versa).
+   aparece em `AIRLOCK_DIR` (por padrão, `/mnt/workingDisk/airlock` quando
+   `WORKING_DISK_PATH=/mnt/workingDisk`) e vice-versa.
 4. Confinamento: no WinSCP, subir para `/` mostra somente `files/`.
 5. Autenticação: `ssh vmtransfer@<IP_FIXO_HOST>` sem chave responde
    `Permission denied (publickey)`; em bridge esse destino é o IP LAN do host,
