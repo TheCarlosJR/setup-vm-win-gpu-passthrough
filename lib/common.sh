@@ -5,7 +5,7 @@
 # Este arquivo NÃO é executado diretamente: ele é carregado via "source"
 # pelos scripts de etapas/ e util/.
 #
-# Referência: Velho_Windows11_VM_Passthrough_PopOS_v2.md (manual completo).
+# Referências: Guia-QEMU-Passthrough.md e troubleshooting.md.
 # ============================================================================
 
 # --- Localização do projeto e arquivos centrais -----------------------------

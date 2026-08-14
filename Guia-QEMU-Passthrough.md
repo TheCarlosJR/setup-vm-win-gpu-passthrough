@@ -7,8 +7,8 @@ O que este guia **não** cobre, de propósito: instalar o Pop!_OS, particionar o
 disco do sistema e ajustar o firmware da placa-mãe fora do essencial. Ele começa
 com o Linux já funcionando (ver "Sistema esperado") e vai até a VM em uso diário.
 
-Para explicação longa, "como desfazer" item por item e troubleshooting extenso,
-consulte o manual legado de referência `Velho_Windows11_VM_Passthrough_PopOS_v2.md`.
+Para diagnóstico por sintomas, recuperação segura e rollback das etapas,
+consulte [`troubleshooting.md`](troubleshooting.md).
 
 ---
 
@@ -21,7 +21,7 @@ Antes do primeiro comando, o host precisa estar assim:
 | Distribuição | Pop!_OS 22.04 ou mais novo (qualquer Ubuntu recente serve com ajustes) | `lsb_release -a` |
 | Modo de boot | UEFI, com CSM desabilitado | `[ -d /sys/firmware/efi ] && echo UEFI` |
 | Bootloader | systemd-boot com `kernelstub` (padrão do Pop!_OS) ou GRUB | `command -v kernelstub`, `ls /boot/grub/grub.cfg` |
-| CPU | AMD com SVM ativo na BIOS (Intel exige trocar `amd_iommu` por `intel_iommu` nos comandos) | `lscpu \| grep -iw svm` |
+| CPU | AMD com SVM ativo na BIOS (CPU Intel ainda não é suportada pelos scripts) | `lscpu \| grep -iw svm` |
 | GPU | NVIDIA dedicada com driver proprietário carregado | `nvidia-smi` |
 | RAM | 16 GiB no mínimo (32 GiB é o cenário confortável) | `free -h` |
 | Usuário | conta normal com `sudo`, nunca operar como root | `id` |
@@ -361,7 +361,9 @@ sudo update-initramfs -u -k all
 sudo reboot
 ```
 
-Em CPU Intel, troque `amd_iommu=on` por `intel_iommu=on`.
+> CPU Intel ainda não é suportada pela implementação atual. Não prossiga
+> trocando apenas `amd_iommu=on` por `intel_iommu=on`; a detecção da plataforma
+> bloqueia esse fluxo antes das mutações.
 
 Verificação após o reboot:
 
@@ -374,9 +376,10 @@ bash util/listar-grupos-iommu.sh      # grupos e seus dispositivos
 
 O grupo da sua GPU deve conter **apenas** ela: vídeo, áudio HDMI e, no máximo,
 pontes PCI (`pcieport`), que são inofensivas. Qualquer outro dispositivo no mesmo
-grupo (controladora de rede, USB, armazenamento) precisa ser resolvido antes: use
-outro slot físico, atualize a BIOS ou, como último recurso e com custo real de
-segurança, o patch ACS override (Capítulo 28 do manual).
+grupo (controladora de rede, USB, armazenamento) precisa ser resolvido antes:
+use outro slot físico ou atualize a BIOS. ACS override não é implementado por
+este projeto porque pode reduzir o isolamento DMA; consulte a seção de IOMMU em
+[`troubleshooting.md`](troubleshooting.md).
 
 > A GPU **não** é presa ao `vfio-pci` no boot. Com GPU única isso deixaria o
 > Linux sem vídeo. A troca de driver é dinâmica, feita pelos hooks da seção 8.
@@ -389,10 +392,10 @@ segurança, o patch ACS override (Capítulo 28 do manual).
 bash etapas/40-criar-vm.sh
 ```
 
-O script pede as duas ISOs (repergunta até o arquivo existir), copia para
-`/vm/iso/` quando estão em `/home` (o processo do QEMU pode não conseguir ler seu
-home), confere espaço livre, adiciona a regra do AppArmor para o caminho `/vm` e
-cria a VM:
+O script exige que as duas ISOs já sejam arquivos regulares e canônicos em
+`/vm`, legíveis pela identidade QEMU detectada e sem links. Ele não copia ISOs de
+`/home` nem relaxa permissões automaticamente. Depois de validar espaço,
+AppArmor e os demais pré-requisitos, cria a VM:
 
 ```bash
 virt-install \

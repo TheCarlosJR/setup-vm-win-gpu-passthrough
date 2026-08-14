@@ -392,9 +392,9 @@ fi
 cmp -s -- "$ROLLBACK_BACKUP" "$FAKE_STATE" \
     || falha "rollback XML não restaurou o domínio original"
 
-grep -Fq '52-cpu-pinning-hugepages.sh|CPU pinning e HugePages (Cap. 21)|opcional|' "$RAIZ/menu.sh" \
+grep -Fq '52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|' "$RAIZ/menu.sh" \
     || falha "etapa 52 não está opcional"
-grep -Fq '53-cpu-isolation.sh|CPU isolation (Cap. 22)|opcional|' "$RAIZ/menu.sh" \
+grep -Fq '53-cpu-isolation.sh|CPU isolation|opcional|' "$RAIZ/menu.sh" \
     || falha "etapa 53 não está opcional"
 grep -Fq 'LISTA_HOST="${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}"' "$RAIZ/etapas/02-detectar-config.sh" \
     || falha "etapa 02 não reserva explicitamente o core da CPU 0"

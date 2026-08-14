@@ -81,7 +81,7 @@ mapfile -t LINHAS < <(lsusb)
 echo
 aviso "O dispositivo escolhido fica EXCLUSIVO da VM enquanto ela estiver ligada."
 aviso "Mantenha um segundo teclado/receptor fisicamente no host e teste o TTY de emergência."
-aviso "Nunca passe o único teclado do host; ele é necessário para recuperação local (Capítulo 29)."
+aviso "Nunca passe o único teclado do host; ele é necessário para a recuperação local descrita em troubleshooting.md."
 
 while :; do
     echo

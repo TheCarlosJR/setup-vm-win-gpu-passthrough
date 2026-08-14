@@ -61,7 +61,7 @@ Linux voltar, execute esta etapa novamente para validar e depois retorne ao menu
 Observações do manual:
   - Nomes de menu variam entre versões de firmware; procure termos similares.
   - Re-Size BAR: manter Enabled; é um dos primeiros itens a testar Desabilitado
-    caso apareça instabilidade ou "Code 43" (Capítulo 28).
+    caso apareça instabilidade ou "Code 43" (consulte troubleshooting.md).
   - Secure Boot do HOST desabilitado é decisão documentada (a VM tem o próprio
     Secure Boot via OVMF).
 CHECKLIST

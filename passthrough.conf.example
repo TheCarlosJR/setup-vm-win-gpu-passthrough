@@ -7,9 +7,9 @@
 # (pode também ser editado à mão; é lido como dados por um parser restrito,
 # nunca executado com source/eval).
 #
-# Cada variável corresponde a um "placeholder" do manual
-# Velho_Windows11_VM_Passthrough_PopOS_v2.md. NUNCA copie valores de exemplo:
-# todos os valores de hardware devem vir da detecção feita no SEU sistema.
+# Os valores abaixo são exemplos de formato. Consulte o guia de instalação e
+# troubleshooting.md, mas NUNCA copie identificadores de hardware de outro host:
+# todos os valores devem vir da detecção feita no SEU sistema.
 #
 # Para usar este modelo manualmente:
 #   cp passthrough.conf.example passthrough.conf

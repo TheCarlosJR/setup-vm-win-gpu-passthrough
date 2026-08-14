@@ -11,7 +11,7 @@ cada etapa antes de executá-la em um host de uso diário.
 | Documento | Quando usar |
 |---|---|
 | **[Guia-QEMU-Passthrough.md](Guia-QEMU-Passthrough.md)** | leitura principal: o caminho completo, direto, focado em instalar e configurar o QEMU |
-| **[Velho_Windows11_VM_Passthrough_PopOS_v2.md](Velho_Windows11_VM_Passthrough_PopOS_v2.md)** | manual legado de referência (29 capítulos): explicação longa, reversão e troubleshooting detalhado |
+| **[troubleshooting.md](troubleshooting.md)** | diagnóstico por sintomas, recuperação segura, escopo dos backups e rollback das etapas |
 
 **Ambiente de referência:** AMD Ryzen 7 5700X, NVIDIA RTX 3060 (GPU única),
 32 GB DDR4, ASUS TUF Gaming B550-Plus WiFi II, Pop!_OS (host), Windows 11
@@ -27,45 +27,49 @@ o hardware real: nenhum valor é chumbado.
 
 ```
 popos-win11-passthrough/
-├── README.md                    este arquivo
-├── Guia-QEMU-Passthrough.md     guia enxuto (leitura principal)
-├── passthrough.conf.example     modelo do arquivo de configuração central
+├── README.md                    visão geral, fluxo e testes
+├── Guia-QEMU-Passthrough.md     instalação e configuração
+├── troubleshooting.md           diagnóstico, recuperação e rollback
+├── passthrough.conf.example     modelo da configuração central
 ├── passthrough.conf             (gerado pela etapa 02; valores do SEU hardware)
 ├── menu.sh                      orquestrador com status ao vivo das etapas
-├── lib/common.sh                funções compartilhadas
-├── backups/                     (gerado) backups de XML da VM
-├── etapas/                      uma etapa = um capítulo do manual
-│   ├── 00-inventario.sh             Cap. 3   inventário de hardware
-│   ├── 01-verificar-bios.sh         Cap. 12  checklist BIOS + verificação
-│   ├── 02-detectar-config.sh        detecta hardware/uplink e escolhe bridge/NAT
-│   ├── 10-atualizar-sistema.sh      Cap. 7   update + fwupd          <reboot>
-│   ├── 11-driver-nvidia.sh          Cap. 8   driver NVIDIA no host   <reboot>
-│   ├── 12-pacotes-base.sh           Cap. 9   utilitários (+xmlstarlet)
-│   ├── 13-diretorios.sh             Cap. 10  /vm
-│   ├── 14-working-disk.sh           Cap. 11  preflight do workingDisk externo
-│   ├── 20-virtualizacao.sh          Cap. 13  KVM/QEMU/libvirt/OVMF/swtpm
-│   ├── 21-usuario-grupos.sh         Cap. 14  grupos + permissões     <logout>
-│   ├── 30-iommu-vfio.sh             Caps. 15/16  IOMMU + VFIO        <reboot>
-│   ├── 40-criar-vm.sh               Cap. 17  VM + NAT default temporária
-│   ├── 41-instalacao-windows.sh     Cap. 18  guia da instalação (manual)
-│   ├── 50-hooks-gpu-hd1.sh          Cap. 19  hooks dinâmicos + HD1
-│   ├── 51-usb-passthrough.sh        Cap. 20  USB (opcional)
-│   ├── 52-cpu-pinning-hugepages.sh  Cap. 21  pinning + HugePages     <reboot>
-│   ├── 53-cpu-isolation.sh          Cap. 22  isolcpus                <reboot>
-│   ├── 60-rede-bridge.sh            Cap. 23  rede final: bridge Ethernet ou NAT
-│   ├── 61-airlock.sh                Cap. 24  SFTP seguro em br0/bridge libvirt
-│   └── 70-trim-discard.sh           Cap. 25  TRIM/discard
+├── lib/
+│   ├── common.sh                    funções compartilhadas
+│   └── platform.sh                  detecção e perfil da plataforma
+├── backups/                     (gerado) backups locais de XML/configuração
+├── etapas/                      uma etapa = uma fase do fluxo
+│   ├── 00-inventario.sh             inventário de hardware
+│   ├── 01-verificar-bios.sh         checklist BIOS + verificação
+│   ├── 02-detectar-config.sh        detecta hardware/uplink e configura o host
+│   ├── 10-atualizar-sistema.sh      update + fwupd                       <reboot>
+│   ├── 11-driver-nvidia.sh          driver NVIDIA no host                <reboot>
+│   ├── 12-pacotes-base.sh           utilitários (+xmlstarlet)
+│   ├── 13-diretorios.sh             prepara /vm
+│   ├── 14-working-disk.sh           preflight do workingDisk externo
+│   ├── 20-virtualizacao.sh          KVM/QEMU/libvirt/OVMF/swtpm
+│   ├── 21-usuario-grupos.sh         grupos + permissões                  <logout>
+│   ├── 30-iommu-vfio.sh             IOMMU + VFIO                         <reboot>
+│   ├── 40-criar-vm.sh               VM + NAT default temporária
+│   ├── 41-instalacao-windows.sh     instalação manual do Windows
+│   ├── 50-hooks-gpu-hd1.sh          hooks dinâmicos + HD1
+│   ├── 51-usb-passthrough.sh        USB (opcional)
+│   ├── 52-cpu-pinning-hugepages.sh  pinning + HugePages                  <reboot>
+│   ├── 53-cpu-isolation.sh          isolcpus                             <reboot>
+│   ├── 60-rede-bridge.sh            rede final: bridge Ethernet ou NAT
+│   ├── 61-airlock.sh                SFTP seguro em bridge/NAT
+│   └── 70-trim-discard.sh           TRIM/discard
 ├── util/                        operação contínua e emergência
-│   ├── listar-grupos-iommu.sh       Cap. 16
-│   ├── snapshot-vm.sh               Cap. 25  criar/listar/reverter/apagar
-│   ├── backup-vm.sh                 Cap. 25  backup real em destino externo
-│   ├── atualizar-host.sh            Cap. 26  atualização segura (+ --validar)
-│   ├── diagnostico.sh               Cap. 28  relatório de diagnóstico
-│   └── recuperar-gpu.sh             Cap. 29  emergência: GPU de volta ao Linux
+│   ├── listar-grupos-iommu.sh       inspeciona grupos IOMMU
+│   ├── snapshot-vm.sh               cria/lista/reverte/apaga snapshots
+│   ├── backup-vm.sh                 backup offline da VM
+│   ├── atualizar-host.sh            atualização e validação do host
+│   ├── diagnostico.sh               relatório de diagnóstico
+│   └── recuperar-gpu.sh             emergência: GPU de volta ao Linux
+├── tests/                       testes herméticos e fixtures
 └── windows/                     rodar DENTRO da VM (PowerShell como admin)
-    ├── Desativar-Fast-Startup.ps1   Cap. 18
-    ├── Ativar-MSI-GPU.ps1           Cap. 22
-    └── Gerar-Chave-Airlock.ps1      Cap. 24
+    ├── Desativar-Fast-Startup.ps1
+    ├── Ativar-MSI-GPU.ps1
+    └── Gerar-Chave-Airlock.ps1
 ```
 
 ---
@@ -116,10 +120,10 @@ primeira necessidade e se comportam do mesmo jeito.
 bash menu.sh
 ```
 
-O menu mostra `[ok]`/`[  ]` por etapa consultando o sistema de verdade (cada
-etapa tem um modo `--verificar` com os critérios do "Como verificar" do
-capítulo). Execute as etapas em ordem; após cada `<reboot>`/`<logout>`, abra o
-menu de novo e continue do ponto em que parou.
+O menu mostra `[ok]`/`[  ]` por etapa consultando o sistema de verdade. Cada
+etapa implementa seus próprios critérios no modo `--verificar`. Execute as etapas
+em ordem; após cada `<reboot>`/`<logout>`, abra o menu de novo e continue do ponto
+em que parou.
 
 Também dá para rodar cada etapa direto, sem menu:
 
@@ -250,7 +254,7 @@ virsh --connect qemu:///system start win11    # liga (monitor troca para o Windo
 # desligar: pelo próprio Windows; o desktop Linux volta sozinho
 util/snapshot-vm.sh criar antes-de-algo       # ponto de restauração rápido
 util/backup-vm.sh                             # backup real no destino configurado
-util/atualizar-host.sh                        # atualização segura (Cap. 26)
+util/atualizar-host.sh                        # atualização segura do host
 util/atualizar-host.sh --validar              # validação em camadas pós-reboot
 util/diagnostico.sh                           # qualquer problema: comece aqui
 util/recuperar-gpu.sh                         # TTY (Ctrl+Alt+F3) se o vídeo não voltar
@@ -298,16 +302,16 @@ fi
 
 ### B. No Pop!_OS, etapa a etapa
 
-Cada etapa tem o modo `--verificar`, que implementa o "Como verificar" do
-capítulo correspondente e retorna códigos de saída 0 (ok), 1 (pendente),
-2 (indeterminado) ou 3 (erro):
+Cada etapa tem o modo `--verificar`, que consulta seus critérios diretamente no
+sistema e retorna códigos de saída 0 (ok), 1 (pendente), 2 (indeterminado) ou 3
+(erro):
 
 ```bash
 bash menu.sh --status                       # visão geral
 bash etapas/14-working-disk.sh --verificar  # mountpoint externo ativo ou dispensa explícita
 ```
 
-Verificações chave por fase (as mesmas do manual):
+Verificações chave por fase:
 
 | Fase | Comando | Critério de sucesso |
 |------|---------|---------------------|
@@ -335,7 +339,7 @@ Verificações chave por fase (as mesmas do manual):
 6. Se o vídeo não voltar: Ctrl+Alt+F3 e `bash util/recuperar-gpu.sh`
    (reboot do host é sempre uma saída válida e segura).
 
-### D. Testes do airlock (as 7 verificações do Capítulo 24)
+### D. Testes funcionais do Airlock
 
 1. Visão de serviço: `mount | grep airlock` (fuse.bindfs) e o teste de escrita
    que a própria etapa 61 executa.
@@ -354,7 +358,7 @@ Verificações chave por fase (as mesmas do manual):
 7. Hook: com a VM desligada, `sudo umount /srv/airlock/files`, ligar a VM e
    conferir a remontagem em `journalctl -t hook-qemu -b`.
 
-### E. Desempenho (Capítulo 27)
+### E. Desempenho
 
 Meça, não "sinta": 3DMark (3 execuções por configuração), MSI Afterburner/RTSS
 para 1% low, CrystalDiskMark para I/O. Aplique UM ajuste por vez (pinning,
@@ -362,32 +366,40 @@ depois HugePages, depois isolcpus, depois MSI) e registre a média e a variaçã
 
 ---
 
-## Reversão
+## Troubleshooting e reversão
 
-Cada etapa imprime seu caminho de reversão ao aplicar mudanças de risco, e o
-manual traz o "Como desfazer" completo por capítulo. Regras gerais:
+Consulte **[troubleshooting.md](troubleshooting.md)** antes de desfazer qualquer
+etapa. O documento organiza os procedimentos por sintoma e diferencia:
 
-- fstab: restaurar o backup `/etc/fstab.bak-<data>` (ou remover as linhas
-  marcadas com `# vm-passthrough:<id>`), depois `sudo mount -a`.
-- Parâmetros de kernel: `sudo kernelstub -d "<parâmetros>"` (ou restaurar
-  `/etc/default/grub.bak-<data>` + `sudo update-grub`).
-- XML da VM: `virsh --connect qemu:///system define backups/<vm>-<data>.xml`
-  (backup criado antes de toda alteração).
-- Rede bridge: a própria transação restaura falhas. Para reversão manual,
-  restaure/remova `/etc/netplan/90-vm-passthrough-bridge.yaml`, rode `sudo
-  netplan generate && sudo netplan apply`, restaure o XML com `virsh --connect
-  qemu:///system define backups/<vm>-<data>.xml` e ajuste a regra UFW.
-- Rede NAT: Netplan não foi tocado. Restaure o XML da VM e, após confirmar que
-  nenhuma VM consome o backend, use `virsh --connect qemu:///system net-destroy
-  <REDE_LIBVIRT>` e `virsh --connect qemu:///system net-undefine
-  <REDE_LIBVIRT>`. A rede `default` continua separada e pode ser reativada com
-  `virsh --connect qemu:///system net-start default`.
-- Emergências (sem vídeo, boot quebrado, fstab malformado): Capítulo 29 do
-  manual; `util/recuperar-gpu.sh` cobre o cenário 1.
+- rollback automático durante uma transação;
+- `--desfazer` explícito das etapas 52 e 53;
+- restauração manual por um backup exato;
+- snapshot interno do QCOW2;
+- backup offline da VM.
 
-## O que ficou de fora (deliberadamente)
+Essas proteções não são intercambiáveis. Em particular, as etapas 30, 40, 50,
+60, 61 e 70 não possuem teardown completo pós-commit, e snapshot não protege
+HD1, configuração do host, rede, NVRAM ou TPM. Se uma etapa informar rollback
+incompleto, não reinicie nem inicie a VM até comparar o estado com o backup
+anunciado.
 
-- Alternativa Samba do airlock (o manual manda escolher UM método; o padrão
-  aqui é SFTP). Instruções completas na seção 9 do Capítulo 24.
-- ACS override (último recurso com risco de segurança; Capítulo 28).
-- Benchmarks automatizados (rodam dentro do Windows; Capítulo 27).
+Para incidentes, comece sempre por:
+
+```bash
+bash menu.sh --status
+bash util/diagnostico.sh
+```
+
+Se a VM já estiver desligada e a GPU não voltar ao Linux, use o fluxo suportado:
+
+```bash
+bash util/recuperar-gpu.sh
+```
+
+## O que ficou de fora deliberadamente
+
+- alternativa Samba para o Airlock: o fluxo suportado é SFTP;
+- ACS override: não implementado porque pode reduzir o isolamento DMA;
+- CPU Intel: ainda não suportada pela implementação atual;
+- benchmarks automatizados dentro do Windows;
+- restauração automática dos conjuntos criados por `backup-vm.sh`.
