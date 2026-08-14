@@ -1,0 +1,4 @@
+# Evidência literal; não carregar como shell.
+firmware=unknown
+bootloader=unknown
+immutable=false

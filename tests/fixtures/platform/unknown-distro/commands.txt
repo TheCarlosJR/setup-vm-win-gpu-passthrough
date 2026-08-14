@@ -1,0 +1,4 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case unknown-distro|0|probe:unknown-distro\n|
+probe-fail|--case unknown-distro|42||probe-failure:unknown-distro\n
+uname|-m|0|x86_64\n|

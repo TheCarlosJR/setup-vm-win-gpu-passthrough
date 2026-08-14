@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case debian|0|probe:debian\n|
+probe-fail|--case debian|42||probe-failure:debian\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+apt-get|@present|127||

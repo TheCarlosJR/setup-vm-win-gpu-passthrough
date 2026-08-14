@@ -1,0 +1,6 @@
+NAME="Orion Experimental OS"
+PRETTY_NAME="Orion Experimental OS 9"
+ID=orion
+VERSION_ID="9"
+VERSION_CODENAME=unknown
+HOME_URL="https://invalid.example/orion"

@@ -1,0 +1,9 @@
+NAME="Fedora Linux"
+VERSION="42 (Silverblue)"
+ID=fedora
+VERSION_ID=42
+VERSION_CODENAME=""
+PLATFORM_ID="platform:f42"
+PRETTY_NAME="Fedora Linux 42.20250301.0 (Silverblue)"
+VARIANT="Silverblue"
+VARIANT_ID=silverblue

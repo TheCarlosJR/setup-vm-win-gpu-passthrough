@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case immutable|0|probe:immutable\n|
+probe-fail|--case immutable|42||probe-failure:immutable\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+rpm-ostree|@present|127||

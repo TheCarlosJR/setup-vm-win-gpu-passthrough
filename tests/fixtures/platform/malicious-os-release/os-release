@@ -1,0 +1,9 @@
+NAME="Hostile fixture"
+ID=hostile
+ID_LIKE="ubuntu debian"
+VERSION_ID="1"
+VERSION_CODENAME=$(printf 'payload-in-command-substitution')
+PRETTY_NAME="`printf 'payload-in-backticks'`"
+UNSAFE_VALUE=$(printf 'payload-in-unknown-key')
+printf 'PLATFORM_FIXTURE_PAYLOAD_EXECUTED\n'
+printf -v PLATFORM_FIXTURE_BUILTIN_EXECUTED 1

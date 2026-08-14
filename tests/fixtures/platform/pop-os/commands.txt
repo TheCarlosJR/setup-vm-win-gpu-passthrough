@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case pop-os|0|probe:pop-os\n|
+probe-fail|--case pop-os|42||probe-failure:pop-os\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+apt-get|@present|127||

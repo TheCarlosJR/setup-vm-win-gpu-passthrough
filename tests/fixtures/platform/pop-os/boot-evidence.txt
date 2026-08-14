@@ -1,0 +1,4 @@
+# Evidência literal; não carregar como shell.
+firmware=uefi
+bootloader=systemd-boot
+immutable=false

@@ -1,0 +1,5 @@
+# Evidência literal; não carregar como shell.
+firmware=uefi
+bootloader=grub
+immutable=true
+deployment=ostree

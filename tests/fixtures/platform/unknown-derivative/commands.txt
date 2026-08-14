@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case unknown-derivative|0|probe:unknown-derivative\n|
+probe-fail|--case unknown-derivative|42||probe-failure:unknown-derivative\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+apt-get|@present|127||

@@ -1,0 +1,4 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case malicious-os-release|0|probe:malicious-os-release\n|
+probe-fail|--case malicious-os-release|42||probe-failure:malicious-os-release\n
+uname|-m|0|x86_64\n|

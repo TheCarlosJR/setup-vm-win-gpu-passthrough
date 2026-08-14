@@ -1,0 +1,8 @@
+NAME="Pop!_OS"
+VERSION="22.04 LTS"
+ID=pop
+ID_LIKE="ubuntu debian"
+VERSION_ID="22.04"
+VERSION_CODENAME=jammy
+PRETTY_NAME="Pop!_OS 22.04 LTS"
+HOME_URL="https://pop.system76.com"

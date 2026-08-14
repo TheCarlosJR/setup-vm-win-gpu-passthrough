@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case opensuse|0|probe:opensuse\n|
+probe-fail|--case opensuse|42||probe-failure:opensuse\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+zypper|@present|127||

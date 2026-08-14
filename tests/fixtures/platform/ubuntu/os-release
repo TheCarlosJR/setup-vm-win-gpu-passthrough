@@ -1,0 +1,8 @@
+NAME="Ubuntu"
+VERSION="26.04 LTS (Resolute Raccoon)"
+ID=ubuntu
+ID_LIKE=debian
+VERSION_ID="26.04"
+VERSION_CODENAME=resolute
+PRETTY_NAME="Ubuntu 26.04 LTS"
+HOME_URL="https://www.ubuntu.com/"

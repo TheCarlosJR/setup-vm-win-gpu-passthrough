@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case cachyos|0|probe:cachyos\n|
+probe-fail|--case cachyos|42||probe-failure:cachyos\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+pacman|@present|127||

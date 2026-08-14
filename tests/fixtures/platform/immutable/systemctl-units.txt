@@ -1,0 +1,3 @@
+# unit|load_state|active_state|sub_state
+NetworkManager.service|loaded|active|running
+rpm-ostreed.service|loaded|active|running

@@ -1,0 +1,6 @@
+# command|arguments|exit_status|stdout|stderr
+probe-ok|--case fedora|0|probe:fedora\n|
+probe-fail|--case fedora|42||probe-failure:fedora\n
+uname|-m|0|x86_64\n|
+# @present expõe somente presença ao command -v; execução permanece proibida.
+dnf|@present|127||

@@ -1,0 +1,7 @@
+NAME="openSUSE Tumbleweed"
+ID="opensuse-tumbleweed"
+ID_LIKE="opensuse suse"
+VERSION_ID="20250301"
+PRETTY_NAME="openSUSE Tumbleweed"
+ANSI_COLOR="0;32"
+HOME_URL="https://www.opensuse.org/"

@@ -1,0 +1,7 @@
+NAME="Nebula Linux"
+PRETTY_NAME="Nebula Linux 1"
+ID=nebula
+ID_LIKE="ubuntu debian"
+VERSION_ID="1"
+VERSION_CODENAME=aurora
+HOME_URL="https://invalid.example/nebula"
