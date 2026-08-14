@@ -2,3 +2,7 @@
 passthrough.conf
 passthrough.conf.lock
 backups/
+
+# Inteligencia articial
+.kiro/
+semantic-review/
