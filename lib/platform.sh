@@ -13,12 +13,18 @@ fi
 _PLATAFORMA_LIB_CARREGADA=1
 
 PLATAFORMA_CARREGADA=0
+PLATAFORMA_DETECTADA=0
 PLATAFORMA_ERRO=""
 PLATAFORMA_ID=""
 PLATAFORMA_ID_LIKE=""
+PLATAFORMA_VARIANT_ID=""
 PLATAFORMA_VERSION_ID=""
 PLATAFORMA_VERSION_CODENAME=""
 PLATAFORMA_PERFIL=""
+PLATAFORMA_SUPPORT_LEVEL="blocked"
+PLATAFORMA_MUTAVEL=0
+PLATAFORMA_IMUTAVEL=0
+PLATAFORMA_BLOQUEIO_MOTIVO=""
 PLATAFORMA_GERENCIADOR_PACOTES=""
 PLATAFORMA_QEMU_PACOTE=""
 PLATAFORMA_QEMU_COMANDO=""
@@ -37,6 +43,15 @@ PLATAFORMA_QEMU_USUARIO_PADRAO=""
 PLATAFORMA_USUARIO_QEMU=""
 PLATAFORMA_CPU_VENDOR=""
 PLATAFORMA_PACOTES_VIRTUALIZACAO=()
+declare -ag PLATAFORMA_CAPABILITIES_CONHECIDAS=(
+    inventory.write config.manage host.update nvidia.driver packages.base
+    storage.prepare virtualization.manage iommu.configure domain.create
+    domain.console hooks.configure usb.configure cpu.tune network.configure
+    airlock.configure trim.configure backup.create snapshot.manage gpu.recover
+    diagnostic.write
+)
+declare -Ag PLATAFORMA_CAPABILITIES=()
+declare -Ag PLATAFORMA_CAPABILITY_REASONS=()
 
 _plataforma_trim() {
     local valor="${1:-}"
@@ -61,7 +76,7 @@ _plataforma_decodificar_valor() {
 
 _plataforma_ler_os_release() {
     local arquivo="$1" linha chave bruto valor
-    local id="" id_like="" version_id="" codename=""
+    local id="" id_like="" variant_id="" version_id="" codename=""
     local -A vistas=()
     PLATAFORMA_ERRO=""
     [ -r "$arquivo" ] && [ -f "$arquivo" ] \
@@ -72,7 +87,7 @@ _plataforma_ler_os_release() {
         [[ "$linha" == *=* ]] || continue
         chave="$(_plataforma_trim "${linha%%=*}")"
         case "$chave" in
-            ID|ID_LIKE|VERSION_ID|VERSION_CODENAME) ;;
+            ID|ID_LIKE|VARIANT_ID|VERSION_ID|VERSION_CODENAME) ;;
             *) continue ;;
         esac
         [ -z "${vistas[$chave]+definida}" ] \
@@ -84,6 +99,7 @@ _plataforma_ler_os_release() {
         case "$chave" in
             ID) id="$valor" ;;
             ID_LIKE) id_like="$valor" ;;
+            VARIANT_ID) variant_id="$valor" ;;
             VERSION_ID) version_id="$valor" ;;
             VERSION_CODENAME) codename="$valor" ;;
         esac
@@ -93,6 +109,8 @@ _plataforma_ler_os_release() {
         || { PLATAFORMA_ERRO="ID ausente ou inválido em $arquivo."; return 1; }
     [ -z "$id_like" ] || [[ "$id_like" =~ ^[a-z0-9._-]+([[:space:]]+[a-z0-9._-]+)*$ ]] \
         || { PLATAFORMA_ERRO="ID_LIKE inválido em $arquivo."; return 1; }
+    [ -z "$variant_id" ] || [[ "$variant_id" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
+        || { PLATAFORMA_ERRO="VARIANT_ID inválido em $arquivo."; return 1; }
     [ -z "$version_id" ] || [[ "$version_id" =~ ^[[:alnum:]._-]+$ ]] \
         || { PLATAFORMA_ERRO="VERSION_ID inválido em $arquivo."; return 1; }
     [ -z "$codename" ] || [[ "$codename" =~ ^[[:alnum:]._-]+$ ]] \
@@ -100,28 +118,25 @@ _plataforma_ler_os_release() {
 
     PLATAFORMA_ID="$id"
     PLATAFORMA_ID_LIKE="$id_like"
+    PLATAFORMA_VARIANT_ID="$variant_id"
     PLATAFORMA_VERSION_ID="$version_id"
     PLATAFORMA_VERSION_CODENAME="$codename"
 }
 
-plataforma_carregar() {
-    # O caminho opcional é uma dependência explícita para testes unitários. Os
-    # entrypoints usam /etc, salvo no modo hermético validado por common.sh.
-    local arquivo="${1:-}"
-    if [ -z "$arquivo" ]; then
-        if declare -F caminho_sistema >/dev/null 2>&1; then
-            arquivo="$(caminho_sistema /etc/os-release)" || return 1
-        else
-            arquivo=/etc/os-release
-        fi
-    fi
+_plataforma_resetar_estado() {
     PLATAFORMA_CARREGADA=0
+    PLATAFORMA_DETECTADA=0
     PLATAFORMA_ERRO=""
     PLATAFORMA_ID=""
     PLATAFORMA_ID_LIKE=""
+    PLATAFORMA_VARIANT_ID=""
     PLATAFORMA_VERSION_ID=""
     PLATAFORMA_VERSION_CODENAME=""
     PLATAFORMA_PERFIL=""
+    PLATAFORMA_SUPPORT_LEVEL="blocked"
+    PLATAFORMA_MUTAVEL=0
+    PLATAFORMA_IMUTAVEL=0
+    PLATAFORMA_BLOQUEIO_MOTIVO=""
     PLATAFORMA_GERENCIADOR_PACOTES=""
     PLATAFORMA_QEMU_PACOTE=""
     PLATAFORMA_QEMU_COMANDO=""
@@ -140,8 +155,119 @@ plataforma_carregar() {
     PLATAFORMA_USUARIO_QEMU=""
     PLATAFORMA_CPU_VENDOR=""
     PLATAFORMA_PACOTES_VIRTUALIZACAO=()
-    _plataforma_ler_os_release "$arquivo" || return 1
+    PLATAFORMA_CAPABILITIES=()
+    PLATAFORMA_CAPABILITY_REASONS=()
+}
 
+_plataforma_id_like_contem() {
+    local procurado="$1" item
+    for item in $PLATAFORMA_ID_LIKE; do
+        [ "$item" = "$procurado" ] && return 0
+    done
+    return 1
+}
+
+_plataforma_detectar_imutabilidade() {
+    # Em testes com os-release explicitamente injetado, apenas VARIANT_ID é
+    # autoritativo. Em produção, /run/ostree-booted é uma segunda evidência.
+    local fonte_explicita="${1:-0}" marcador=""
+    case "$PLATAFORMA_VARIANT_ID" in
+        silverblue|kinoite|sericea|onyx|coreos)
+            PLATAFORMA_IMUTAVEL=1
+            PLATAFORMA_BLOQUEIO_MOTIVO="VARIANT_ID=$PLATAFORMA_VARIANT_ID identifica uma implantação imutável."
+            return 0
+            ;;
+    esac
+    [ "$fonte_explicita" -eq 0 ] || return 0
+    if declare -F caminho_sistema >/dev/null 2>&1; then
+        marcador="$(caminho_sistema /run/ostree-booted)" || {
+            PLATAFORMA_ERRO="Não foi possível resolver a evidência de implantação ostree."
+            return 1
+        }
+    else
+        marcador=/run/ostree-booted
+    fi
+    if [ -e "$marcador" ] || [ -L "$marcador" ]; then
+        PLATAFORMA_IMUTAVEL=1
+        PLATAFORMA_BLOQUEIO_MOTIVO="Uma implantação ostree foi detectada; o host é tratado como imutável."
+    fi
+}
+
+_plataforma_classificar_suporte() {
+    local familia
+    if [ "$PLATAFORMA_IMUTAVEL" -eq 1 ]; then
+        PLATAFORMA_SUPPORT_LEVEL=diagnostic-only
+        PLATAFORMA_MUTAVEL=0
+        return 0
+    fi
+    case "$PLATAFORMA_ID" in
+        ubuntu|pop)
+            PLATAFORMA_SUPPORT_LEVEL=supported
+            PLATAFORMA_MUTAVEL=1
+            PLATAFORMA_BLOQUEIO_MOTIVO=""
+            return 0
+            ;;
+        debian|arch|cachyos|fedora|opensuse-tumbleweed)
+            PLATAFORMA_SUPPORT_LEVEL=diagnostic-only
+            PLATAFORMA_MUTAVEL=0
+            PLATAFORMA_BLOQUEIO_MOTIVO="ID=$PLATAFORMA_ID possui provider planejado, ainda restrito a diagnóstico."
+            return 0
+            ;;
+    esac
+    for familia in ubuntu debian arch fedora rhel opensuse suse; do
+        if _plataforma_id_like_contem "$familia"; then
+            PLATAFORMA_SUPPORT_LEVEL=family-unverified
+            PLATAFORMA_MUTAVEL=0
+            PLATAFORMA_BLOQUEIO_MOTIVO="ID=$PLATAFORMA_ID declara ID_LIKE=$PLATAFORMA_ID_LIKE, mas a derivação não foi verificada."
+            return 0
+        fi
+    done
+    PLATAFORMA_SUPPORT_LEVEL=blocked
+    PLATAFORMA_MUTAVEL=0
+    PLATAFORMA_BLOQUEIO_MOTIVO="ID=$PLATAFORMA_ID não possui provider reconhecido."
+}
+
+_plataforma_inicializar_capabilities() {
+    local capability
+    for capability in "${PLATAFORMA_CAPABILITIES_CONHECIDAS[@]}"; do
+        PLATAFORMA_CAPABILITIES[$capability]=0
+        PLATAFORMA_CAPABILITY_REASONS[$capability]="$PLATAFORMA_BLOQUEIO_MOTIVO"
+    done
+}
+
+_plataforma_habilitar_capabilities_perfil() {
+    local capability
+    for capability in "${PLATAFORMA_CAPABILITIES_CONHECIDAS[@]}"; do
+        PLATAFORMA_CAPABILITIES[$capability]=1
+        PLATAFORMA_CAPABILITY_REASONS[$capability]="Capability habilitada pelo perfil exato $PLATAFORMA_PERFIL."
+    done
+}
+
+plataforma_carregar() {
+    # O caminho opcional é uma dependência explícita para testes unitários. Os
+    # entrypoints usam /etc, salvo no modo hermético validado por common.sh.
+    local arquivo="${1:-}" fonte_explicita=0
+    if [ -n "$arquivo" ]; then
+        fonte_explicita=1
+    elif declare -F caminho_sistema >/dev/null 2>&1; then
+        arquivo="$(caminho_sistema /etc/os-release)" || return 1
+    else
+        arquivo=/etc/os-release
+    fi
+    _plataforma_resetar_estado
+    _plataforma_ler_os_release "$arquivo" || return 1
+    PLATAFORMA_DETECTADA=1
+    _plataforma_detectar_imutabilidade "$fonte_explicita" || return 1
+    _plataforma_classificar_suporte
+    _plataforma_inicializar_capabilities
+
+    if [ "$PLATAFORMA_SUPPORT_LEVEL" != supported ]; then
+        PLATAFORMA_ERRO="Mutação indisponível no nível $PLATAFORMA_SUPPORT_LEVEL: $PLATAFORMA_BLOQUEIO_MOTIVO"
+        return 1
+    fi
+
+    # Defaults são atributos de um perfil exato aceito, nunca evidência de
+    # suporte. Nenhuma capability é inferida pela presença de comandos.
     PLATAFORMA_GERENCIADOR_PACOTES=apt
     PLATAFORMA_QEMU_COMANDO=qemu-system-x86_64
     PLATAFORMA_INITRAMFS_BACKEND=update-initramfs
@@ -166,7 +292,11 @@ plataforma_carregar() {
             PLATAFORMA_BOOT_BACKENDS="kernelstub grub"
             ;;
         *)
-            PLATAFORMA_ERRO="Distribuição não suportada por este núcleo mínimo: ID=$PLATAFORMA_ID. Apenas Ubuntu e Pop!_OS estão habilitados."
+            PLATAFORMA_ERRO="Falha interna: support level habilitou um perfil sem provider exato (ID=$PLATAFORMA_ID)."
+            PLATAFORMA_SUPPORT_LEVEL=blocked
+            PLATAFORMA_MUTAVEL=0
+            PLATAFORMA_BLOQUEIO_MOTIVO="$PLATAFORMA_ERRO"
+            _plataforma_inicializar_capabilities
             return 1
             ;;
     esac
@@ -174,7 +304,60 @@ plataforma_carregar() {
         "$PLATAFORMA_QEMU_PACOTE" qemu-utils libvirt-daemon-system
         libvirt-clients bridge-utils virt-manager ovmf swtpm swtpm-tools virtinst
     )
+    _plataforma_habilitar_capabilities_perfil
     PLATAFORMA_CARREGADA=1
+    return 0
+}
+
+platform_capability_known() {
+    local procurada="${1:-}" capability
+    [ -n "$procurada" ] || return 1
+    for capability in "${PLATAFORMA_CAPABILITIES_CONHECIDAS[@]}"; do
+        [ "$capability" = "$procurada" ] && return 0
+    done
+    return 1
+}
+
+platform_has_capability() {
+    local capability="${1:-}"
+    platform_capability_known "$capability" || return 1
+    if [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
+        plataforma_carregar || [ "$PLATAFORMA_DETECTADA" -eq 1 ] || return 1
+    fi
+    [ "${PLATAFORMA_CAPABILITIES[$capability]:-0}" -eq 1 ]
+}
+
+platform_capability_reason() {
+    local capability="${1:-}"
+    if ! platform_capability_known "$capability"; then
+        printf 'Capability desconhecida: %s.\n' "${capability:-vazia}"
+        return 1
+    fi
+    if [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
+        if ! plataforma_carregar && [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
+            printf '%s\n' "$PLATAFORMA_ERRO"
+            return 1
+        fi
+    fi
+    printf '%s\n' "${PLATAFORMA_CAPABILITY_REASONS[$capability]:-$PLATAFORMA_BLOQUEIO_MOTIVO}"
+}
+
+platform_require_capability() {
+    local capability="${1:-}"
+    if ! platform_capability_known "$capability"; then
+        PLATAFORMA_ERRO="Capability desconhecida: ${capability:-vazia}."
+        return 1
+    fi
+    if [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
+        if ! plataforma_carregar && [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
+            return 1
+        fi
+    fi
+    if [ "${PLATAFORMA_CAPABILITIES[$capability]:-0}" -ne 1 ]; then
+        PLATAFORMA_ERRO="${PLATAFORMA_CAPABILITY_REASONS[$capability]:-$PLATAFORMA_BLOQUEIO_MOTIVO}"
+        return 1
+    fi
+    return 0
 }
 
 plataforma_exigir_suportada() {

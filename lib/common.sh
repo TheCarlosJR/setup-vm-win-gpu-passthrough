@@ -13,12 +13,17 @@ COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJETO_DIR="$(cd "$COMMON_DIR/.." && pwd)"
 # shellcheck source=lib/platform.sh
 source "$COMMON_DIR/platform.sh"
+# Ponte única para o core Python. O carregamento não produz efeito: nada é
+# executado até que uma função python_core_* seja chamada explicitamente.
+# shellcheck source=lib/python-core.sh
+source "$COMMON_DIR/python-core.sh"
 CONF_ARQUIVO="$PROJETO_DIR/passthrough.conf"
 BACKUPS_DIR="$PROJETO_DIR/backups"
 FSTAB="/etc/fstab"
 GRUB_DEFAULT_ARQUIVO="/etc/default/grub"
 GRUB_CFG_ARQUIVO="/boot/grub/grub.cfg"
 KERNELSTUB_ENTRIES_DIR="/boot/efi/loader/entries"
+VFIO_MODULES_ARQUIVO="/etc/modules-load.d/vfio.conf"
 VIRSH="virsh --connect qemu:///system"
 
 # --- Saída colorida ----------------------------------------------------------
@@ -79,11 +84,65 @@ caminho_sistema() {
 
 inicializar_raiz_teste
 
+# Módulos de efeito do shell (seção 2.3). O carregamento é ordenado: boot.sh
+# depende de caminho_sistema, das funções de saída e do provider de plataforma,
+# todos já definidos acima. Nenhum módulo produz efeito ao ser sourceado.
+# shellcheck source=lib/shell/boot.sh
+source "$COMMON_DIR/shell/boot.sh"
+
 # --- Pré-checagens ------------------------------------------------------------
 exigir_nao_root() {
     if [ "$(id -u)" -eq 0 ]; then
         falhar "Execute como usuário normal (os scripts chamam sudo quando necessário)."
     fi
+}
+
+# --- Envelope central de mutação --------------------------------------------
+# Toda recusa ocorre antes de privilégio, temporários ou escrita. A guarda
+# consulta somente os-release, a evidência ostree e o fabricante da CPU.
+MUTATION_GUARD_ERROR=""
+_guard_mutation_diagnosticar() {
+    MUTATION_GUARD_ERROR="$1"
+    erro "$MUTATION_GUARD_ERROR"
+}
+
+guard_mutation() {
+    local capability="${1:-}" motivo
+    MUTATION_GUARD_ERROR=""
+    if [ "$#" -ne 1 ] || [ -z "$capability" ]; then
+        _guard_mutation_diagnosticar "Mutação bloqueada: informe exatamente uma capability."
+        return 1
+    fi
+
+    if ! plataforma_carregar; then
+        if [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
+            motivo="plataforma não pôde ser detectada com confiança: $PLATAFORMA_ERRO"
+        elif [ "$PLATAFORMA_IMUTAVEL" -eq 1 ]; then
+            motivo="plataforma imutável: $PLATAFORMA_BLOQUEIO_MOTIVO"
+        else
+            motivo="nível de suporte $PLATAFORMA_SUPPORT_LEVEL: $PLATAFORMA_BLOQUEIO_MOTIVO"
+        fi
+        _guard_mutation_diagnosticar "Mutação '$capability' bloqueada: $motivo"
+        return 1
+    fi
+
+    if [ "$PLATAFORMA_IMUTAVEL" -eq 1 ] || [ "$PLATAFORMA_MUTAVEL" -ne 1 ] \
+       || [ "$PLATAFORMA_SUPPORT_LEVEL" != supported ]; then
+        _guard_mutation_diagnosticar \
+            "Mutação '$capability' bloqueada: plataforma não mutável ($PLATAFORMA_SUPPORT_LEVEL): $PLATAFORMA_BLOQUEIO_MOTIVO"
+        return 1
+    fi
+    if ! platform_require_capability "$capability"; then
+        _guard_mutation_diagnosticar \
+            "Mutação '$capability' bloqueada: $PLATAFORMA_ERRO"
+        return 1
+    fi
+    if ! plataforma_validar_cpu_amd; then
+        _guard_mutation_diagnosticar \
+            "Mutação '$capability' bloqueada: $PLATAFORMA_ERRO"
+        return 1
+    fi
+    return 0
 }
 
 # --- Sessão sudo: senha UMA vez por execução ---------------------------------
@@ -521,9 +580,16 @@ CHAVES_CONF_PERMITIDAS=(
     CPUS_VM CPUS_HOST HUGEPAGES_1G ISO_WINDOWS ISO_VIRTIO
     REDE_MODO INTERFACE_FISICA REDE_BRIDGE REDE_LIBVIRT
     REDE_BRIDGE_LIBVIRT REDE_NAT_CIDR VM_NIC_MAC VM_IP_FIXO IP_FIXO_HOST
-    TRANSFER_USER AIRLOCK_DIR AIRLOCK_BIND AIRLOCK_DISPENSADO
-    BACKUPS_VM_DIR BACKUP_DISPENSADO
+    TRANSFER_USER AIRLOCK_DIR AIRLOCK_BIND
+    BACKUPS_VM_DIR
 )
+
+# REQ-WAIVERS (decidido em I4.8): AIRLOCK_DISPENSADO e BACKUP_DISPENSADO saíram
+# da allowlist porque nunca alteraram pré-requisito, status ou execução. O core
+# continua aceitando as linhas para não derrubar configuração existente, sem
+# expor o valor, e a etapa 02 remove as linhas na migração. As duas dispensas
+# que permanecem (workingDisk e HD1) têm efeito real e testado.
+CHAVES_CONF_DEPRECIADAS=(AIRLOCK_DISPENSADO BACKUP_DISPENSADO)
 
 chave_conf_permitida() {
     local procurada="${1:-}" chave
@@ -870,6 +936,81 @@ validar_iso_configurada() {
         || { ARMAZENAMENTO_ERRO="Não foi possível fixar a identidade da ISO: $logico"; return 1; }
 }
 
+ISO_OPCIONAL_ESTADO=""
+ISO_OPCIONAL_ERRO=""
+classificar_iso_opcional_conf() {
+    # Classifica um caminho de ISO digitado ANTES de persisti-lo, com a mesma
+    # política de salvar_conf/etapa 40 (filho direto canônico de /vm, sem
+    # vírgula e sem links). Um prompt opcional consulta esta função para nunca
+    # abortar dentro de salvar_conf por um caminho fora da política.
+    # Estados em sucesso: vazia (sem valor), ausente (política ok, arquivo
+    # ainda não existe; /vm nasce na etapa 13) e valida (arquivo regular ok).
+    local logico="${1:-}" fisico
+    ISO_OPCIONAL_ESTADO=""
+    ISO_OPCIONAL_ERRO=""
+    if [ -z "$logico" ]; then
+        ISO_OPCIONAL_ESTADO=vazia
+        return 0
+    fi
+    if ! caminho_artefato_vm_logico_valido "$logico"; then
+        ISO_OPCIONAL_ERRO="Caminho recusado pela política de armazenamento: a ISO precisa ser um filho direto canônico de /vm, sem vírgula (ex.: /vm/Win11.iso); recebi '$logico'."
+        return 1
+    fi
+    fisico="$(_caminho_configurado_fisico "$logico")" \
+        || { ISO_OPCIONAL_ERRO="Não foi possível mapear a ISO: $logico"; return 1; }
+    if [ ! -e "$fisico" ] && [ ! -L "$fisico" ]; then
+        ISO_OPCIONAL_ESTADO=ausente
+        return 0
+    fi
+    validar_iso_configurada "$logico" \
+        || { ISO_OPCIONAL_ERRO="$ARMAZENAMENTO_ERRO"; return 1; }
+    ISO_OPCIONAL_ESTADO=valida
+}
+
+CONF_ISO_NOVO_VALOR=""
+perguntar_iso_valor_conf() {
+    # Só decide o valor; não persiste. Separar a decisão da persistência é o que
+    # permite reaproveitar exatamente este prompt na migração pré-parser de
+    # REQ-CONF-ISO, onde a publicação precisa ser um único rename com todas as
+    # chaves pendentes.
+    # Publica CONF_ISO_NOVO_VALOR (vazio significa "decidir na etapa 40").
+    local descricao="$1" caminho tentativas=0
+    CONF_ISO_NOVO_VALOR=""
+    while :; do
+        caminho="$(perguntar "Caminho da $descricao em /vm (ENTER para informar depois, na etapa 40)" '')"
+        caminho="${caminho/#\~/$HOME}"
+        if [ -z "$caminho" ]; then
+            return 0
+        fi
+        if classificar_iso_opcional_conf "$caminho"; then
+            if [ "$ISO_OPCIONAL_ESTADO" = ausente ]; then
+                aviso "Arquivo não encontrado: $caminho (ficará vazio; informe na etapa 40)."
+                return 0
+            fi
+            CONF_ISO_NOVO_VALOR="$caminho"
+            ok "$descricao validada sem links: $caminho"
+            return 0
+        fi
+        aviso "$ISO_OPCIONAL_ERRO"
+        info "Copie a ISO como operador para um nome direto e exclusivo em /vm (criado na etapa 13) e informe esse caminho, ou ENTER para decidir na etapa 40."
+        tentativas=$((tentativas + 1))
+        if [ "$tentativas" -ge 5 ]; then
+            aviso "Cinco tentativas sem um caminho aceito; a $descricao ficará vazia (informe na etapa 40)."
+            return 0
+        fi
+    done
+}
+
+perguntar_iso_opcional_conf() {
+    # Prompt opcional de ISO da etapa 02. ENTER, arquivo ainda ausente ou cinco
+    # recusas deixam a chave vazia para a etapa 40 exigir depois; somente um
+    # caminho aceito pela política é persistido, então salvar_conf nunca
+    # derruba a detecção por causa de uma ISO.
+    local chave="$1" descricao="$2"
+    perguntar_iso_valor_conf "$descricao"
+    salvar_conf "$chave" "$CONF_ISO_NOVO_VALOR"
+}
+
 nome_unidade_systemd_valido() {
     local valor="${1:-}"
     [[ "$valor" =~ ^[[:alnum:]][[:alnum:]_.@:-]{0,254}$ ]]
@@ -917,38 +1058,11 @@ lista_cpus_valida() {
     done
 }
 
-validar_valor_conf() {
-    local chave="$1" valor="$2"
-    [ -z "$valor" ] && return 0
-    case "$chave" in
-        USUARIO_LINUX|TRANSFER_USER) nome_usuario_valido "$valor" ;;
-        VM_STORAGE_GROUP) nome_grupo_vm_dedicado_valido "$valor" ;;
-        VM_NAME) nome_vm_valido "$valor" ;;
-        BOOTLOADER) [[ "$valor" = kernelstub || "$valor" = grub ]] ;;
-        GPU_PCI_ID|GPU_AUDIO_PCI_ID) pci_bdf_valido "$valor" ;;
-        GPU_VENDOR_DEVICE_ID|GPU_AUDIO_VENDOR_DEVICE_ID) pci_vendor_device_valido "$valor" ;;
-        IOMMU_GROUP_GPU) inteiro_na_faixa "$valor" 0 65535 ;;
-        DM_SERVICE) nome_unidade_systemd_valido "$valor" ;;
-        NVME_DEVICE|WORKING_DISK_PATH|HD1_BY_ID_PATH|AIRLOCK_DIR|AIRLOCK_BIND|BACKUPS_VM_DIR)
-            caminho_absoluto_seguro "$valor" ;;
-        QCOW2_PATH) caminho_qcow2_logico_valido "$valor" ;;
-        ISO_WINDOWS|ISO_VIRTIO) caminho_artefato_vm_logico_valido "$valor" ;;
-        WORKING_DISK_DISPENSADO|HD1_DISPENSADO|AIRLOCK_DISPENSADO|BACKUP_DISPENSADO)
-            [[ "$valor" = sim || "$valor" = nao ]] ;;
-        QCOW2_TAMANHO) [[ "$valor" =~ ^[1-9][0-9]*[KMGTPE]$ ]] ;;
-        VM_RAM_MB) inteiro_na_faixa "$valor" 1024 1048576 ;;
-        VM_VCPUS|VM_CORES|VM_THREADS) inteiro_na_faixa "$valor" 1 65535 ;;
-        HUGEPAGES_1G) inteiro_na_faixa "$valor" 0 1048576 ;;
-        CPUS_VM|CPUS_HOST) lista_cpus_valida "$valor" ;;
-        REDE_MODO) [[ "$valor" = bridge || "$valor" = nat ]] ;;
-        INTERFACE_FISICA|REDE_BRIDGE|REDE_BRIDGE_LIBVIRT) nome_interface_valido "$valor" ;;
-        REDE_LIBVIRT) nome_rede_libvirt_valido "$valor" ;;
-        REDE_NAT_CIDR) cidr_privado_24_valido "$valor" ;;
-        VM_NIC_MAC) mac_valido "$valor" ;;
-        VM_IP_FIXO|IP_FIXO_HOST) ipv4_valido "$valor" ;;
-        *) return 1 ;;
-    esac
-}
+# validar_valor_conf mudou de lugar: o mapeamento chave -> tipo agora vive no
+# módulo de configuração do core Python, e o wrapper público está junto das
+# demais funções de configuração, mais abaixo. Os validadores primitivos
+# (caminho, MAC, IPv4, lista de CPUs, interface) permanecem aqui porque são
+# usados por prompts e por validação de dados de runtime, não só pelo schema.
 
 _trim_espacos_conf() {
     local valor="$1"
@@ -1021,93 +1135,178 @@ _decodificar_literal_conf() {
     REPLY="$valor"
 }
 
-carregar_conf() {
-    local linha conteudo chave valor numero=0
-    local -A vistas=()
-    [ -e "$CONF_ARQUIVO" ] || return 0
-    [ -f "$CONF_ARQUIVO" ] && [ ! -L "$CONF_ARQUIVO" ] \
-        || falhar "Configuração precisa ser um arquivo regular, não um link: $CONF_ARQUIVO"
+# --- Fronteira de configuração: o core é a única implementação ----------------
+# As funções públicas abaixo mantêm nome, argumentos, efeitos e mensagens de
+# antes da migração. O que mudou é onde o schema mora: parsing, validação,
+# serialização e publicação atômica passaram a ser do core Python. O caminho do
+# conf é um LOCAL_IDENTIFIER e, pela seção 3.9, não entra em argv: a ponte passa
+# o descritor do diretório e o basename viaja no payload.
+#
+# CHAVES_CONF_PERMITIDAS continua sendo a allowlist do canal de pares. Ela não é
+# uma segunda autoridade sobre o schema: se divergir do core, a carga falha
+# fechada, porque o core emitiria uma chave que a allowlist não autoriza.
 
+CONF_DIRETORIO_ALVO=""
+CONF_NOME_ALVO=""
+CONF_PARES_PERMITIDAS=()
+
+_conf_localizar_alvo() {
+    # Separa o alvo em diretório e basename, sem resolver o link do arquivo.
+    local caminho="${1:-$CONF_ARQUIVO}"
+    CONF_DIRETORIO_ALVO=""
+    CONF_NOME_ALVO=""
+    case "$caminho" in
+        */*)
+            CONF_DIRETORIO_ALVO="${caminho%/*}"
+            CONF_NOME_ALVO="${caminho##*/}"
+            [ -n "$CONF_DIRETORIO_ALVO" ] || CONF_DIRETORIO_ALVO=/
+            ;;
+        *)
+            CONF_DIRETORIO_ALVO="$(pwd -P)" || return 1
+            CONF_NOME_ALVO="$caminho"
+            ;;
+    esac
+    [ -n "$CONF_NOME_ALVO" ] || return 1
+    return 0
+}
+
+_conf_allowlist_pares() {
+    # Allowlist completa da resposta, derivada da própria allowlist do shell.
+    local chave
+    CONF_PARES_PERMITIDAS=(
+        CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+        EXISTS KEY_COUNT PRESENT_COUNT FINAL_NEWLINE LINE_COUNT
+        CHANGED UPDATE_COUNT MIGRATED_COUNT REMOVED_COUNT INVALID_BEFORE
+        PUBLISHED CREATED BYTES_WRITTEN SHA256
+        MODE_OCTAL MODE_EXPOSES_OTHERS
+        DEPRECATED_PRESENT DEPRECATED_WITH_VALUE DEPRECATED_KEYS
+        RELATION_CONFLICTS RELATION_CONFLICT_KEYS
+    )
+    for chave in "${CHAVES_CONF_PERMITIDAS[@]}"; do
+        CONF_PARES_PERMITIDAS+=("VALUE_$chave" "PRESENT_$chave")
+    done
+}
+
+carregar_conf() {
+    # Lê e valida a configuração pelo core. Chave ausente é desdefinida, para
+    # que uma execução nunca herde valor de outra (protocolo NUL validado).
+    local chave nome_valor nome_presente
+    local -a payload=()
+    _conf_localizar_alvo \
+        || falhar "Caminho de configuração inválido: $CONF_ARQUIVO"
+    if [ -L "$CONF_ARQUIVO" ]; then
+        falhar "Configuração precisa ser um arquivo regular, não um link: $CONF_ARQUIVO"
+    fi
     for chave in "${CHAVES_CONF_PERMITIDAS[@]}"; do
         unset "$chave"
     done
-
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        numero=$((numero + 1))
-        _trim_espacos_conf "$linha"
-        conteudo="$REPLY"
-        [ -z "$conteudo" ] && continue
-        [[ "$conteudo" == \#* ]] && continue
-        if ! [[ "$conteudo" =~ ^([A-Z][A-Z0-9_]*)[[:space:]]*=(.*)$ ]]; then
-            falhar "Linha $numero inválida em $CONF_ARQUIVO: somente CHAVE=literal é permitido."
+    [ -e "$CONF_ARQUIVO" ] || return 0
+    _conf_allowlist_pares
+    payload=(name "$CONF_NOME_ALVO")
+    if ! python_core_config CONF_PARES_PERMITIDAS CFG_ config-load payload \
+            "$CONF_DIRETORIO_ALVO"; then
+        falhar "Configuração recusada em $CONF_ARQUIVO: $(_core_diagnostico 'schema fechado violado')"
+    fi
+    [ "${CFG_EXISTS:-0}" = 1 ] || return 0
+    # Uma flag depreciada com valor mente sobre ter efeito; avisar é obrigatório
+    # e a etapa 02 remove a linha. Um conflito de relação (caminho definido e
+    # dispensa "sim") é reportado aqui e explicado pela etapa que o possui.
+    if [ "${CFG_DEPRECATED_WITH_VALUE:-0}" != 0 ]; then
+        aviso "Configuração usa dispensa sem efeito: ${CFG_DEPRECATED_KEYS//$'\n'/, }. Rode a etapa 02 para remover a linha."
+    fi
+    if [ "${CFG_RELATION_CONFLICTS:-0}" != 0 ]; then
+        aviso "Configuração contraditória entre caminho e dispensa: ${CFG_RELATION_CONFLICT_KEYS//$'\n'/, }."
+    fi
+    # A configuração guarda identidade local (BDF, MAC, IP, caminhos): a seção
+    # 3.9 exige arquivo do projeto em 0600. Um modo herdado de cópia manual
+    # expõe isso a qualquer conta da máquina, então o aviso é obrigatório. A
+    # próxima gravação aperta o modo automaticamente.
+    # O aviso vale só para a configuração real do operador: o modelo versionado
+    # é neutro por desenho e pode ser legível por todos.
+    if [ "${CFG_MODE_EXPOSES_OTHERS:-0}" != 0 ] \
+        && [ "$CONF_NOME_ALVO" = passthrough.conf ]; then
+        aviso "Configuração legível por outros usuários (modo ${CFG_MODE_OCTAL:-?}): ela guarda identificadores do seu hardware."
+        info "Corrija agora com: chmod 600 $CONF_ARQUIVO (a próxima gravação também aperta o modo)."
+    fi
+    for chave in "${CHAVES_CONF_PERMITIDAS[@]}"; do
+        nome_presente="CFG_PRESENT_$chave"
+        nome_valor="CFG_VALUE_$chave"
+        if [ "${!nome_presente}" = 1 ]; then
+            printf -v "$chave" '%s' "${!nome_valor}"
+            # shellcheck disable=SC2163
+            export "$chave"
+        else
+            unset "$chave"
         fi
-        chave="${BASH_REMATCH[1]}"
-        chave_conf_permitida "$chave" \
-            || falhar "Chave desconhecida '$chave' na linha $numero de $CONF_ARQUIVO."
-        [ -z "${vistas[$chave]+definida}" ] \
-            || falhar "Chave '$chave' repetida na linha $numero de $CONF_ARQUIVO."
-        _decodificar_literal_conf "${BASH_REMATCH[2]}" \
-            || falhar "Literal inseguro ou malformado para '$chave' na linha $numero de $CONF_ARQUIVO."
-        valor="$REPLY"
-        validar_valor_conf "$chave" "$valor" \
-            || falhar "Valor inválido para '$chave' na linha $numero de $CONF_ARQUIVO."
-        printf -v "$chave" '%s' "$valor"
-        export "$chave"
-        vistas[$chave]=1
-    done < "$CONF_ARQUIVO"
+    done
 }
 
-_citar_conf() {
-    # Serializa para o subconjunto literal compreendido pelo parser acima.
-    local valor="$1" caractere i
-    printf '"'
-    for ((i = 0; i < ${#valor}; i++)); do
-        caractere="${valor:i:1}"
-        if [ "$caractere" = '\' ] || [ "$caractere" = '"' ] \
-           || [ "$caractere" = '$' ] || [ "$caractere" = '`' ]; then
-            printf '\\'
-        fi
-        printf '%s' "$caractere"
+_conf_publicar() {
+    # $@ = pares CHAVE VALOR. Schema, serialização e publicação atômica são do
+    # core; aqui só entram a allowlist, a cardinalidade e o transporte.
+    local chave valor
+    local -a payload=()
+    local -A vistas=()
+    _conf_localizar_alvo \
+        || falhar "Caminho de configuração inválido: $CONF_ARQUIVO"
+    [ ! -L "$CONF_ARQUIVO" ] \
+        || falhar "Recusando atualizar link simbólico: $CONF_ARQUIVO"
+    payload=(name "$CONF_NOME_ALVO")
+    while [ "$#" -gt 0 ]; do
+        chave="$1"
+        valor="$2"
+        shift 2
+        chave_conf_permitida "$chave" \
+            || falhar "Chave de configuração não permitida: '$chave'."
+        [ -z "${vistas[$chave]+definida}" ] \
+            || falhar "Chave repetida no lote: '$chave'."
+        vistas[$chave]=1
+        payload+=("set_${chave,,}" "$valor")
     done
-    printf '"'
+    _conf_allowlist_pares
+    if ! python_core_config CONF_PARES_PERMITIDAS CFG_ config-publish payload \
+            "$CONF_DIRETORIO_ALVO"; then
+        falhar "Falha ao publicar a configuração: $(_core_diagnostico 'persistência recusada')"
+    fi
+}
+
+_conf_publicar_migracao() {
+    # $1 = nome do array com as chaves toleradas; demais = pares CHAVE VALOR.
+    # A tolerância vale apenas para as chaves declaradas, e o core exige que
+    # cada uma delas receba um novo valor: nenhum valor legado inválido pode
+    # sobreviver à publicação.
+    local _cpm_toleradas="${1:-}" chave valor lista=""
+    local -a payload=()
+    shift
+    local -n _cpm_ref="$_cpm_toleradas"
+    for chave in "${_cpm_ref[@]}"; do
+        lista+="${lista:+$'\n'}$chave"
+    done
+    _conf_localizar_alvo \
+        || { erro "Caminho de configuração inválido: $CONF_ARQUIVO"; return 1; }
+    [ ! -L "$CONF_ARQUIVO" ] \
+        || { erro "Recusando atualizar link simbólico: $CONF_ARQUIVO"; return 1; }
+    payload=(name "$CONF_NOME_ALVO" migrate_keys "$lista")
+    while [ "$#" -gt 0 ]; do
+        chave="$1"
+        valor="$2"
+        shift 2
+        chave_conf_permitida "$chave" \
+            || { erro "Chave não permitida na migração: '$chave'."; return 1; }
+        payload+=("set_${chave,,}" "$valor")
+    done
+    _conf_allowlist_pares
+    python_core_config CONF_PARES_PERMITIDAS CFG_ config-publish payload \
+        "$CONF_DIRETORIO_ALVO"
 }
 
 salvar_conf() {
-    # Atualização atômica: valida chave/valor, preserva os comentários e nunca
-    # transforma o conteúdo em sintaxe shell executável.
-    local chave="$1" valor="$2" tmp linha
-    chave_conf_permitida "$chave" || falhar "Chave de configuração não permitida: '$chave'."
-    validar_valor_conf "$chave" "$valor" || falhar "Valor inválido para a chave '$chave'."
-    [ ! -L "$CONF_ARQUIVO" ] || falhar "Recusando atualizar link simbólico: $CONF_ARQUIVO"
-    linha="${chave}=$(_citar_conf "$valor")"
-    tmp="$(umask 077; mktemp "${CONF_ARQUIVO}.tmp.XXXXXX")" \
-        || falhar "Não foi possível criar arquivo temporário ao lado de $CONF_ARQUIVO."
-
-    if [ -f "$CONF_ARQUIVO" ]; then
-        chmod --reference="$CONF_ARQUIVO" "$tmp" 2>/dev/null \
-            || { rm -f -- "$tmp"; falhar "Não foi possível preservar as permissões do conf."; }
-        if grep -q "^${chave}=" "$CONF_ARQUIVO"; then
-            if ! CONF_CHAVE="$chave" CONF_LINHA="$linha" awk '
-                BEGIN { k = ENVIRON["CONF_CHAVE"]; l = ENVIRON["CONF_LINHA"] }
-                index($0, k "=") == 1 && !feito { print l; feito = 1; next }
-                { print }
-            ' "$CONF_ARQUIVO" > "$tmp"; then
-                rm -f -- "$tmp"
-                falhar "Falha ao atualizar '$chave' no arquivo de configuração."
-            fi
-        else
-            if ! cat -- "$CONF_ARQUIVO" > "$tmp" || ! printf '%s\n' "$linha" >> "$tmp"; then
-                rm -f -- "$tmp"
-                falhar "Falha ao acrescentar '$chave' no arquivo de configuração."
-            fi
-        fi
-    elif ! printf '%s\n' "$linha" > "$tmp"; then
-        rm -f -- "$tmp"
-        falhar "Falha ao criar o arquivo de configuração."
-    fi
-
-    mv -f -- "$tmp" "$CONF_ARQUIVO" || { rm -f -- "$tmp"; falhar "Falha ao instalar $CONF_ARQUIVO."; }
+    # Atualização atômica de uma chave, preservando comentários, ordem e modo.
+    local chave="$1" valor="${2-}"
+    [ "$#" -eq 2 ] || falhar "salvar_conf exige CHAVE e VALOR."
+    _conf_publicar "$chave" "$valor"
     printf -v "$chave" '%s' "$valor"
+    # shellcheck disable=SC2163
     export "$chave"
 }
 
@@ -1115,64 +1314,187 @@ salvar_conf_lote() {
     # salvar_conf_lote CHAVE VALOR [CHAVE VALOR...]. Valida tudo primeiro e
     # publica o conjunto em um único rename, evitando relações CPU parcialmente
     # atualizadas se a etapa for interrompida.
-    local tmp linha conteudo chave valor serializado i
-    local -a chaves=() valores=()
-    local -A novos=() linhas_novas=() encontradas=()
+    local i
+    local -a entradas=("$@") chaves=() valores=()
     [ "$#" -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] \
         || falhar "salvar_conf_lote exige pares CHAVE/VALOR."
-    while [ "$#" -gt 0 ]; do
-        chave="$1"; valor="$2"; shift 2
-        chave_conf_permitida "$chave" \
-            || falhar "Chave de configuração não permitida no lote: '$chave'."
-        [ -z "${novos[$chave]+definida}" ] \
-            || falhar "Chave repetida no lote: '$chave'."
-        validar_valor_conf "$chave" "$valor" \
-            || falhar "Valor inválido para a chave '$chave'."
-        serializado="$(_citar_conf "$valor")"
-        chaves+=("$chave")
-        valores+=("$valor")
-        novos[$chave]="$valor"
-        linhas_novas[$chave]="${chave}=${serializado}"
+    for ((i = 0; i < ${#entradas[@]}; i += 2)); do
+        chaves+=("${entradas[$i]}")
+        valores+=("${entradas[$((i + 1))]}")
     done
-    [ ! -L "$CONF_ARQUIVO" ] || falhar "Recusando atualizar link simbólico: $CONF_ARQUIVO"
-    tmp="$(umask 077; mktemp "${CONF_ARQUIVO}.tmp.XXXXXX")" \
-        || falhar "Não foi possível criar temporário ao lado de $CONF_ARQUIVO."
-    if [ -f "$CONF_ARQUIVO" ]; then
-        chmod --reference="$CONF_ARQUIVO" "$tmp" 2>/dev/null \
-            || { rm -f -- "$tmp"; falhar "Não foi possível preservar as permissões do conf."; }
-    fi
-    if ! {
-        if [ -f "$CONF_ARQUIVO" ]; then
-            while IFS= read -r linha || [ -n "$linha" ]; do
-                _trim_espacos_conf "$linha"
-                conteudo="$REPLY"
-                if [[ "$conteudo" =~ ^([A-Z][A-Z0-9_]*)[[:space:]]*= ]]; then
-                    chave="${BASH_REMATCH[1]}"
-                    if [ -n "${novos[$chave]+definida}" ]; then
-                        printf '%s\n' "${linhas_novas[$chave]}"
-                        encontradas[$chave]=1
-                        continue
-                    fi
-                fi
-                printf '%s\n' "$linha"
-            done < "$CONF_ARQUIVO"
-        fi
-        for chave in "${chaves[@]}"; do
-            [ -n "${encontradas[$chave]+definida}" ] \
-                || printf '%s\n' "${linhas_novas[$chave]}"
-        done
-    } > "$tmp"; then
-        rm -f -- "$tmp"
-        falhar "Falha ao preparar atualização em lote do arquivo de configuração."
-    fi
-    mv -f -- "$tmp" "$CONF_ARQUIVO" \
-        || { rm -f -- "$tmp"; falhar "Falha ao instalar o lote em $CONF_ARQUIVO."; }
+    _conf_publicar "${entradas[@]}"
     for i in "${!chaves[@]}"; do
         printf -v "${chaves[$i]}" '%s' "${valores[$i]}"
+        # shellcheck disable=SC2163
         export "${chaves[$i]}"
     done
 }
 
+validar_valor_conf() {
+    # API pública preservada. O schema vive no core: esta função consulta a
+    # mesma implementação usada na carga e na publicação, sem tocar arquivo.
+    local chave="${1:-}" valor="${2-}"
+    local -a permitidas=(CORE_VERSION PROTOCOL_VERSION SUBCOMMAND KEY DATA_CLASS VALID)
+    local -a payload=()
+    chave_conf_permitida "$chave" || return 1
+    payload=(key "$chave" value "$valor")
+    python_core_pares_payload permitidas CFGVAL_ config-validate payload 2>/dev/null
+}
+
+CONF_MIGRACAO_DISPENSAS_REMOVIDAS=0
+conf_migrar_dispensas_depreciadas() {
+    # REQ-WAIVERS: remove as linhas das dispensas sem efeito. Configuração já
+    # limpa é no-op exato. A remoção é publicada pelo mesmo rename atômico da
+    # configuração, então nunca há estado intermediário.
+    # Retornos: 0 = nada a fazer ou removido; 1 = erro.
+    local chave lista=""
+    local -a payload=()
+    CONF_MIGRACAO_DISPENSAS_REMOVIDAS=0
+    [ -e "$CONF_ARQUIVO" ] || return 0
+    _conf_localizar_alvo || return 1
+    [ ! -L "$CONF_ARQUIVO" ] || return 1
+    # Só remove o que realmente está no arquivo, para não republicar sem motivo.
+    if ! grep -Eq "^[[:space:]]*(AIRLOCK_DISPENSADO|BACKUP_DISPENSADO)[[:space:]]*=" \
+        "$CONF_ARQUIVO"; then
+        return 0
+    fi
+    for chave in "${CHAVES_CONF_DEPRECIADAS[@]}"; do
+        if grep -Eq "^[[:space:]]*${chave}[[:space:]]*=" "$CONF_ARQUIVO"; then
+            lista+="${lista:+$'\n'}$chave"
+        fi
+    done
+    [ -n "$lista" ] || return 0
+    _conf_allowlist_pares
+    payload=(name "$CONF_NOME_ALVO" remove_keys "$lista")
+    if ! python_core_config CONF_PARES_PERMITIDAS CFG_ config-publish payload \
+            "$CONF_DIRETORIO_ALVO"; then
+        erro "Não foi possível remover as dispensas depreciadas da configuração."
+        return 1
+    fi
+    CONF_MIGRACAO_DISPENSAS_REMOVIDAS="${CFG_REMOVED_COUNT:-0}"
+    if [ "$CONF_MIGRACAO_DISPENSAS_REMOVIDAS" != 0 ]; then
+        info "Dispensas sem efeito removidas da configuração: ${lista//$'\n'/, }."
+        info "Para não usar o Airlock ou o backup, simplesmente não execute a etapa; o status continua dizendo a verdade."
+    fi
+    return 0
+}
+
+CONF_MIGRACAO_ISO_BACKUP=""
+conf_migrar_iso_legada() {
+    # REQ-CONF-ISO, fluxo completo. Roda ANTES de carregar_conf, porque um valor
+    # legado inválido derrubaria o parser estrito e impediria justamente a
+    # correção. Regras que este fluxo cumpre:
+    #
+    #   * o caminho legado nunca é aberto, resolvido, montado, copiado, testado
+    #     por existência nem usado com privilégio: só o classificador
+    #     pré-parser o lê, e como texto;
+    #   * o valor antigo nunca é reaproveitado como sugestão;
+    #   * um backup 0600 é criado antes de qualquer publicação;
+    #   * todas as chaves pendentes entram em um único rename (todo-ou-nada);
+    #   * em qualquer falha o original permanece utilizável e o backup é
+    #     informado;
+    #   * configuração já válida é no-op exato: nenhum backup, nenhuma escrita.
+    #
+    # Retornos: 0 = nada a fazer ou migração concluída; 1 = erro.
+    local estado chave descricao timestamp indice rc=0
+    local -a pendentes=() descricoes=() pares=() migradas=()
+    CONF_MIGRACAO_ISO_BACKUP=""
+    conf_iso_legada_classificar || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        erro "Não foi possível classificar as ISOs da configuração antes do parser estrito."
+        return 1
+    fi
+    [ "$rc" -eq 1 ] || return 0
+
+    for chave in ISO_WINDOWS ISO_VIRTIO; do
+        case "$chave" in
+            ISO_WINDOWS)
+                estado="$CONF_ISO_LEGADA_ESTADO_WINDOWS"
+                descricao="ISO do Windows 11"
+                ;;
+            *)
+                estado="$CONF_ISO_LEGADA_ESTADO_VIRTIO"
+                descricao="ISO virtio-win"
+                ;;
+        esac
+        case "$estado" in
+            invalida|duplicada)
+                pendentes+=("$chave")
+                descricoes+=("$descricao")
+                ;;
+        esac
+    done
+    [ "${#pendentes[@]}" -gt 0 ] || return 0
+
+    titulo "Migração segura de ISO legada na configuração"
+    aviso "A configuração guarda ${CONF_ISO_LEGADA_PENDENTES} caminho(s) de ISO que a política atual recusa."
+    info "O caminho antigo NÃO foi aberto, resolvido nem reaproveitado: ele é tratado apenas como texto."
+    info "Política em vigor: a ISO precisa ser um filho direto canônico de /vm, sem vírgula (ex.: /vm/Win11.iso)."
+    info "ENTER deixa a chave vazia e a etapa 40 pedirá o caminho depois."
+
+    if [ -f "$CONF_ARQUIVO" ]; then
+        mkdir -p -- "$BACKUPS_DIR" \
+            || { erro "Não foi possível criar $BACKUPS_DIR para o backup da migração."; return 1; }
+        timestamp="$(date +%Y%m%d-%H%M%S-%N)"
+        CONF_MIGRACAO_ISO_BACKUP="$(umask 077; mktemp "$BACKUPS_DIR/passthrough.conf.pre-iso-migracao-${timestamp}.XXXXXX.bak")" \
+            || { erro "Não foi possível reservar nome único para o backup da migração."; return 1; }
+        if ! cp -- "$CONF_ARQUIVO" "$CONF_MIGRACAO_ISO_BACKUP" \
+           || ! chmod 600 -- "$CONF_MIGRACAO_ISO_BACKUP"; then
+            rm -f -- "$CONF_MIGRACAO_ISO_BACKUP"
+            CONF_MIGRACAO_ISO_BACKUP=""
+            erro "Não foi possível criar o backup 0600 antes da migração de ISO."
+            return 1
+        fi
+        info "Backup da configuração antes da migração: $CONF_MIGRACAO_ISO_BACKUP"
+    fi
+
+    for indice in "${!pendentes[@]}"; do
+        chave="${pendentes[$indice]}"
+        perguntar_iso_valor_conf "${descricoes[$indice]}"
+        pares+=("$chave" "$CONF_ISO_NOVO_VALOR")
+        migradas+=("$chave")
+    done
+
+    if ! _conf_publicar_migracao migradas "${pares[@]}"; then
+        erro "A migração de ISO não foi publicada; a configuração original continua utilizável."
+        [ -z "$CONF_MIGRACAO_ISO_BACKUP" ] \
+            || erro "Backup disponível em: $CONF_MIGRACAO_ISO_BACKUP"
+        return 1
+    fi
+    ok "Migração de ISO concluída em um único rename: ${migradas[*]}."
+    return 0
+}
+
+CONF_ISO_LEGADA_ESTADO_WINDOWS=""
+CONF_ISO_LEGADA_ESTADO_VIRTIO=""
+CONF_ISO_LEGADA_PENDENTES=0
+conf_iso_legada_classificar() {
+    # REQ-CONF-ISO: leitura pré-parser das chaves de ISO. Não abre, não resolve,
+    # não monta, não copia, não testa existência e não privilegia o caminho
+    # legado; ele é tratado como texto e nunca é reaproveitado. Serve para que um
+    # valor antigo inválido chegue ao prompt de novo caminho em vez de derrubar a
+    # etapa no parser estrito.
+    # Retornos: 0=nada a migrar; 1=há chave a substituir; 2=erro de leitura.
+    local -a permitidas=(
+        CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+        EXISTS NEEDS_MIGRATION SCANNED_KEYS ISO_WINDOWS_STATE ISO_VIRTIO_STATE
+    )
+    local -a payload=()
+    CONF_ISO_LEGADA_ESTADO_WINDOWS=""
+    CONF_ISO_LEGADA_ESTADO_VIRTIO=""
+    CONF_ISO_LEGADA_PENDENTES=0
+    _conf_localizar_alvo || return 2
+    [ ! -L "$CONF_ARQUIVO" ] || return 2
+    [ -e "$CONF_ARQUIVO" ] || return 0
+    payload=(name "$CONF_NOME_ALVO")
+    python_core_config permitidas ISOLEG_ config-legacy-scan payload \
+        "$CONF_DIRETORIO_ALVO" 2>/dev/null || return 2
+    CONF_ISO_LEGADA_ESTADO_WINDOWS="$ISOLEG_ISO_WINDOWS_STATE"
+    CONF_ISO_LEGADA_ESTADO_VIRTIO="$ISOLEG_ISO_VIRTIO_STATE"
+    CONF_ISO_LEGADA_PENDENTES="$ISOLEG_NEEDS_MIGRATION"
+    [ "$CONF_ISO_LEGADA_PENDENTES" = 0 ] || return 1
+    return 0
+}
 backup_e_resetar_config_etapa02() {
     # O conjunto precisa acompanhar toda chave escolhida/calculada pela etapa
     # 02. A limpeza inteira é publicada pelo único rename de salvar_conf_lote.
@@ -1757,6 +2079,30 @@ perguntar_inteiro() {
     done
 }
 
+PERGUNTA_VALIDADA=""
+perguntar_validado() {
+    # perguntar_validado "texto" "padrao" VALIDADOR "mensagem de recusa".
+    # Repergunta até o VALIDADOR (função de um argumento) aceitar, definindo
+    # PERGUNTA_VALIDADA; cinco recusas retornam 1 sem valor. Roda no shell
+    # corrente para que uma resposta inválida seja reperguntada com o motivo
+    # em vez de estourar mais tarde dentro de salvar_conf.
+    local texto="$1" padrao="${2:-}" validador="$3" recusa="$4"
+    local resposta tentativas=0
+    PERGUNTA_VALIDADA=""
+    declare -F "$validador" >/dev/null 2>&1 \
+        || { erro "Validador desconhecido em perguntar_validado: '$validador'."; return 1; }
+    while :; do
+        resposta="$(perguntar "$texto" "$padrao")"
+        if "$validador" "$resposta"; then
+            PERGUNTA_VALIDADA="$resposta"
+            return 0
+        fi
+        aviso "$recusa (recebi: '${resposta:-vazio}')"
+        tentativas=$((tentativas + 1))
+        [ "$tentativas" -lt 5 ] || return 1
+    done
+}
+
 escolher_da_lista() {
     # escolher_da_lista "pergunta" sim|nao item1 item2 ...
     # Lista os itens numerados (em stderr) e imprime no stdout o ÍNDICE
@@ -1971,653 +2317,101 @@ ram_total_mib() {
 }
 
 ram_reserva_host_mib() {
-    # Reserva mínima do host: 25% do total, nunca abaixo de 4 GiB nem acima de 8.
-    local total reserva
-    total="$(ram_total_mib)"
-    reserva=$((total / 4))
-    [ "$reserva" -lt 4096 ] && reserva=4096
-    [ "$reserva" -gt 8192 ] && reserva=8192
-    echo "$reserva"
+    # Reserva mínima do host: 25% do total, nunca abaixo de 4 GiB nem acima de
+    # 8. I5: a aritmética vive no core (plano_memoria_vm); aqui só resta o
+    # probe do host e a projeção do valor.
+    local total="${1:-}"
+    [ -n "$total" ] || total="$(ram_total_mib)" || return 1
+    plano_memoria_vm "$total" || return 1
+    printf '%s\n' "$CPUMEM_RESERVE_MIB"
 }
 
 ram_max_vm_mib() {
     # Teto para a VM: total menos a reserva do host, arredondado para baixo em
     # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 52).
-    local total reserva max
-    total="$(ram_total_mib)"
-    reserva="$(ram_reserva_host_mib)"
-    max=$((total - reserva))
-    max=$(((max / 1024) * 1024))
-    [ "$max" -lt 1024 ] && max=0
-    echo "$max"
+    local total="${1:-}"
+    [ -n "$total" ] || total="$(ram_total_mib)" || return 1
+    plano_memoria_vm "$total" || return 1
+    printf '%s\n' "$CPUMEM_MAX_VM_MIB"
 }
 
 # --- Bootloader e parâmetros de kernel (Capítulos 15 e 16) --------------------
-BOOTLOADER_VALIDACAO_ERRO=""
-BOOTLOADER_ATIVO=""
-detectar_bootloader() {
-    # Prefere evidência do loader que iniciou a sessão. A simples presença do
-    # binário kernelstub não basta: ele pode coexistir com um GRUB ativo. O
-    # argumento opcional injeta a evidência apenas em chamadas unitárias.
-    local bootctl_status="" tem_kernelstub=0 tem_grub=0 injetado="${1:-}"
-    if [ -n "$injetado" ]; then
-        case "$injetado" in grub|kernelstub|desconhecido) printf '%s\n' "$injetado"; return ;; esac
-        printf '%s\n' desconhecido
-        return
-    fi
-    command -v kernelstub >/dev/null 2>&1 && tem_kernelstub=1
-    [ -f "$GRUB_CFG_ARQUIVO" ] && tem_grub=1
-    if command -v bootctl >/dev/null 2>&1; then
-        bootctl_status="$(LC_ALL=C bootctl status --no-pager 2>/dev/null || true)"
-        if grep -A6 -F 'Current Boot Loader:' <<< "$bootctl_status" | grep -qi 'systemd-boot'; then
-            [ "$tem_kernelstub" -eq 1 ] && { echo kernelstub; return; }
-            echo desconhecido
-            return
-        elif grep -A6 -F 'Current Boot Loader:' <<< "$bootctl_status" | grep -qi 'grub'; then
-            echo grub
-            return
-        fi
-    fi
-    if [ "$tem_grub" -eq 1 ] && [ "$tem_kernelstub" -eq 0 ]; then
-        echo grub
-    elif [ "$tem_kernelstub" -eq 1 ] && [ "$tem_grub" -eq 0 ]; then
-        echo kernelstub
-    elif [ "$tem_grub" -eq 1 ] && [ "$tem_kernelstub" -eq 1 ]; then
-        # Sem prova do loader atual, escolher qualquer um seria perigoso.
-        echo desconhecido
-    else
-        echo desconhecido
-    fi
-}
+# I5.6: toda a implementação vive em lib/shell/boot.sh, carregado logo no topo
+# desta fachada. Nenhuma cópia mutante permanece aqui: os nomes públicos
+# (detectar_bootloader, validar_bootloader_configurado, cmdline_*,
+# kernel_param_add/del, kernel_parametros_*) continuam disponíveis porque o
+# módulo é sourceado, não duplicado.
 
-validar_bootloader_configurado() {
-    local persistido="${1:-${BOOTLOADER:-}}" efetivo_injetado="${2:-}" efetivo
-    BOOTLOADER_VALIDACAO_ERRO=""
-    BOOTLOADER_ATIVO=""
-    [ -n "$persistido" ] \
-        || { BOOTLOADER_VALIDACAO_ERRO="BOOTLOADER não está definido em $CONF_ARQUIVO."; return 1; }
-    [ "$PLATAFORMA_CARREGADA" -eq 1 ] || plataforma_carregar \
-        || { BOOTLOADER_VALIDACAO_ERRO="$PLATAFORMA_ERRO"; return 1; }
-    efetivo="$(detectar_bootloader "$efetivo_injetado")"
-    case "$efetivo" in
-        grub|kernelstub) ;;
-        *) BOOTLOADER_VALIDACAO_ERRO="Bootloader efetivo não pôde ser determinado sem ambiguidade."; return 1 ;;
-    esac
-    plataforma_boot_backend_suportado "$efetivo" \
-        || { BOOTLOADER_VALIDACAO_ERRO="Bootloader efetivo '$efetivo' não é suportado pelo perfil $PLATAFORMA_PERFIL."; return 1; }
-    [ "$persistido" = "$efetivo" ] \
-        || { BOOTLOADER_VALIDACAO_ERRO="Divergência de boot: passthrough.conf registra '$persistido', mas o boot efetivo é '$efetivo'. Execute a etapa 02 e confirme a migração com backup."; return 1; }
-    BOOTLOADER_ATIVO="$efetivo"
-}
+# --- Backend libvirt: uma única resolução autoritativa ------------------------
+# REQ-LIBVIRT-BACKEND: nenhuma etapa pode escolher `libvirtd` por conta própria.
+# O provider de plataforma decide o backend (monolítico `libvirtd` ou modular
+# `virtqemud`), a unidade resolvida e a ação autorizada; as etapas 20, 21 e 50
+# consomem exatamente este resultado e provam a pós-condição.
 
-_kernelstub_entries_diretas_legiveis() {
-    local entrada restaurar_nullglob=0
-    local -a entradas=()
-    [ -d "$KERNELSTUB_ENTRIES_DIR" ] || return 1
-    shopt -q nullglob || { shopt -s nullglob; restaurar_nullglob=1; }
-    entradas=("$KERNELSTUB_ENTRIES_DIR"/*.conf)
-    [ "$restaurar_nullglob" -eq 0 ] || shopt -u nullglob
-    [ "${#entradas[@]}" -gt 0 ] || return 1
-    for entrada in "${entradas[@]}"; do
-        [ -f "$entrada" ] && [ -r "$entrada" ] || return 1
-    done
-}
+LIBVIRT_BACKEND_ERRO=""
+LIBVIRT_BACKEND_SERVICO=""
+LIBVIRT_BACKEND_UNIDADE=""
+LIBVIRT_BACKEND_UNIDADE_DAEMON=""
+LIBVIRT_BACKEND_ACAO=""
 
-boot_backend_observavel() {
-    # Retornos: 0=observável, 1=backend inválido/ausente, 2=leitura
-    # privilegiada indisponível. Nunca solicita senha.
-    validar_bootloader_configurado "${1:-${BOOTLOADER:-}}" || return 1
-    case "$BOOTLOADER_ATIVO" in
-        grub)
-            [ -r "$GRUB_DEFAULT_ARQUIVO" ] || return 2
-            [ -r "$GRUB_CFG_ARQUIVO" ] && return 0
-            command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && return 0
-            return 2
-            ;;
-        kernelstub)
-            command -v kernelstub >/dev/null 2>&1 || return 1
-            [ -d "$KERNELSTUB_ENTRIES_DIR" ] || return 1
-            _kernelstub_entries_diretas_legiveis && return 0
-            command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && return 0
-            return 2
-            ;;
-    esac
-    return 1
-}
-
-exigir_bootloader_coerente() {
-    validar_bootloader_configurado || falhar "$BOOTLOADER_VALIDACAO_ERRO"
-}
-
-cmdline_tem() {
-    # cmdline_tem "param" -> 0 se o parâmetro exato está ativo neste boot.
-    local procurado="$1" palavra conteudo
-    local -a palavras=()
-    IFS= read -r conteudo < /proc/cmdline || return 1
-    read -r -a palavras <<< "$conteudo"
-    for palavra in "${palavras[@]}"; do
-        [ "$palavra" = "$procurado" ] && return 0
-    done
-    return 1
-}
-
-CMDLINE_PARAM_ERRO=""
-cmdline_parametros_exatos() {
-    # cmdline_parametros_exatos "chave=valor ..." [CMDLINE]
-    # Exige exatamente uma ocorrência de cada chave e o valor literal esperado.
-    # Quando CMDLINE não é informado, lê o kernel em execução.
-    local esperados="${1:-}" conteudo="" desejado palavra chave encontrada quantidade
-    local -a lista_esperada=() palavras=()
-    CMDLINE_PARAM_ERRO=""
-    kernel_parametros_validos "$esperados" \
-        || { CMDLINE_PARAM_ERRO="Lista de parâmetros esperados inválida: '$esperados'."; return 1; }
-    if [ "$#" -ge 2 ]; then
-        conteudo="$2"
-    else
-        IFS= read -r conteudo < /proc/cmdline \
-            || { CMDLINE_PARAM_ERRO="Não foi possível ler /proc/cmdline."; return 1; }
-    fi
-    read -r -a lista_esperada <<< "$esperados"
-    read -r -a palavras <<< "$conteudo"
-    for desejado in "${lista_esperada[@]}"; do
-        chave="${desejado%%=*}"
-        quantidade=0
-        encontrada=""
-        for palavra in "${palavras[@]}"; do
-            if [ "${palavra%%=*}" = "$chave" ]; then
-                quantidade=$((quantidade + 1))
-                encontrada="$palavra"
-            fi
-        done
-        [ "$quantidade" -eq 1 ] \
-            || { CMDLINE_PARAM_ERRO="A chave '$chave' aparece $quantidade vez(es) na cmdline; esperado: exatamente uma."; return 1; }
-        [ "$encontrada" = "$desejado" ] \
-            || { CMDLINE_PARAM_ERRO="A chave '$chave' está como '$encontrada'; esperado: '$desejado'."; return 1; }
-    done
-}
-
-cmdline_possui_alguma_chave() {
-    local chaves="${1:-}" conteudo="" palavra procurada
-    local -a palavras=() lista_chaves=()
-    kernel_parametros_validos "$chaves" || return 2
-    if [ "$#" -ge 2 ]; then
-        conteudo="$2"
-    else
-        IFS= read -r conteudo < /proc/cmdline || return 2
-    fi
-    read -r -a palavras <<< "$conteudo"
-    read -r -a lista_chaves <<< "$chaves"
-    for palavra in "${palavras[@]}"; do
-        for procurada in "${lista_chaves[@]}"; do
-            [ "${palavra%%=*}" != "${procurada%%=*}" ] || return 0
-        done
-    done
-    return 1
-}
-
-_parametros_por_chaves_cmdline() {
-    # Imprime, na ordem de CHAVES, os valores presentes em CMDLINE. Falha se
-    # uma chave estiver duplicada, pois esse estado não pode ser restaurado ou
-    # comparado de forma inequívoca.
-    local cmdline="$1" chaves="$2" chave_token chave palavra quantidade encontrado saida=""
-    local -a lista_chaves=() palavras=()
-    kernel_parametros_validos "$chaves" || return 1
-    read -r -a lista_chaves <<< "$chaves"
-    read -r -a palavras <<< "$cmdline"
-    for chave_token in "${lista_chaves[@]}"; do
-        chave="${chave_token%%=*}"
-        quantidade=0
-        encontrado=""
-        for palavra in "${palavras[@]}"; do
-            if [ "${palavra%%=*}" = "$chave" ]; then
-                quantidade=$((quantidade + 1))
-                encontrado="$palavra"
-            fi
-        done
-        [ "$quantidade" -le 1 ] || return 1
-        [ "$quantidade" -eq 0 ] || saida="${saida:+$saida }$encontrado"
-    done
-    printf '%s\n' "$saida"
-}
-
-_parametros_por_chaves_cmdline_tolerante() {
-    # Inventário para reparo: preserva todas as ocorrências (inclusive legadas
-    # duplicadas), agrupadas pela ordem das chaves solicitadas.
-    local cmdline="$1" chaves="$2" chave_token chave palavra saida=""
-    local -a lista_chaves=() palavras=()
-    kernel_parametros_validos "$chaves" || return 1
-    read -r -a lista_chaves <<< "$chaves"
-    read -r -a palavras <<< "$cmdline"
-    for chave_token in "${lista_chaves[@]}"; do
-        chave="${chave_token%%=*}"
-        for palavra in "${palavras[@]}"; do
-            [ "${palavra%%=*}" = "$chave" ] || continue
-            saida="${saida:+$saida }$palavra"
-        done
-    done
-    printf '%s\n' "$saida"
-}
-
-kernel_parametros_validos() {
-    local params="${1:-}" parametro chave
-    local -a itens=()
-    local -A chaves=()
-    read -r -a itens <<< "$params"
-    [ "${#itens[@]}" -gt 0 ] || return 1
-    for parametro in "${itens[@]}"; do
-        [[ "$parametro" =~ ^[[:alnum:]][[:alnum:]_.-]*(=[[:alnum:]_.,:/+-]+)?$ ]] || return 1
-        chave="${parametro%%=*}"
-        [ -z "${chaves[$chave]+definida}" ] || return 1
-        chaves[$chave]=1
-    done
-}
-
-_cmdline_sem_chaves() {
-    # Imprime CMDLINE sem qualquer valor das chaves presentes em PARAMS.
-    local cmdline="$1" params="$2" atual desejado chave_atual chave_desejada saida=""
-    local -a atuais=() desejados=()
-    read -r -a atuais <<< "$cmdline"
-    read -r -a desejados <<< "$params"
-    for atual in "${atuais[@]}"; do
-        chave_atual="${atual%%=*}"
-        for desejado in "${desejados[@]}"; do
-            chave_desejada="${desejado%%=*}"
-            [ "$chave_atual" != "$chave_desejada" ] || continue 2
-        done
-        saida="${saida:+$saida }$atual"
-    done
-    printf '%s\n' "$saida"
-}
-
-_kernelstub_linhas_opcoes() {
-    # Prefere leitura direta; somente usa sudo não interativo quando os entries
-    # existem mas não são legíveis pelo operador. O diretório é argumento de
-    # bash -c, nunca interpolado como código.
-    local entrada
-    local -a entradas=() opcoes=()
-    if _kernelstub_entries_diretas_legiveis; then
-        entradas=("$KERNELSTUB_ENTRIES_DIR"/*.conf)
-        for entrada in "${entradas[@]}"; do
-            mapfile -t opcoes < <(grep -E '^[[:space:]]*options[[:space:]]+' -- "$entrada")
-            [ "${#opcoes[@]}" -eq 1 ] || return 3
-            printf '%s\n' "${opcoes[0]}"
-        done
-        return 0
-    fi
-    command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || return 2
-    sudo -n bash -c '
-        shopt -s nullglob
-        entradas=("$1"/*.conf)
-        ((${#entradas[@]} > 0)) || exit 2
-        for entrada in "${entradas[@]}"; do
-            mapfile -t opcoes < <(grep -E "^[[:space:]]*options[[:space:]]+" -- "$entrada")
-            ((${#opcoes[@]} == 1)) || exit 3
-            printf "%s\n" "${opcoes[0]}"
-        done
-    ' _ "$KERNELSTUB_ENTRIES_DIR"
-}
-
-_kernelstub_parametros_por_chaves() {
-    # Lê todas as entradas pendentes e só retorna um estado quando cada entrada
-    # possui, para as chaves gerenciadas, exatamente o mesmo conjunto sem
-    # duplicações. sudo -n impede prompts durante --verificar; etapas mutáveis
-    # já obtiveram o ticket antes de chamar esta função.
-    local params="$1" linhas linha opcoes estado referencia="" primeira=1
-    linhas="$(_kernelstub_linhas_opcoes)" || return 1
-    [ -n "$linhas" ] || return 1
-
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        [[ "$linha" =~ ^[[:space:]]*options[[:space:]]+(.+)$ ]] || return 1
-        opcoes="${BASH_REMATCH[1]}"
-        estado="$(_parametros_por_chaves_cmdline "$opcoes" "$params")" || return 1
-        if [ "$primeira" -eq 1 ]; then
-            referencia="$estado"
-            primeira=0
-        elif [ "$estado" != "$referencia" ]; then
-            return 1
-        fi
-    done <<< "$linhas"
-    [ "$primeira" -eq 0 ] || return 1
-    printf '%s\n' "$referencia"
-}
-
-_kernelstub_parametros_para_mutacao() {
-    # Igual ao leitor estrito, mas aceita duplicações idênticas entre entries
-    # para que o SET/DEL consiga saneá-las. Entries divergentes continuam
-    # bloqueadas antes de qualquer mutação.
-    local params="$1" linhas linha opcoes estado referencia="" primeira=1
-    linhas="$(_kernelstub_linhas_opcoes)" || return 1
-    [ -n "$linhas" ] || return 1
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        [[ "$linha" =~ ^[[:space:]]*options[[:space:]]+(.+)$ ]] || return 1
-        opcoes="${BASH_REMATCH[1]}"
-        estado="$(_parametros_por_chaves_cmdline_tolerante "$opcoes" "$params")" || return 1
-        if [ "$primeira" -eq 1 ]; then
-            referencia="$estado"
-            primeira=0
-        elif [ "$estado" != "$referencia" ]; then
-            return 1
-        fi
-    done <<< "$linhas"
-    [ "$primeira" -eq 0 ] || return 1
-    printf '%s\n' "$referencia"
-}
-
-_kernelstub_aplicar_estado() {
-    # _kernelstub_aplicar_estado CHAVES "NOVO_ESTADO". Executa em subshell com
-    # rollback no EXIT/sinal; o caller só recebe sucesso após reler todos os
-    # loader entries e comprovar a pós-condição.
-    local chaves="$1" novo="$2" antigo
-    antigo="$(_kernelstub_parametros_para_mutacao "$chaves")" \
-        || { KERNEL_PERSISTENCIA_ERRO="Loader entries divergentes ou ilegíveis; nada foi alterado."; return 1; }
-    if [ "$antigo" = "$novo" ]; then
-        return 0
-    fi
-    if ! (
-        alterado=0
-        concluido=0
-        rollback_kernelstub() {
-            local status="$1" atual restaurado
-            trap - EXIT INT TERM
-            if [ "$alterado" -eq 1 ] && [ "$concluido" -eq 0 ]; then
-                erro "Transação kernelstub falhou; restaurando o estado anterior."
-                if atual="$(_kernelstub_parametros_para_mutacao "$chaves")"; then
-                    [ -z "$atual" ] || sudo kernelstub -d "$atual" >/dev/null 2>&1 || true
-                else
-                    # Estado intermediário ilegível: tente retirar tanto o
-                    # destino quanto o snapshot antes de restaurar.
-                    [ -z "$novo" ] || sudo kernelstub -d "$novo" >/dev/null 2>&1 || true
-                    [ -z "$antigo" ] || sudo kernelstub -d "$antigo" >/dev/null 2>&1 || true
-                fi
-                if [ -n "$antigo" ]; then
-                    sudo kernelstub -a "$antigo" >/dev/null 2>&1 || true
-                fi
-                restaurado="$(_kernelstub_parametros_para_mutacao "$chaves")" || restaurado="__ERRO__"
-                if [ "$restaurado" != "$antigo" ]; then
-                    erro "ROLLBACK KERNELSTUB NÃO COMPROVADO. Não reinicie antes de revisar os loader entries."
-                else
-                    aviso "Rollback kernelstub comprovado em todos os loader entries."
-                fi
-            fi
-            exit "$status"
-        }
-        trap 'rollback_kernelstub $?' EXIT
-        trap 'exit 130' INT
-        trap 'exit 143' TERM
-        alterado=1
-        if [ -n "$antigo" ]; then
-            sudo kernelstub -d "$antigo" >/dev/null || exit 1
-        fi
-        if [ -n "$novo" ]; then
-            sudo kernelstub -a "$novo" >/dev/null || exit 1
-            kernel_parametros_persistentes_exatos "$novo" || exit 1
-        else
-            kernel_param_chaves_persistentes_ausentes "$chaves" || exit 1
-        fi
-        concluido=1
-    ); then
-        KERNEL_PERSISTENCIA_ERRO="A transação kernelstub falhou; consulte as mensagens de rollback."
-        return 1
-    fi
-}
-
-_grub_cmdline_atual() {
-    local linha
-    local -a linhas=()
-    mapfile -t linhas < <(grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_DEFAULT_ARQUIVO" 2>/dev/null)
-    [ "${#linhas[@]}" -eq 1 ] || return 1
-    linha="${linhas[0]}"
-    if [[ "$linha" =~ ^GRUB_CMDLINE_LINUX_DEFAULT=\"([^\"]*)\"[[:space:]]*$ ]]; then
-        printf '%s\n' "${BASH_REMATCH[1]}"
-        return 0
-    fi
-    return 1
-}
-
-KERNEL_PERSISTENCIA_ERRO=""
-KERNEL_PERSISTENCIA_TIPO="pendente"
-KERNEL_PARAMETROS_PERSISTENTES=""
-kernel_parametros_persistentes() {
-    # kernel_parametros_persistentes "chave ..."
-    # Preenche KERNEL_PARAMETROS_PERSISTENTES e rejeita duplicações ou loader
-    # entries divergentes. Não solicita senha durante verificadores.
-    local chaves="${1:-}" bl cmdline estado observavel_rc
-    KERNEL_PERSISTENCIA_ERRO=""
-    KERNEL_PERSISTENCIA_TIPO="pendente"
-    KERNEL_PARAMETROS_PERSISTENTES=""
-    kernel_parametros_validos "$chaves" \
-        || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="Lista de chaves de kernel inválida: '$chaves'."; return 1; }
-    if ! validar_bootloader_configurado; then
-        KERNEL_PERSISTENCIA_TIPO="erro"
-        KERNEL_PERSISTENCIA_ERRO="$BOOTLOADER_VALIDACAO_ERRO"
-        return 1
-    fi
-    bl="$BOOTLOADER_ATIVO"
-    if boot_backend_observavel "$bl"; then
+libvirt_backend_resolver() {
+    # Retornos: 0=resolvido; 1=nenhuma unidade do perfil está disponível;
+    # 2=erro operacional da sondagem (systemctl ausente, resposta incompleta).
+    # A fixture opcional em $1 é autoritativa e nunca cai no systemd do host.
+    local fixture="${1:-}" rc=0
+    LIBVIRT_BACKEND_ERRO=""
+    LIBVIRT_BACKEND_SERVICO=""
+    LIBVIRT_BACKEND_UNIDADE=""
+    LIBVIRT_BACKEND_UNIDADE_DAEMON=""
+    LIBVIRT_BACKEND_ACAO=""
+    if plataforma_resolver_servico libvirt "$fixture"; then
         :
     else
-        observavel_rc=$?
-        if [ "$observavel_rc" -eq 2 ]; then
-            KERNEL_PERSISTENCIA_TIPO="indeterminado"
-            KERNEL_PERSISTENCIA_ERRO="Backend $bl não pode ser lido sem privilégio já autorizado."
-        else
-            KERNEL_PERSISTENCIA_TIPO="erro"
-            KERNEL_PERSISTENCIA_ERRO="Backend $bl não está disponível para inspeção segura."
-        fi
+        rc=$?
+        LIBVIRT_BACKEND_ERRO="$PLATAFORMA_ERRO"
+        return "$rc"
+    fi
+    LIBVIRT_BACKEND_SERVICO="$PLATAFORMA_SERVICO_RESOLVIDO"
+    LIBVIRT_BACKEND_UNIDADE="$PLATAFORMA_UNIDADE_RESOLVIDA"
+    LIBVIRT_BACKEND_ACAO="$PLATAFORMA_UNIDADE_ACAO"
+    # Hooks e configuração são lidos pelo daemon, não pelo socket: a unidade a
+    # reiniciar é sempre o serviço do backend resolvido.
+    LIBVIRT_BACKEND_UNIDADE_DAEMON="${LIBVIRT_BACKEND_SERVICO}.service"
+    if [ -z "$LIBVIRT_BACKEND_SERVICO" ] || [ -z "$LIBVIRT_BACKEND_UNIDADE" ]; then
+        LIBVIRT_BACKEND_ERRO="Resolução de backend libvirt incompleta."
+        return 2
+    fi
+    return 0
+}
+
+libvirt_backend_reiniciar() {
+    # Reinicia o daemon do backend resolvido e prova a pós-condição.
+    # Retornos: 0=reiniciado e ativo; 1=falha, com diagnóstico acionável.
+    local alvo="$LIBVIRT_BACKEND_UNIDADE_DAEMON"
+    LIBVIRT_BACKEND_ERRO=""
+    if [ -z "$alvo" ]; then
+        LIBVIRT_BACKEND_ERRO="Backend libvirt não resolvido antes do restart."
         return 1
     fi
-    case "$bl" in
-        kernelstub)
-            estado="$(_kernelstub_parametros_por_chaves "$chaves")" \
-                || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="Loader entries indisponíveis, duplicados ou divergentes para as chaves gerenciadas."; return 1; }
-            ;;
-        grub)
-            cmdline="$(_grub_cmdline_atual)" \
-                || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="GRUB_CMDLINE_LINUX_DEFAULT ausente, duplicado ou ilegível."; return 1; }
-            estado="$(_parametros_por_chaves_cmdline "$cmdline" "$chaves")" \
-                || { KERNEL_PERSISTENCIA_TIPO="erro"; KERNEL_PERSISTENCIA_ERRO="Uma chave gerenciada está duplicada no GRUB."; return 1; }
-            ;;
-        *)
-            KERNEL_PERSISTENCIA_TIPO="erro"
-            KERNEL_PERSISTENCIA_ERRO="Bootloader não identificado."
-            return 1
-            ;;
-    esac
-    KERNEL_PARAMETROS_PERSISTENTES="$estado"
-}
-
-kernel_parametros_persistentes_exatos() {
-    local esperados="${1:-}" bl
-    kernel_parametros_persistentes "$esperados" || return 1
-    bl="$BOOTLOADER_ATIVO"
-    [ "$KERNEL_PARAMETROS_PERSISTENTES" = "$esperados" ] \
-        || { KERNEL_PERSISTENCIA_TIPO="pendente"; KERNEL_PERSISTENCIA_ERRO="Persistência atual: '${KERNEL_PARAMETROS_PERSISTENTES:-ausente}'; esperado: '$esperados'."; return 1; }
-    if [ "$bl" = grub ] && ! _grub_cfg_parametros_exatos "$esperados"; then
-        KERNEL_PERSISTENCIA_TIPO="pendente"
-        KERNEL_PERSISTENCIA_ERRO="O grub.cfg efetivo não contém exatamente os parâmetros esperados em todas as entradas Linux."
+    if ! sudo systemctl restart "$alvo"; then
+        LIBVIRT_BACKEND_ERRO="$alvo não aceitou o restart."
         return 1
     fi
-}
-
-kernel_param_chaves_persistentes_ausentes() {
-    local chaves="${1:-}" bl
-    kernel_parametros_persistentes "$chaves" || return 1
-    bl="$BOOTLOADER_ATIVO"
-    [ -z "$KERNEL_PARAMETROS_PERSISTENTES" ] \
-        || { KERNEL_PERSISTENCIA_TIPO="pendente"; KERNEL_PERSISTENCIA_ERRO="Ainda persistem parâmetros: $KERNEL_PARAMETROS_PERSISTENTES"; return 1; }
-    if [ "$bl" = grub ] && ! _grub_cfg_chaves_ausentes "$chaves"; then
-        KERNEL_PERSISTENCIA_TIPO="pendente"
-        KERNEL_PERSISTENCIA_ERRO="O grub.cfg efetivo ainda contém uma das chaves gerenciadas."
+    if ! sudo systemctl is-active --quiet "$alvo"; then
+        LIBVIRT_BACKEND_ERRO="$alvo não ficou ativo depois do restart."
         return 1
     fi
+    return 0
 }
 
-_grub_cfg_linhas_linux() {
-    if [ -r "$GRUB_CFG_ARQUIVO" ]; then
-        awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO"
-        return
-    fi
-    command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || return 2
-    sudo -n awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO" 2>/dev/null
-}
-
-_grub_cfg_parametros_exatos() {
-    local esperados="$1" linhas linha estado encontrou=0
-    linhas="$(_grub_cfg_linhas_linux)" \
-        || return 1
-    [ -n "$linhas" ] || return 1
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        estado="$(_parametros_por_chaves_cmdline "$linha" "$esperados")" || return 1
-        # Recovery/custom entries podem deliberadamente não herdar
-        # GRUB_CMDLINE_LINUX_DEFAULT. Se uma entrada contiver qualquer chave
-        # gerenciada, porém, o conjunto precisa ser integral e exato.
-        [ -n "$estado" ] || continue
-        [ "$estado" = "$esperados" ] || return 1
-        encontrou=1
-    done <<< "$linhas"
-    [ "$encontrou" -eq 1 ]
-}
-
-_grub_cfg_chaves_ausentes() {
-    local chaves="$1" linhas linha estado encontrou=0
-    linhas="$(_grub_cfg_linhas_linux)" \
-        || return 1
-    [ -n "$linhas" ] || return 1
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        estado="$(_parametros_por_chaves_cmdline "$linha" "$chaves")" || return 1
-        [ -z "$estado" ] || return 1
-        encontrou=1
-    done <<< "$linhas"
-    [ "$encontrou" -eq 1 ]
-}
-
-_grub_aplicar_cmdline() {
-    # Instala /etc/default/grub e regenera o grub.cfg numa única transação.
-    # EXIT/INT/TERM após o primeiro mv restauram a fonte e regeneram o cfg.
-    local novo="$1" verificacao="$2" modo="$3" arq="$GRUB_DEFAULT_ARQUIVO"
-    local tmp backup staged linha
-    [[ "$novo" != *$'\n'* && "$novo" != *$'\r'* && "$novo" != *'"'* && "$novo" != *'\'* ]] \
-        || falhar "Linha de parâmetros GRUB contém caractere não suportado."
-    tmp="$(mktemp)" || falhar "Não foi possível criar temporário para o GRUB."
-    linha="GRUB_CMDLINE_LINUX_DEFAULT=\"${novo}\""
-    if ! NOVA_LINHA_GRUB="$linha" awk '
-        /^GRUB_CMDLINE_LINUX_DEFAULT=/ {
-            encontradas++
-            if (encontradas == 1) print ENVIRON["NOVA_LINHA_GRUB"]
-            next
-        }
-        { print }
-        END { if (encontradas != 1) exit 42 }
-    ' "$arq" > "$tmp"; then
-        rm -f -- "$tmp"
-        falhar "GRUB_CMDLINE_LINUX_DEFAULT ausente ou duplicado em $arq."
-    fi
-
-    backup="${arq}.bak-$(date +%Y%m%d-%H%M%S)-$$"
-    staged="${arq}.vm-passthrough-$$"
-    sudo cp -a -- "$arq" "$backup" \
-        || { rm -f -- "$tmp"; falhar "Falha ao criar backup do GRUB em $backup."; }
-    sudo cp -a -- "$arq" "$staged" \
-        || { rm -f -- "$tmp"; falhar "Falha ao preparar atualização atômica do GRUB."; }
-    if ! sudo tee "$staged" < "$tmp" >/dev/null; then
-        sudo rm -f -- "$staged"
-        rm -f -- "$tmp"
-        falhar "Falha ao escrever configuração temporária do GRUB."
-    fi
-    rm -f -- "$tmp"
-
-    if ! (
-        alterado=0
-        concluido=0
-        rollback_grub() {
-            local status="$1"
-            trap - EXIT INT TERM
-            sudo rm -f -- "$staged" >/dev/null 2>&1 || true
-            if [ "$alterado" -eq 1 ] && [ "$concluido" -eq 0 ]; then
-                erro "Transação GRUB interrompida ou inválida; restaurando $backup."
-                if sudo cp -a -- "$backup" "$arq" \
-                   && sudo update-grub \
-                   && sudo cmp -s -- "$backup" "$arq"; then
-                    aviso "Rollback da fonte GRUB e regeneração do grub.cfg concluídos."
-                else
-                    erro "ROLLBACK GRUB NÃO COMPROVADO. Não reinicie antes de revisar $arq e /boot/grub/grub.cfg."
-                fi
-            fi
-            exit "$status"
-        }
-        trap 'rollback_grub $?' EXIT
-        trap 'exit 130' INT
-        trap 'exit 143' TERM
-        alterado=1
-        sudo mv -f -- "$staged" "$arq" || exit 1
-        sudo update-grub || exit 1
-        if [ "$modo" = exato ]; then
-            _grub_cfg_parametros_exatos "$verificacao" || exit 1
-        elif [ "$modo" = ausente ]; then
-            _grub_cfg_chaves_ausentes "$verificacao" || exit 1
-        else
-            exit 1
-        fi
-        concluido=1
-    ); then
-        falhar "Alteração do GRUB não concluída; consulte as mensagens de rollback."
-    fi
-    info "Backup do GRUB preservado em: $backup"
-}
-
-kernel_param_add() {
-    # Apesar do nome histórico, esta operação é SET por chave: qualquer valor
-    # anterior de hugepages, isolcpus, iommu etc. é removido antes do novo.
-    local params="$1" bl atual novo
-    kernel_parametros_validos "$params" \
-        || falhar "Lista de parâmetros de kernel inválida ou com chaves duplicadas: '$params'."
-    exigir_bootloader_coerente
-    bl="$BOOTLOADER_ATIVO"
-    case "$bl" in
-        kernelstub)
-            _kernelstub_aplicar_estado "$params" "$params" \
-                || falhar "${KERNEL_PERSISTENCIA_ERRO:-Transação kernelstub não concluída.}"
-            ;;
-        grub)
-            atual="$(_grub_cmdline_atual)" \
-                || falhar "Não foi possível ler com segurança GRUB_CMDLINE_LINUX_DEFAULT."
-            novo="$(_cmdline_sem_chaves "$atual" "$params")"
-            novo="${novo:+$novo }$params"
-            _grub_aplicar_cmdline "$novo" "$params" exato
-            ;;
-        *)
-            falhar "Bootloader não identificado. Execute etapas/02-detectar-config.sh."
-            ;;
-    esac
-    info "Parâmetros definidos por chave via ${bl}: $params"
-}
-
-kernel_param_del() {
-    # Remove todos os valores das chaves informadas, mesmo que sejam diferentes
-    # daqueles registrados na chamada (ex.: hugepages=16 remove hugepages=8).
-    local params="$1" bl atual novo
-    kernel_parametros_validos "$params" \
-        || falhar "Lista de parâmetros de kernel inválida ou com chaves duplicadas: '$params'."
-    exigir_bootloader_coerente
-    bl="$BOOTLOADER_ATIVO"
-    case "$bl" in
-        kernelstub)
-            _kernelstub_aplicar_estado "$params" "" \
-                || falhar "${KERNEL_PERSISTENCIA_ERRO:-Transação kernelstub de remoção não concluída.}"
-            ;;
-        grub)
-            atual="$(_grub_cmdline_atual)" \
-                || falhar "Não foi possível ler com segurança GRUB_CMDLINE_LINUX_DEFAULT."
-            novo="$(_cmdline_sem_chaves "$atual" "$params")"
-            if [ "$novo" != "$atual" ] || ! _grub_cfg_chaves_ausentes "$params"; then
-                _grub_aplicar_cmdline "$novo" "$params" ausente
-            else
-                info "Nenhum parâmetro dessas chaves está configurado na fonte nem no grub.cfg efetivo."
-            fi
-            ;;
-        *)
-            falhar "Bootloader não identificado."
-            ;;
+ativar_unidade_systemd() {
+    # Aplica exatamente a ação autorizada pelo provider para a unidade dada.
+    local unidade="$1" acao="$2"
+    case "$acao" in
+        nenhuma) info "Unidade já ativa: $unidade" ;;
+        enable-now) sudo systemctl enable --now "$unidade" ;;
+        start) sudo systemctl start "$unidade" ;;
+        *) falhar "Ação systemd inválida para $unidade: $acao" ;;
     esac
 }
 
@@ -2647,68 +2441,179 @@ fstab_tem_linha() {
 }
 
 # --- XML da VM ------------------------------------------------------------------
+# Todo XML de domínio, de rede e todo JSON do qemu-img passam pelo core Python
+# através da ponte única. As funções desta seção permanecem a API pública do
+# shell (mesmos nomes, mesmos argumentos, mesmas variáveis de erro): elas
+# capturam o snapshot, transportam por stdin e traduzem a resposta. Nenhuma
+# delas interpola dado local em argv nem interpreta JSON com regex.
+
+_xml_ler_arquivo() {
+    # Publica o conteúdo do arquivo em XML_CONTEUDO sem executá-lo e sem
+    # aceitar link simbólico no lugar do snapshot.
+    local arquivo="${1:-}"
+    XML_CONTEUDO=""
+    [ -n "$arquivo" ] && [ -f "$arquivo" ] && [ ! -L "$arquivo" ] || return 1
+    XML_CONTEUDO="$(<"$arquivo")" || return 1
+    [ -n "$XML_CONTEUDO" ] || return 1
+}
+XML_CONTEUDO=""
+
+_core_diagnostico() {
+    # Normaliza o diagnóstico do core para as variáveis públicas de erro (vale
+    # para qualquer domínio, não só XML):
+    # remove o prefixo do programa e mantém somente a última linha útil, que é
+    # a mensagem de domínio. Nada é interpretado: é texto para o operador.
+    local padrao="${1:-Falha ao analisar o XML.}" bruto="${PYTHON_CORE_ERRO:-}"
+    bruto="${bruto#passthrough-core: }"
+    bruto="${bruto%%$'\n'*}"
+    printf '%s' "${bruto:-$padrao}"
+}
+
+# Allowlist mínima comum a toda resposta do core.
+CORE_PARES_ENVELOPE=(CORE_VERSION PROTOCOL_VERSION SUBCOMMAND)
+
 DISCARD_XML_ERRO=""
 DISCARD_XML_ESTADO=""
+DISCARD_XML_FINGERPRINT=""
 xml_disco_qcow2_estado() {
     # Retornos: 0=discard ativo no único disco alvo; 1=alvo único sem unmap;
     # 2=XML inválido, alvo ausente/duplicado ou estrutura ambígua.
-    local arquivo="${1:-}" qcow2="${2:-}" saida rc
+    local arquivo="${1:-}" qcow2="${2:-}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        STATE DISCARD DRIVER_TYPE TARGET_DEV DISK_COUNT FINGERPRINT
+    )
+    local -a payload=()
     DISCARD_XML_ERRO=""
     DISCARD_XML_ESTADO=""
-    [ -f "$arquivo" ] && caminho_absoluto_seguro "$qcow2" \
+    DISCARD_XML_FINGERPRINT=""
+    _xml_ler_arquivo "$arquivo" && caminho_absoluto_seguro "$qcow2" \
         || { DISCARD_XML_ERRO="XML ou QCOW2_PATH inválido."; DISCARD_XML_ESTADO=erro; return 2; }
-    if saida="$(python3 - "$arquivo" "$qcow2" 2>&1 <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-path, target = sys.argv[1:]
-try:
-    root = ET.parse(path).getroot()
-except Exception as exc:
-    print(f'XML ilegível: {exc}')
-    raise SystemExit(2)
-if root.tag != 'domain':
-    print('raiz XML não é <domain>')
-    raise SystemExit(2)
-devices = [child for child in list(root) if child.tag == 'devices']
-if len(devices) != 1:
-    print(f'quantidade de <devices>={len(devices)}; esperado 1')
-    raise SystemExit(2)
-matches = []
-for disk in [child for child in list(devices[0]) if child.tag == 'disk' and child.get('device') == 'disk']:
-    all_sources = [child for child in list(disk) if child.tag == 'source']
-    exact_sources = [child for child in all_sources if child.get('file') == target]
-    if exact_sources:
-        if len(all_sources) != 1 or len(exact_sources) != 1:
-            print(f'fontes no disco alvo: total={len(all_sources)}, exatas={len(exact_sources)}; esperado 1/1')
-            raise SystemExit(2)
-        matches.append(disk)
-if len(matches) != 1:
-    print(f'discos device=disk com source/@file exato {target!r}: {len(matches)}; esperado 1')
-    raise SystemExit(2)
-drivers = [child for child in list(matches[0]) if child.tag == 'driver']
-if len(drivers) != 1:
-    print(f'drivers no disco alvo: {len(drivers)}; esperado 1')
-    raise SystemExit(2)
-if drivers[0].get('discard') == 'unmap':
-    print('ativo')
-    raise SystemExit(0)
-print('ausente')
-raise SystemExit(1)
-PY
-)"; then
-        DISCARD_XML_ESTADO=ativo
-        return 0
-    else
-        rc=$?
+    payload=(xml "$XML_CONTEUDO" qcow2_path "$qcow2")
+    if ! python_core_pares_payload permitidas DISCO_ domain-disk-target payload \
+            2>/dev/null; then
+        DISCARD_XML_ESTADO=erro
+        DISCARD_XML_ERRO="$(_core_diagnostico 'Falha ao analisar o disco QCOW2 alvo.')"
+        return 2
     fi
-    if [ "$rc" -eq 1 ] && [ "$saida" = ausente ]; then
-        DISCARD_XML_ESTADO=ausente
+    DISCARD_XML_FINGERPRINT="${DISCO_FINGERPRINT:-}"
+    case "${DISCO_STATE:-}" in
+        ativo) DISCARD_XML_ESTADO=ativo; return 0 ;;
+        ausente) DISCARD_XML_ESTADO=ausente; return 1 ;;
+    esac
+    DISCARD_XML_ESTADO=erro
+    DISCARD_XML_ERRO="Estado de discard não reconhecido na resposta do core."
+    return 2
+}
+
+XML_DOMINIO_ERRO=""
+XML_DOMINIO_FINGERPRINT=""
+xml_dominio_fingerprint() {
+    # Fingerprint canônico do XML de domínio, para detectar mudança concorrente
+    # antes de aplicar e antes de restaurar.
+    local arquivo="${1:-}"
+    local -a permitidas=("${CORE_PARES_ENVELOPE[@]}" FINGERPRINT)
+    local -a payload=()
+    XML_DOMINIO_ERRO=""
+    XML_DOMINIO_FINGERPRINT=""
+    _xml_ler_arquivo "$arquivo" \
+        || { XML_DOMINIO_ERRO="XML de domínio ausente ou ilegível."; return 1; }
+    payload=(xml "$XML_CONTEUDO")
+    if ! python_core_pares_payload permitidas XMLFP_ domain-fingerprint payload \
+            2>/dev/null; then
+        XML_DOMINIO_ERRO="$(_core_diagnostico 'Não foi possível calcular o fingerprint do XML.')"
         return 1
     fi
-    DISCARD_XML_ESTADO=erro
-    DISCARD_XML_ERRO="${saida:-Falha ao analisar o disco QCOW2 alvo.}"
-    return 2
+    XML_DOMINIO_FINGERPRINT="$XMLFP_FINGERPRINT"
+}
+
+XML_CANDIDATO_ERRO=""
+XML_CANDIDATO_MUDOU=0
+XML_CANDIDATO_FINGERPRINT_ANTES=""
+XML_CANDIDATO_FINGERPRINT_DEPOIS=""
+_xml_candidato_permitidas=(
+    CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+    CHANGED OPERATION_COUNT FINGERPRINT_BEFORE FINGERPRINT_AFTER
+    BYTES_WRITTEN SHA256
+)
+_xml_candidato_gerar() {
+    # $1 = XML de origem; $2 = destino; demais = pares do payload da operação.
+    # O core gera o candidato num temporário controlado e a ponte publica no
+    # destino somente quando a geração é aceita, então uma recusa nunca deixa
+    # candidato parcial. O destino continua sendo validado pelo shell com
+    # virt-xml-validate antes do primeiro define.
+    local origem="${1:-}" destino="${2:-}"
+    local -a payload=()
+    shift 2 || true
+    XML_CANDIDATO_ERRO=""
+    XML_CANDIDATO_MUDOU=0
+    XML_CANDIDATO_FINGERPRINT_ANTES=""
+    XML_CANDIDATO_FINGERPRINT_DEPOIS=""
+    _xml_ler_arquivo "$origem" \
+        || { XML_CANDIDATO_ERRO="XML de origem ausente ou ilegível."; return 1; }
+    payload=(xml "$XML_CONTEUDO" "$@")
+    if ! python_core_candidato _xml_candidato_permitidas XMLCAND_ payload "$destino" \
+            2>/dev/null; then
+        XML_CANDIDATO_ERRO="$(_core_diagnostico 'Falha ao gerar o XML candidato.')"
+        return 1
+    fi
+    XML_CANDIDATO_MUDOU="$XMLCAND_CHANGED"
+    XML_CANDIDATO_FINGERPRINT_ANTES="$XMLCAND_FINGERPRINT_BEFORE"
+    XML_CANDIDATO_FINGERPRINT_DEPOIS="$XMLCAND_FINGERPRINT_AFTER"
+}
+
+xml_candidato_discard() {
+    # xml_candidato_discard ORIGEM DESTINO QCOW2_PATH
+    _xml_candidato_gerar "$1" "$2" \
+        op_count 1 op_0 disk-discard op_0_qcow2_path "$3" op_0_value unmap
+}
+
+xml_candidato_sem_video() {
+    # xml_candidato_sem_video ORIGEM DESTINO
+    _xml_candidato_gerar "$1" "$2" op_count 1 op_0 remove-video
+}
+
+xml_candidato_anti_code43() {
+    # xml_candidato_anti_code43 ORIGEM DESTINO [VENDOR_ID]
+    local vendor="${3:-randomid123}"
+    _xml_candidato_gerar "$1" "$2" \
+        op_count 1 op_0 anti-code43 op_0_vendor_id "$vendor"
+}
+
+xml_candidato_fonte_nic() {
+    # xml_candidato_fonte_nic ORIGEM DESTINO MAC TIPO ATRIBUTO VALOR
+    _xml_candidato_gerar "$1" "$2" \
+        op_count 1 op_0 nic-source \
+        op_0_mac "$3" op_0_type "$4" op_0_attribute "$5" op_0_value "$6"
+}
+
+XML_COMPARACAO_ERRO=""
+XML_COMPARACAO_DIFERENCA=""
+xml_dominio_equivalente() {
+    # xml_dominio_equivalente ESQUERDA DIREITA [PROJECAO]
+    # Retornos: 0=equivalente na projeção; 1=divergente; 2=erro de análise.
+    # PROJECAO: full (padrão), cpu-unmanaged, devices-unmanaged.
+    local esquerda="${1:-}" direita="${2:-}" projecao="${3:-full}" conteudo_esquerda
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" EQUAL DIFFERENCE FINGERPRINT_LEFT FINGERPRINT_RIGHT
+    )
+    local -a payload=()
+    XML_COMPARACAO_ERRO=""
+    XML_COMPARACAO_DIFERENCA=""
+    _xml_ler_arquivo "$esquerda" \
+        || { XML_COMPARACAO_ERRO="XML de referência ausente ou ilegível."; return 2; }
+    conteudo_esquerda="$XML_CONTEUDO"
+    _xml_ler_arquivo "$direita" \
+        || { XML_COMPARACAO_ERRO="XML observado ausente ou ilegível."; return 2; }
+    payload=(left "$conteudo_esquerda" right "$XML_CONTEUDO" projection "$projecao")
+    if ! python_core_pares_payload permitidas XMLCMP_ domain-compare payload \
+            2>/dev/null; then
+        XML_COMPARACAO_ERRO="$(_core_diagnostico 'Não foi possível comparar os XML.')"
+        return 2
+    fi
+    XML_COMPARACAO_DIFERENCA="$XMLCMP_DIFFERENCE"
+    [ "$XMLCMP_EQUAL" = 1 ] || return 1
+    return 0
 }
 
 xml_backup() {
@@ -2729,8 +2634,20 @@ xml_backup() {
 }
 
 vm_existe() { LC_ALL=C $VIRSH dominfo "$1" >/dev/null 2>&1; }
-vm_estado() { LC_ALL=C $VIRSH domstate "$1" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
-vm_desligada() { [ "$(vm_estado "$1")" = "shut off" ]; }
+vm_estado() {
+    local estado rc
+    if estado="$(LC_ALL=C $VIRSH domstate "$1" 2>/dev/null)"; then
+        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<< "$estado"
+    else
+        rc=$?
+        return "$rc"
+    fi
+}
+vm_desligada() {
+    local estado
+    estado="$(vm_estado "$1")" || return $?
+    [ "$estado" = "shut off" ]
+}
 
 exigir_vm_desligada() {
     vm_existe "$1" || falhar "A VM '$1' não existe. Execute a etapa 40 antes."
@@ -2758,39 +2675,11 @@ expandir_lista_cpus() {
     done
 }
 
-CPU_LISTAS_ERRO=""
-validar_particao_cpus() {
-    # validar_particao_cpus CPUS_VM CPUS_HOST TOTAL [VCPUS_ESPERADAS]
-    # Compatibilidade para consumidores com IDs contíguos. Novas validações
-    # de topologia devem preferir validar_layout_cpu.
-    local cpus_vm="$1" cpus_host="$2" total="$3" esperadas="${4:-}"
-    local cpu quantidade_vm=0 quantidade_total=0
-    local -A vistas=()
-    CPU_LISTAS_ERRO=""
-    lista_cpus_valida "$cpus_vm" "$total" \
-        || { CPU_LISTAS_ERRO="CPUS_VM contém duplicação, intervalo inválido ou CPU fora do host."; return 1; }
-    lista_cpus_valida "$cpus_host" "$total" \
-        || { CPU_LISTAS_ERRO="CPUS_HOST contém duplicação, intervalo inválido ou CPU fora do host."; return 1; }
-
-    while IFS= read -r cpu; do
-        vistas[$cpu]=vm
-        quantidade_vm=$((quantidade_vm + 1))
-    done < <(expandir_lista_cpus "$cpus_vm")
-    while IFS= read -r cpu; do
-        [ -z "${vistas[$cpu]+definida}" ] \
-            || { CPU_LISTAS_ERRO="A CPU $cpu aparece simultaneamente em CPUS_VM e CPUS_HOST."; return 1; }
-        vistas[$cpu]=host
-    done < <(expandir_lista_cpus "$cpus_host")
-    quantidade_total="${#vistas[@]}"
-    [ "$quantidade_total" -eq "$total" ] \
-        || { CPU_LISTAS_ERRO="As listas cobrem $quantidade_total de $total CPUs lógicas; todas precisam pertencer exatamente a uma lista."; return 1; }
-    if [ -n "$esperadas" ]; then
-        inteiro_na_faixa "$esperadas" 1 65536 \
-            || { CPU_LISTAS_ERRO="Quantidade esperada de vCPUs inválida: $esperadas."; return 1; }
-        [ "$quantidade_vm" -eq "$esperadas" ] \
-            || { CPU_LISTAS_ERRO="CPUS_VM contém $quantidade_vm CPUs, mas VM_VCPUS=$esperadas."; return 1; }
-    fi
-}
+# I5: validar_particao_cpus foi removida. Ela era a validação relacional
+# antiga, por contagem de CPUs contíguas, e ficou sem consumidor quando
+# validar_layout_cpu passou a exigir topologia real. Mantê-la significaria
+# duas implementações da mesma política, uma delas cega para socket, core e
+# CPU offline.
 
 cpu_topologia_csv() {
     # Saída estável e não localizada: CPU,CORE,SOCKET,NODE,ONLINE.
@@ -2806,288 +2695,207 @@ normalizar_conjunto_cpus() {
 
 CPU_LAYOUT_ERRO=""
 CPU_LAYOUT_ONLINE=""
+CPU_LAYOUT_FINGERPRINT=""
 validar_layout_cpu() {
     # validar_layout_cpu CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS [CSV]
     # CSV segue lscpu -p=CPU,CORE,SOCKET,NODE,ONLINE. Valida o conjunto exato
     # de CPUs online (inclusive IDs esparsos), siblings completos por core,
-    # cardinalidade e produto da topologia. Pelo menos um core inteiro fica no host.
+    # cardinalidade e produto da topologia. Pelo menos um core inteiro fica no
+    # host.
+    #
+    # I5: a política relacional passou a ter uma implementação só, no core
+    # Python. O shell continua sendo quem captura o snapshot (`lscpu` é um
+    # probe do host) e quem publica o diagnóstico; as mensagens são as mesmas
+    # de antes, porque são API operacional (seção 3.1). Além do veredicto, a
+    # chamada devolve o fingerprint canônico da topologia, usado pelas etapas
+    # para provar que o host não mudou entre planejar e aplicar.
     local cpus_vm="${1:-}" cpus_host="${2:-}" vcpus="${3:-}"
     local cores="${4:-}" threads="${5:-}" topologia="${6:-}"
-    local cpu core socket node online extra chave dono primeiro irmao quantidade
-    local qtd_vm=0 qtd_total=0 cores_vm=0 cores_host=0 ordem_vm="" declarada_vm
-    local -a irmaos=() chaves_ordenadas=() irmaos_ordenados=()
-    local -A online_set=() alocacao=() core_cpus=() core_dono=()
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        VALID ERROR ONLINE_SET ONLINE_COUNT VM_CPU_COUNT VM_CORE_COUNT
+        HOST_CORE_COUNT FINGERPRINT
+    )
+    local -a payload=()
     CPU_LAYOUT_ERRO=""
     CPU_LAYOUT_ONLINE=""
-
-    inteiro_na_faixa "$vcpus" 1 65536 \
-        || { CPU_LAYOUT_ERRO="VM_VCPUS inválido: '${vcpus:-vazio}'."; return 1; }
-    inteiro_na_faixa "$cores" 1 65536 \
-        || { CPU_LAYOUT_ERRO="VM_CORES inválido: '${cores:-vazio}'."; return 1; }
-    inteiro_na_faixa "$threads" 1 65536 \
-        || { CPU_LAYOUT_ERRO="VM_THREADS inválido: '${threads:-vazio}'."; return 1; }
-    [ $((10#$cores * 10#$threads)) -eq $((10#$vcpus)) ] \
-        || { CPU_LAYOUT_ERRO="VM_CORES x VM_THREADS precisa ser igual a VM_VCPUS ($cores x $threads != $vcpus)."; return 1; }
-    lista_cpus_valida "$cpus_vm" \
-        || { CPU_LAYOUT_ERRO="CPUS_VM possui sintaxe, intervalo ou duplicação inválida."; return 1; }
-    lista_cpus_valida "$cpus_host" \
-        || { CPU_LAYOUT_ERRO="CPUS_HOST possui sintaxe, intervalo ou duplicação inválida."; return 1; }
+    CPU_LAYOUT_FINGERPRINT=""
     if [ -z "$topologia" ]; then
         topologia="$(cpu_topologia_csv)" \
             || { CPU_LAYOUT_ERRO="lscpu não conseguiu fornecer a topologia parseável."; return 1; }
     fi
     [ -n "$topologia" ] \
         || { CPU_LAYOUT_ERRO="A topologia de CPU está vazia."; return 1; }
+    payload=(
+        csv "$topologia"
+        cpus_vm "$cpus_vm"
+        cpus_host "$cpus_host"
+        vcpus "$vcpus"
+        cores "$cores"
+        threads "$threads"
+    )
+    if ! python_core_pares_payload permitidas CPULAYOUT_ cpu-layout payload \
+            2>/dev/null; then
+        CPU_LAYOUT_ERRO="$(_core_diagnostico 'Não foi possível validar o layout de CPU.')"
+        return 1
+    fi
+    if [ "${CPULAYOUT_VALID:-0}" != 1 ]; then
+        CPU_LAYOUT_ERRO="${CPULAYOUT_ERROR:-Layout de CPU recusado pelo core.}"
+        return 1
+    fi
+    CPU_LAYOUT_ONLINE="${CPULAYOUT_ONLINE_SET:-}"
+    CPU_LAYOUT_FINGERPRINT="${CPULAYOUT_FINGERPRINT:-}"
+}
 
-    while IFS=, read -r cpu core socket node online extra; do
-        cpu="${cpu%$'\r'}"; core="${core%$'\r'}"; socket="${socket%$'\r'}"
-        online="${online%$'\r'}"
-        [ -z "$extra" ] || { CPU_LAYOUT_ERRO="Linha de topologia possui colunas inesperadas."; return 1; }
-        case "$online" in
-            Y|yes|YES|1) ;;
-            N|no|NO|0) continue ;;
-            *) CPU_LAYOUT_ERRO="Estado ONLINE desconhecido para CPU ${cpu:-?}: '${online:-vazio}'."; return 1 ;;
-        esac
-        inteiro_na_faixa "$cpu" 0 65535 \
-            || { CPU_LAYOUT_ERRO="ID de CPU online inválido: '$cpu'."; return 1; }
-        inteiro_na_faixa "$core" 0 65535 \
-            || { CPU_LAYOUT_ERRO="CORE inválido para a CPU $cpu: '$core'."; return 1; }
-        inteiro_na_faixa "$socket" 0 65535 \
-            || { CPU_LAYOUT_ERRO="SOCKET inválido para a CPU $cpu: '$socket'."; return 1; }
-        [ -z "${online_set[$cpu]+definida}" ] \
-            || { CPU_LAYOUT_ERRO="A CPU $cpu aparece mais de uma vez na topologia."; return 1; }
-        online_set[$cpu]=1
-        chave="$socket:$core"
-        core_cpus[$chave]="${core_cpus[$chave]:+${core_cpus[$chave]} }$cpu"
-    done <<< "$topologia"
-    [ "${#online_set[@]}" -gt 0 ] \
-        || { CPU_LAYOUT_ERRO="Nenhuma CPU online foi encontrada."; return 1; }
+CPU_TOPOLOGIA_ERRO=""
+CPU_TOPOLOGIA_FINGERPRINT=""
+CPU_TOPOLOGIA_ONLINE=""
+cpu_topologia_fingerprint() {
+    # Publica o fingerprint canônico da topologia recebida (ou lida agora).
+    # Reordenar linhas do lscpu não muda o valor; mudar o conjunto online ou o
+    # agrupamento de siblings muda. É a base da recusa por conflito TOCTOU.
+    local topologia="${1:-}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        VALID ERROR ONLINE_COUNT ONLINE_SET CORE_COUNT SOCKET_COUNT
+        THREADS_PER_CORE HOMOGENEOUS BOOT_CORE BOOT_CORE_CPUS FINGERPRINT
+    )
+    local -a payload=()
+    CPU_TOPOLOGIA_ERRO=""
+    CPU_TOPOLOGIA_FINGERPRINT=""
+    CPU_TOPOLOGIA_ONLINE=""
+    if [ -z "$topologia" ]; then
+        topologia="$(cpu_topologia_csv)" \
+            || { CPU_TOPOLOGIA_ERRO="lscpu não conseguiu fornecer a topologia parseável."; return 1; }
+    fi
+    [ -n "$topologia" ] \
+        || { CPU_TOPOLOGIA_ERRO="A topologia de CPU está vazia."; return 1; }
+    payload=(csv "$topologia")
+    if ! python_core_pares_payload permitidas CPUTOPO_ cpu-topology payload \
+            2>/dev/null; then
+        CPU_TOPOLOGIA_ERRO="$(_core_diagnostico 'Não foi possível canonicalizar a topologia de CPU.')"
+        return 1
+    fi
+    if [ "${CPUTOPO_VALID:-0}" != 1 ]; then
+        CPU_TOPOLOGIA_ERRO="${CPUTOPO_ERROR:-Topologia de CPU recusada pelo core.}"
+        return 1
+    fi
+    CPU_TOPOLOGIA_FINGERPRINT="${CPUTOPO_FINGERPRINT:-}"
+    CPU_TOPOLOGIA_ONLINE="${CPUTOPO_ONLINE_SET:-}"
+}
 
-    while IFS= read -r cpu; do
-        [ -n "${online_set[$cpu]+definida}" ] \
-            || { CPU_LAYOUT_ERRO="CPUS_VM inclui a CPU $cpu, que não está online."; return 1; }
-        alocacao[$cpu]=vm
-        qtd_vm=$((qtd_vm + 1))
-    done < <(expandir_lista_cpus "$cpus_vm")
-    while IFS= read -r cpu; do
-        [ -n "${online_set[$cpu]+definida}" ] \
-            || { CPU_LAYOUT_ERRO="CPUS_HOST inclui a CPU $cpu, que não está online."; return 1; }
-        [ -z "${alocacao[$cpu]+definida}" ] \
-            || { CPU_LAYOUT_ERRO="A CPU $cpu aparece simultaneamente em CPUS_VM e CPUS_HOST."; return 1; }
-        alocacao[$cpu]=host
-    done < <(expandir_lista_cpus "$cpus_host")
-    qtd_total="${#alocacao[@]}"
-    [ "$qtd_total" -eq "${#online_set[@]}" ] \
-        || { CPU_LAYOUT_ERRO="As listas cobrem $qtd_total de ${#online_set[@]} CPUs online; não pode haver omissões."; return 1; }
-    for cpu in "${!online_set[@]}"; do
-        [ -n "${alocacao[$cpu]+definida}" ] \
-            || { CPU_LAYOUT_ERRO="A CPU online $cpu não pertence a CPUS_VM nem a CPUS_HOST."; return 1; }
-    done
-    [ "$qtd_vm" -eq "$vcpus" ] \
-        || { CPU_LAYOUT_ERRO="CPUS_VM contém $qtd_vm CPUs, mas VM_VCPUS=$vcpus."; return 1; }
+CPU_PLANO_ERRO=""
+cpu_plano_pinning() {
+    # cpu_plano_pinning CSV [CORES_VM]
+    # Sem CORES_VM devolve apenas os limites (para a pergunta ao operador);
+    # com CORES_VM devolve a proposta determinística já validada. As variáveis
+    # publicadas usam o prefixo CPUPLANO_.
+    local topologia="${1:-}" cores_vm="${2:-}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        VALID ERROR TOTAL_CORES THREADS_PER_CORE MAX_VM_CORES DEFAULT_VM_CORES
+        BOOT_CORE BOOT_CORE_CPUS ONLINE_SET FINGERPRINT PLANNED CPUS_VM
+        CPUS_HOST VCPUS VM_CORES HOST_CORE_COUNT
+    )
+    local -a payload=()
+    CPU_PLANO_ERRO=""
+    if [ -z "$topologia" ]; then
+        topologia="$(cpu_topologia_csv)" \
+            || { CPU_PLANO_ERRO="lscpu não conseguiu fornecer a topologia parseável."; return 1; }
+    fi
+    [ -n "$topologia" ] \
+        || { CPU_PLANO_ERRO="A topologia de CPU está vazia."; return 1; }
+    payload=(csv "$topologia" vm_cores "$cores_vm")
+    if ! python_core_pares_payload permitidas CPUPLANO_ cpu-plan payload \
+            2>/dev/null; then
+        CPU_PLANO_ERRO="$(_core_diagnostico 'Não foi possível calcular o plano de pinning.')"
+        return 1
+    fi
+    if [ "${CPUPLANO_VALID:-0}" != 1 ]; then
+        CPU_PLANO_ERRO="${CPUPLANO_ERROR:-Plano de pinning recusado pelo core.}"
+        return 1
+    fi
+}
 
-    for chave in "${!core_cpus[@]}"; do
-        read -r -a irmaos <<< "${core_cpus[$chave]}"
-        quantidade="${#irmaos[@]}"
-        primeiro="${irmaos[0]}"
-        dono="${alocacao[$primeiro]}"
-        for irmao in "${irmaos[@]}"; do
-            [ "${alocacao[$irmao]}" = "$dono" ] \
-                || { CPU_LAYOUT_ERRO="O core físico $chave foi dividido entre VM e host (siblings: ${core_cpus[$chave]})."; return 1; }
-        done
-        core_dono[$chave]="$dono"
-        if [ "$dono" = vm ]; then
-            [ "$quantidade" -eq "$threads" ] \
-                || { CPU_LAYOUT_ERRO="O core da VM $chave tem $quantidade thread(s) online, mas VM_THREADS=$threads."; return 1; }
-            cores_vm=$((cores_vm + 1))
-        else
-            cores_host=$((cores_host + 1))
-        fi
-    done
-    [ "$cores_vm" -eq "$cores" ] \
-        || { CPU_LAYOUT_ERRO="CPUS_VM ocupa $cores_vm cores físicos, mas VM_CORES=$cores."; return 1; }
-    [ "$cores_host" -ge 1 ] \
-        || { CPU_LAYOUT_ERRO="Nenhum core físico completo foi preservado para o host."; return 1; }
-
-    # A ordem também é parte do contrato: no XML virtual, threads adjacentes
-    # pertencem ao mesmo core. Portanto cada grupo socket:core deve aparecer
-    # contíguo, ordenado por socket/core e por ID lógico do sibling.
-    mapfile -t chaves_ordenadas < <(printf '%s\n' "${!core_cpus[@]}" \
-        | LC_ALL=C sort -t: -k1,1n -k2,2n)
-    for chave in "${chaves_ordenadas[@]}"; do
-        [ "${core_dono[$chave]}" = vm ] || continue
-        read -r -a irmaos <<< "${core_cpus[$chave]}"
-        mapfile -t irmaos_ordenados < <(printf '%s\n' "${irmaos[@]}" | LC_ALL=C sort -n)
-        for cpu in "${irmaos_ordenados[@]}"; do
-            ordem_vm="${ordem_vm:+$ordem_vm,}$cpu"
-        done
-    done
-    declarada_vm="$(expandir_lista_cpus "$cpus_vm" | paste -sd, -)"
-    [ "$declarada_vm" = "$ordem_vm" ] \
-        || { CPU_LAYOUT_ERRO="CPUS_VM precisa agrupar siblings na ordem canônica socket:core: esperado [$ordem_vm], recebido [$declarada_vm]."; return 1; }
-    CPU_LAYOUT_ONLINE="$(printf '%s\n' "${!online_set[@]}" | LC_ALL=C sort -n | paste -sd, -)"
+CPU_MEMORIA_ERRO=""
+plano_memoria_vm() {
+    # plano_memoria_vm TOTAL_MIB [VM_RAM_MIB] [HUGEPAGES_1G]
+    # Reserva do host, teto da VM e relação RAM/HugePages em um único lugar.
+    # Publica CPUMEM_TOTAL_MIB, CPUMEM_RESERVE_MIB, CPUMEM_MAX_VM_MIB,
+    # CPUMEM_MAX_VM_GIB e CPUMEM_HUGEPAGES_1G.
+    local total="${1:-}" vm_ram="${2:-}" hugepages="${3:-}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        VALID ERROR TOTAL_MIB RESERVE_MIB MAX_VM_MIB MAX_VM_GIB CHECKED
+        VM_RAM_MIB HUGEPAGES_1G
+    )
+    local -a payload=()
+    CPU_MEMORIA_ERRO=""
+    payload=(
+        total_mib "$total"
+        vm_ram_mib "$vm_ram"
+        hugepages_1g "$hugepages"
+    )
+    if ! python_core_pares_payload permitidas CPUMEM_ cpu-memory payload \
+            2>/dev/null; then
+        CPU_MEMORIA_ERRO="$(_core_diagnostico 'Não foi possível calcular o plano de memória.')"
+        return 1
+    fi
+    if [ "${CPUMEM_VALID:-0}" != 1 ]; then
+        CPU_MEMORIA_ERRO="${CPUMEM_ERROR:-Plano de memória recusado pelo core.}"
+        return 1
+    fi
 }
 
 XML_CPU_ERRO=""
 xml_cpu_gerar_candidato() {
     # Gera XML com pinning, topologia e página explicitamente de 1 GiB sem
     # remover ajustes não gerenciados de cputune/memoryBacking.
+    # Assinatura preservada: ORIGEM DESTINO CPUS_VM CPUS_HOST VCPUS CORES
+    # THREADS RAM_MB. O destino só é escrito quando o candidato é aceito.
     local origem="$1" destino="$2" cpus_vm="$3" cpus_host="$4"
-    local vcpus="$5" cores="$6" threads="$7" ram_mb="$8" saida
+    local vcpus="$5" cores="$6" threads="$7" ram_mb="$8"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        CHANGED OPERATION_COUNT FINGERPRINT_BEFORE FINGERPRINT_AFTER
+        BYTES_WRITTEN SHA256
+    )
+    local -a payload=()
     XML_CPU_ERRO=""
-    if ! saida="$(python3 - "$origem" "$destino" "$cpus_vm" "$cpus_host" "$vcpus" "$cores" "$threads" "$ram_mb" 2>&1 <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-src, dst, vm_spec, host_spec, vcpus_s, cores_s, threads_s, ram_s = sys.argv[1:]
-
-def fail(message):
-    raise ValueError(message)
-
-def expand(spec):
-    result = []
-    seen = set()
-    for part in spec.split(','):
-        if '-' in part:
-            a_s, b_s = part.split('-', 1)
-            a, b = int(a_s), int(b_s)
-            if a > b:
-                fail(f'intervalo invertido: {part}')
-            values = range(a, b + 1)
-        else:
-            values = (int(part),)
-        for value in values:
-            if value in seen:
-                fail(f'CPU duplicada: {value}')
-            seen.add(value)
-            result.append(value)
-    return result
-
-def direct(parent, name):
-    return [child for child in list(parent) if child.tag == name]
-
-def one(parent, name):
-    items = direct(parent, name)
-    if len(items) != 1:
-        fail(f'esperado exatamente um <{name}>; encontrado: {len(items)}')
-    return items[0]
-
-def ensure_one(parent, name, anchors=()):
-    items = direct(parent, name)
-    if len(items) > 1:
-        fail(f'<{name}> duplicado')
-    if items:
-        return items[0]
-    element = ET.Element(name)
-    children = list(parent)
-    for index, child in enumerate(children):
-        if child.tag in anchors:
-            parent.insert(index, element)
-            return element
-    parent.append(element)
-    return element
-
-vcpus, cores, threads, ram_mb = int(vcpus_s), int(cores_s), int(threads_s), int(ram_s)
-vm_cpus = expand(vm_spec)
-expand(host_spec)
-if len(vm_cpus) != vcpus:
-    fail(f'CPUS_VM possui {len(vm_cpus)} CPUs, mas VM_VCPUS={vcpus}')
-parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
-tree = ET.parse(src, parser=parser)
-root = tree.getroot()
-if root.tag != 'domain':
-    fail('raiz XML não é <domain>')
-if direct(root, 'maxMemory'):
-    fail('reconfiguração automática com <maxMemory> não é suportada; revise hotplug de RAM manualmente')
-if direct(root, 'numatune'):
-    fail('reconfiguração automática com <numatune> não é suportada')
-
-memory = one(root, 'memory')
-memory.text = str(ram_mb)
-memory.set('unit', 'MiB')
-current_memory = direct(root, 'currentMemory')
-if len(current_memory) > 1:
-    fail('<currentMemory> duplicado')
-if current_memory:
-    current_memory[0].text = str(ram_mb)
-    current_memory[0].set('unit', 'MiB')
-
-# Metadados individuais de hotplug possuem semântica própria (enabled,
-# hotpluggable, order). Não os apague nem tente inferir uma política nova.
-if direct(root, 'vcpus'):
-    fail('o domínio possui <vcpus> de hotplug; remova/reconcilie essa política manualmente antes desta etapa')
-
-vcpu = one(root, 'vcpu')
-vcpu.text = str(vcpus)
-vcpu.attrib.pop('current', None)
-vcpu.set('placement', 'static')
-vcpu.set('cpuset', vm_spec)
-
-cputune = ensure_one(root, 'cputune', ('numatune', 'resource', 'sysinfo', 'os', 'features', 'cpu', 'clock', 'devices'))
-for child in list(cputune):
-    if child.tag in ('vcpupin', 'emulatorpin'):
-        cputune.remove(child)
-for index, physical in enumerate(vm_cpus):
-    ET.SubElement(cputune, 'vcpupin', {'vcpu': str(index), 'cpuset': str(physical)})
-ET.SubElement(cputune, 'emulatorpin', {'cpuset': host_spec})
-
-cpu = ensure_one(root, 'cpu', ('clock', 'on_poweroff', 'on_reboot', 'on_crash', 'pm', 'devices'))
-if direct(cpu, 'numa'):
-    fail('reconfiguração automática com <cpu><numa> não é suportada')
-cpu.set('mode', 'host-passthrough')
-cpu.set('check', 'none')
-cpu.set('migratable', 'off')
-for child in list(cpu):
-    if child.tag == 'topology':
-        cpu.remove(child)
-ET.SubElement(cpu, 'topology', {
-    'sockets': '1', 'dies': '1', 'cores': str(cores), 'threads': str(threads)
-})
-
-memory_backing = ensure_one(root, 'memoryBacking', ('vcpu', 'resource', 'sysinfo', 'os', 'features', 'cpu', 'clock', 'devices'))
-for child in list(memory_backing):
-    if child.tag == 'hugepages':
-        memory_backing.remove(child)
-hugepages = ET.Element('hugepages')
-hugepages.append(ET.Element('page', {'size': '1', 'unit': 'GiB'}))
-memory_backing.insert(0, hugepages)
-
-tree.write(dst, encoding='utf-8', xml_declaration=True, short_empty_elements=True)
-PY
-)"; then
-        XML_CPU_ERRO="${saida:-Falha ao gerar o XML candidato.}"
+    _xml_ler_arquivo "$origem" \
+        || { XML_CPU_ERRO="XML de origem ausente ou ilegível."; return 1; }
+    payload=(
+        xml "$XML_CONTEUDO"
+        op_count 1
+        op_0 cpu-pinning
+        op_0_cpus_vm "$cpus_vm"
+        op_0_cpus_host "$cpus_host"
+        op_0_vcpus "$vcpus"
+        op_0_cores "$cores"
+        op_0_threads "$threads"
+        op_0_ram_mb "$ram_mb"
+    )
+    if ! python_core_candidato permitidas XMLCPU_ payload "$destino" 2>/dev/null; then
+        XML_CPU_ERRO="$(_core_diagnostico 'Falha ao gerar o XML candidato.')"
         return 1
     fi
 }
 
 xml_cpu_remover_hugepages() {
-    local origem="$1" destino="$2" saida
+    # Remove a exigência de HugePages preservando o restante do memoryBacking.
+    local origem="$1" destino="$2"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        CHANGED OPERATION_COUNT FINGERPRINT_BEFORE FINGERPRINT_AFTER
+        BYTES_WRITTEN SHA256
+    )
+    local -a payload=()
     XML_CPU_ERRO=""
-    if ! saida="$(python3 - "$origem" "$destino" 2>&1 <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-src, dst = sys.argv[1:]
-parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
-tree = ET.parse(src, parser=parser)
-root = tree.getroot()
-if root.tag != 'domain':
-    raise ValueError('raiz XML não é <domain>')
-backings = [child for child in list(root) if child.tag == 'memoryBacking']
-if len(backings) > 1:
-    raise ValueError('<memoryBacking> duplicado')
-if backings:
-    backing = backings[0]
-    for child in list(backing):
-        if child.tag == 'hugepages':
-            backing.remove(child)
-    real_children = [child for child in list(backing) if isinstance(child.tag, str)]
-    if not real_children and not backing.attrib and not (backing.text or '').strip():
-        root.remove(backing)
-tree.write(dst, encoding='utf-8', xml_declaration=True, short_empty_elements=True)
-PY
-)"; then
-        XML_CPU_ERRO="${saida:-Falha ao remover HugePages do XML candidato.}"
+    _xml_ler_arquivo "$origem" \
+        || { XML_CPU_ERRO="XML de origem ausente ou ilegível."; return 1; }
+    payload=(xml "$XML_CONTEUDO" op_count 1 op_0 remove-hugepages)
+    if ! python_core_candidato permitidas XMLCPU_ payload "$destino" 2>/dev/null; then
+        XML_CPU_ERRO="$(_core_diagnostico 'Falha ao remover HugePages do XML candidato.')"
         return 1
     fi
 }
@@ -3096,160 +2904,52 @@ validar_xml_cpu_pinning() {
     # validar_xml_cpu_pinning XML CPUS_VM CPUS_HOST VCPUS CORES THREADS RAM_MB MODO
     # MODO: sim exige página de 1 GiB; nao exige ausência; ignorar não avalia.
     local arquivo="$1" cpus_vm="$2" cpus_host="$3" vcpus="$4"
-    local cores="$5" threads="$6" ram_mb="$7" modo="${8:-ignorar}" saida
+    local cores="$5" threads="$6" ram_mb="$7" modo="${8:-ignorar}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" VALID VCPUS HUGEPAGES_COUNT FINGERPRINT
+    )
+    local -a payload=()
     XML_CPU_ERRO=""
-    if ! saida="$(python3 - "$arquivo" "$cpus_vm" "$cpus_host" "$vcpus" "$cores" "$threads" "$ram_mb" "$modo" 2>&1 <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-from fractions import Fraction
-
-path, vm_spec, host_spec, vcpus_s, cores_s, threads_s, ram_s, huge_mode = sys.argv[1:]
-
-def fail(message):
-    raise ValueError(message)
-
-def direct(parent, name):
-    return [child for child in list(parent) if child.tag == name]
-
-def one(parent, name):
-    values = direct(parent, name)
-    if len(values) != 1:
-        fail(f'esperado exatamente um <{name}>; encontrado: {len(values)}')
-    return values[0]
-
-def expand(spec):
-    if not spec:
-        fail('lista de CPUs vazia')
-    result, seen = [], set()
-    for part in spec.split(','):
-        if '-' in part:
-            bits = part.split('-', 1)
-            if len(bits) != 2 or not all(bit.isdigit() for bit in bits):
-                fail(f'intervalo inválido: {part}')
-            start, end = map(int, bits)
-            if start > end:
-                fail(f'intervalo invertido: {part}')
-            values = range(start, end + 1)
-        else:
-            if not part.isdigit():
-                fail(f'CPU inválida: {part}')
-            values = (int(part),)
-        for value in values:
-            if value in seen:
-                fail(f'CPU duplicada: {value}')
-            seen.add(value)
-            result.append(value)
-    return result
-
-def same_set(actual, expected):
-    return set(expand(actual)) == set(expand(expected))
-
-def size_bytes(value, unit, default='KiB'):
-    units = {
-        'b': 1, 'bytes': 1,
-        'kb': 1000, 'kib': 1024,
-        'mb': 1000 ** 2, 'mib': 1024 ** 2,
-        'gb': 1000 ** 3, 'gib': 1024 ** 3,
-    }
-    key = (unit or default).lower()
-    if key not in units:
-        fail(f'unidade de memória não suportada: {unit or default}')
-    try:
-        number = Fraction(value.strip())
-    except Exception as exc:
-        fail(f'valor de memória inválido: {value!r} ({exc})')
-    return number * units[key]
-
-vcpus, cores, threads, ram_mb = map(int, (vcpus_s, cores_s, threads_s, ram_s))
-expected_vm = expand(vm_spec)
-expand(host_spec)
-if len(expected_vm) != vcpus:
-    fail(f'CPUS_VM possui {len(expected_vm)} CPUs, esperado {vcpus}')
-if cores * threads != vcpus:
-    fail('produto cores x threads diverge de vCPUs')
-root = ET.parse(path).getroot()
-if root.tag != 'domain':
-    fail('raiz XML não é <domain>')
-if direct(root, 'maxMemory') or direct(root, 'numatune'):
-    fail('maxMemory/numatune não são suportados pela validação automática desta etapa')
-
-vcpu = one(root, 'vcpu')
-if (vcpu.text or '').strip() != str(vcpus):
-    fail(f'<vcpu> diverge de {vcpus}')
-if vcpu.get('placement') != 'static' or not same_set(vcpu.get('cpuset', ''), vm_spec):
-    fail('<vcpu> não possui placement estático e conjunto exato de CPUS_VM')
-if vcpu.get('current') not in (None, str(vcpus)):
-    fail('vcpu/@current limita a VM a uma cardinalidade diferente')
-individual_sets = direct(root, 'vcpus')
-if individual_sets:
-    fail('<vcpus> de hotplug não é suportado automaticamente; a política precisa ser reconciliada manualmente')
-
-cputune = one(root, 'cputune')
-pins = direct(cputune, 'vcpupin')
-if len(pins) != vcpus:
-    fail(f'quantidade de vcpupin={len(pins)}, esperado {vcpus}')
-seen_vcpus = set()
-for pin in pins:
-    index_s = pin.get('vcpu', '')
-    if not index_s.isdigit():
-        fail('vcpupin sem índice numérico')
-    index = int(index_s)
-    if index in seen_vcpus or index < 0 or index >= vcpus:
-        fail(f'índice vcpupin duplicado/fora da faixa: {index}')
-    seen_vcpus.add(index)
-    actual = expand(pin.get('cpuset', ''))
-    if actual != [expected_vm[index]]:
-        fail(f'vCPU {index} está em {actual}, esperado [{expected_vm[index]}]')
-if seen_vcpus != set(range(vcpus)):
-    fail('vcpupin não cobre exatamente 0..VM_VCPUS-1')
-emulators = direct(cputune, 'emulatorpin')
-if len(emulators) != 1 or not same_set(emulators[0].get('cpuset', ''), host_spec):
-    fail('emulatorpin não corresponde exatamente a CPUS_HOST')
-
-cpu = one(root, 'cpu')
-if direct(cpu, 'numa'):
-    fail('<cpu><numa> não é suportado pela validação automática desta etapa')
-if cpu.get('mode') != 'host-passthrough' or cpu.get('check') != 'none' or cpu.get('migratable') != 'off':
-    fail('modo/check/migratable da CPU não são os valores gerenciados')
-topology = one(cpu, 'topology')
-expected_topology = {'sockets': '1', 'dies': '1', 'cores': str(cores), 'threads': str(threads)}
-for key, value in expected_topology.items():
-    if topology.get(key) != value:
-        fail(f'topology/@{key}={topology.get(key)!r}, esperado {value!r}')
-
-memory = one(root, 'memory')
-expected_bytes = ram_mb * 1024 * 1024
-if size_bytes(memory.text or '', memory.get('unit')) != expected_bytes:
-    fail('<memory> não corresponde exatamente a VM_RAM_MB')
-current = direct(root, 'currentMemory')
-if len(current) > 1:
-    fail('<currentMemory> duplicado')
-if current and size_bytes(current[0].text or '', current[0].get('unit')) != expected_bytes:
-    fail('<currentMemory> não corresponde exatamente a VM_RAM_MB')
-
-backings = direct(root, 'memoryBacking')
-huge_nodes = []
-for backing in backings:
-    huge_nodes.extend(direct(backing, 'hugepages'))
-if huge_mode == 'sim':
-    if len(backings) != 1 or len(huge_nodes) != 1:
-        fail('memoryBacking/hugepages precisa existir exatamente uma vez')
-    pages = direct(huge_nodes[0], 'page')
-    if len(pages) != 1:
-        fail('hugepages precisa declarar exatamente uma página')
-    if size_bytes(pages[0].get('size', ''), pages[0].get('unit'), default='KiB') != 1024 ** 3:
-        fail('a página declarada no XML não tem exatamente 1 GiB')
-elif huge_mode == 'nao':
-    if huge_nodes:
-        fail('o XML ainda exige HugePages')
-elif huge_mode != 'ignorar':
-    fail(f'modo de HugePages inválido: {huge_mode}')
-PY
-)"; then
-        XML_CPU_ERRO="${saida:-XML de CPU/HugePages inválido.}"
+    _xml_ler_arquivo "$arquivo" \
+        || { XML_CPU_ERRO="XML de CPU/HugePages ausente ou ilegível."; return 1; }
+    payload=(
+        xml "$XML_CONTEUDO"
+        cpus_vm "$cpus_vm"
+        cpus_host "$cpus_host"
+        vcpus "$vcpus"
+        cores "$cores"
+        threads "$threads"
+        ram_mb "$ram_mb"
+        hugepages_mode "$modo"
+    )
+    if ! python_core_pares_payload permitidas XMLCPU_ domain-validate-cpu payload \
+            2>/dev/null; then
+        XML_CPU_ERRO="$(_core_diagnostico 'XML de CPU/HugePages inválido.')"
         return 1
     fi
 }
+
+xml_sem_hugepages_arquivo() {
+    # Retornos: 0=nenhuma HugePage exigida; 1=exige HugePages; 2=erro.
+    local arquivo="${1:-}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        BACKING_COUNT HUGEPAGES_COUNT PAGE_COUNT PAGE_BYTES
+    )
+    local -a payload=()
+    XML_CPU_ERRO=""
+    _xml_ler_arquivo "$arquivo" \
+        || { XML_CPU_ERRO="XML de domínio ausente ou ilegível."; return 2; }
+    payload=(xml "$XML_CONTEUDO")
+    if ! python_core_pares_payload permitidas XMLHP_ domain-memory-backing payload \
+            2>/dev/null; then
+        XML_CPU_ERRO="$(_core_diagnostico 'Não foi possível inspecionar memoryBacking.')"
+        return 2
+    fi
+    [ "$XMLHP_HUGEPAGES_COUNT" = 0 ] || return 1
+    return 0
+}
+
 
 # --- Diversos ----------------------------------------------------------------------
 pedir_reboot() {

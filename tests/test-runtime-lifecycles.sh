@@ -50,6 +50,11 @@ BIN="$TMPDIR_TESTE/bin"
 mkdir -p "$PROJETO_TESTE/lib" "$PROJETO_TESTE/etapas" "$RENDER" "$BIN" "$TMPDIR_TESTE/state"
 cp "$RAIZ/lib/common.sh" "$PROJETO_TESTE/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_TESTE/lib/platform.sh"
+cp "$RAIZ/lib/python-core.sh" "$PROJETO_TESTE/lib/python-core.sh"
+# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+mkdir -p "$PROJETO_TESTE/lib/shell"
+cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_TESTE/lib/shell/boot.sh"
+cp -a "$RAIZ/libexec" "$PROJETO_TESTE/libexec"
 cp "$RAIZ/etapas/50-hooks-gpu-hd1.sh" "$PROJETO_TESTE/etapas/50-hooks-gpu-hd1.sh"
 cat > "$PROJETO_TESTE/passthrough.conf" <<'CONF'
 VM_NAME="fixture"

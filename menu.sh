@@ -17,35 +17,35 @@ carregar_conf
 # Cada verificador informa seu próprio estado pelo contrato 0/1/2/3. O menu
 # agrega os resultados com a mesma precedência: erro > indeterminado > pendente.
 ETAPAS=(
-    "00-inventario.sh|Inventário de hardware|auto|"
-    "01-verificar-bios.sh|BIOS/UEFI: checklist e verificação|manual|"
-    "02-detectar-config.sh|Reiniciar configuração central: GPU, workingDisk, CPU/RAM e rede|auto|"
-    "10-atualizar-sistema.sh|Atualizar sistema e firmware|auto|reboot"
-    "11-driver-nvidia.sh|Driver NVIDIA no host|auto|reboot"
-    "12-pacotes-base.sh|Pacotes base|auto|"
-    "13-diretorios.sh|Diretório /vm|auto|"
-    "14-working-disk.sh|workingDisk externo: preflight|auto|"
-    "20-virtualizacao.sh|Pilha KVM/QEMU/libvirt|auto|"
-    "21-usuario-grupos.sh|Usuário, grupos e /vm|auto|logout"
-    "30-iommu-vfio.sh|IOMMU e VFIO|auto|reboot"
-    "40-criar-vm.sh|Criar a VM com virt-install|auto|"
-    "41-instalacao-windows.sh|Instalar o Windows na VM|manual|"
-    "50-hooks-gpu-hd1.sh|Hooks da GPU e HD1 físico|auto|"
-    "51-usb-passthrough.sh|USB passthrough|opcional|"
-    "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|reboot"
-    "53-cpu-isolation.sh|CPU isolation|opcional|reboot"
-    "60-rede-bridge.sh|Rede final: bridge Ethernet ou NAT|auto|"
-    "61-airlock.sh|Airlock: SFTP seguro|auto|"
-    "70-trim-discard.sh|TRIM/discard e backups|auto|"
+    "00-inventario.sh|Inventário de hardware|auto||inventory.write"
+    "01-verificar-bios.sh|BIOS/UEFI: checklist e verificação|manual||"
+    "02-detectar-config.sh|Reiniciar configuração central: GPU, workingDisk, CPU/RAM e rede|auto||config.manage"
+    "10-atualizar-sistema.sh|Atualizar sistema e firmware|auto|reboot|host.update"
+    "11-driver-nvidia.sh|Driver NVIDIA no host|auto|reboot|nvidia.driver"
+    "12-pacotes-base.sh|Pacotes base|auto||packages.base"
+    "13-diretorios.sh|Diretório /vm|auto||storage.prepare"
+    "14-working-disk.sh|workingDisk externo: preflight|auto||"
+    "20-virtualizacao.sh|Pilha KVM/QEMU/libvirt|auto||virtualization.manage"
+    "21-usuario-grupos.sh|Usuário, grupos e /vm|auto|logout|virtualization.manage"
+    "30-iommu-vfio.sh|IOMMU e VFIO|auto|reboot|iommu.configure"
+    "40-criar-vm.sh|Criar a VM com virt-install|auto||domain.create"
+    "41-instalacao-windows.sh|Instalar o Windows na VM|manual||domain.console"
+    "50-hooks-gpu-hd1.sh|Hooks da GPU e HD1 físico|auto||hooks.configure"
+    "51-usb-passthrough.sh|USB passthrough|opcional||usb.configure"
+    "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|reboot|cpu.tune"
+    "53-cpu-isolation.sh|CPU isolation|opcional|reboot|cpu.tune"
+    "60-rede-bridge.sh|Rede final: bridge Ethernet ou NAT|auto||network.configure"
+    "61-airlock.sh|Airlock: SFTP seguro|auto||airlock.configure"
+    "70-trim-discard.sh|TRIM/discard e backups|auto||trim.configure"
 )
 
 UTILS=(
-    "diagnostico.sh|Diagnóstico geral (consulte troubleshooting.md)"
-    "listar-grupos-iommu.sh|Listar grupos IOMMU"
-    "snapshot-vm.sh|Gerenciar snapshots QCOW2 (retorno rápido; não são backup)"
-    "backup-vm.sh|Backup real da VM"
-    "atualizar-host.sh|Atualizar host (snapshot se possível, full-upgrade, reboot e validação)"
-    "recuperar-gpu.sh|EMERGÊNCIA: devolver a GPU ao Linux (consulte troubleshooting.md)"
+    "diagnostico.sh|Diagnóstico geral (consulte troubleshooting.md)|diagnostic.write"
+    "listar-grupos-iommu.sh|Listar grupos IOMMU|"
+    "snapshot-vm.sh|Gerenciar snapshots QCOW2 (retorno rápido; não são backup)|"
+    "backup-vm.sh|Backup real da VM|backup.create"
+    "atualizar-host.sh|Atualizar host (snapshot se possível, full-upgrade, reboot e validação)|host.update"
+    "recuperar-gpu.sh|EMERGÊNCIA: devolver a GPU ao Linux (consulte troubleshooting.md)|gpu.recover"
 )
 
 STATUS_ETAPA="erro"
@@ -107,9 +107,9 @@ imprimir_lista() {
     echo "O menu apenas consulta status e inicia o item escolhido; cada fluxo informa alterações e riscos."
     echo "Recomendação: siga a ordem e, após <reboot>/<logout>, retorne ao menu antes de continuar."
     echo
-    local i=1 entrada arquivo titulo tipo pos st simbolo
+    local i=1 entrada arquivo titulo tipo pos capability st simbolo
     for entrada in "${ETAPAS[@]}"; do
-        IFS='|' read -r arquivo titulo tipo pos <<< "$entrada"
+        IFS='|' read -r arquivo titulo tipo pos capability <<< "$entrada"
         status_etapa "$arquivo"
         st="$STATUS_ETAPA"
         case "$st" in
@@ -147,7 +147,7 @@ imprimir_lista() {
     echo " Utilitários:"
     local u=1
     for entrada in "${UTILS[@]}"; do
-        IFS='|' read -r arquivo titulo <<< "$entrada"
+        IFS='|' read -r arquivo titulo capability <<< "$entrada"
         printf '      u%d) %s\n' "$u" "$titulo"
         u=$((u+1))
     done
@@ -161,10 +161,6 @@ if [ "${1:-}" = "--status" ]; then
 fi
 
 exigir_nao_root
-# Senha do sudo pedida UMA vez, aqui: o ticket é renovado em segundo plano
-# enquanto o menu estiver aberto, e as etapas filhas herdam essa sessão.
-# A senha em si nunca é guardada em arquivo.
-exigir_sudo
 
 limpar_terminal_menu() {
     # A saída da etapa permanece visível até o ENTER. A limpeza ocorre somente
@@ -175,10 +171,19 @@ limpar_terminal_menu() {
 }
 
 executar_no_menu() {
-    local caminho="$1" rc resposta
+    local caminho="$1" capability="${2:-}" rc resposta
     echo
-    bash "$caminho"
-    rc=$?
+    if [ -n "$capability" ]; then
+        if guard_mutation "$capability"; then
+            bash "$caminho"
+            rc=$?
+        else
+            rc=$?
+        fi
+    else
+        bash "$caminho"
+        rc=$?
+    fi
     case "$rc" in
         0) ok "Execução concluída." ;;
         "$CODIGO_VOLTAR_MENU"|130)
@@ -209,8 +214,8 @@ while :; do
         u[0-9]*)
             IDX="${ESCOLHA#?}"
             if [[ "$IDX" =~ ^[0-9]+$ ]] && [ "$((10#$IDX))" -ge 1 ] && [ "$((10#$IDX))" -le "${#UTILS[@]}" ]; then
-                IFS='|' read -r ARQUIVO _ <<< "${UTILS[$((10#$IDX - 1))]}"
-                executar_no_menu "$PROJETO_DIR/util/$ARQUIVO" || {
+                IFS='|' read -r ARQUIVO _ CAPABILITY <<< "${UTILS[$((10#$IDX - 1))]}"
+                executar_no_menu "$PROJETO_DIR/util/$ARQUIVO" "$CAPABILITY" || {
                     [ "$?" -eq "$CODIGO_SAIR_MENU" ] && exit 0
                 }
             else
@@ -219,8 +224,8 @@ while :; do
             ;;
         [0-9]*)
             if [[ "$ESCOLHA" =~ ^[0-9]+$ ]] && [ "$((10#$ESCOLHA))" -ge 1 ] && [ "$((10#$ESCOLHA))" -le "${#ETAPAS[@]}" ]; then
-                IFS='|' read -r ARQUIVO _ _ _ <<< "${ETAPAS[$((10#$ESCOLHA - 1))]}"
-                executar_no_menu "$PROJETO_DIR/etapas/$ARQUIVO" || {
+                IFS='|' read -r ARQUIVO _ _ _ CAPABILITY <<< "${ETAPAS[$((10#$ESCOLHA - 1))]}"
+                executar_no_menu "$PROJETO_DIR/etapas/$ARQUIVO" "$CAPABILITY" || {
                     [ "$?" -eq "$CODIGO_SAIR_MENU" ] && exit 0
                 }
             else

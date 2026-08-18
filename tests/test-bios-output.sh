@@ -11,6 +11,13 @@ BIN="$TMPDIR_TESTE/bin"
 mkdir -p "$PROJETO_TESTE/lib" "$PROJETO_TESTE/etapas" "$BIN"
 cp "$RAIZ/lib/common.sh" "$PROJETO_TESTE/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_TESTE/lib/platform.sh"
+cp "$RAIZ/lib/python-core.sh" "$PROJETO_TESTE/lib/python-core.sh"
+# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+mkdir -p "$PROJETO_TESTE/lib/shell"
+cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_TESTE/lib/shell/boot.sh"
+# A fachada carrega a ponte e os consumidores de produção usam o core
+# Python desde I3, então o projeto mínimo precisa do libexec real.
+cp -a "$RAIZ/libexec" "$PROJETO_TESTE/libexec"
 cp "$RAIZ/etapas/01-verificar-bios.sh" "$PROJETO_TESTE/etapas/01-verificar-bios.sh"
 
 cat > "$BIN/sudo" <<'SCRIPT'
