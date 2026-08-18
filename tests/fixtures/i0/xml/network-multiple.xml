@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<network><name>passthrough-nat</name><description>vm-passthrough:60-rede-nat:v1</description><forward mode="nat" dev="enp3s0"/><forward mode="route"/><bridge name="virbr-vmnat"/><bridge name="virbr-duplicate"/><ip address="192.168.177.1" prefix="24"><dhcp><host mac="52:54:00:12:34:56" ip="192.168.177.10"/><host mac="52:54:00:12:34:56" ip="192.168.177.11"/></dhcp></ip></network>

@@ -1,0 +1,7 @@
+case	fixture	expected
+qcow2-backing	qcow2-backing.json	valid qcow2 with explicit backing format
+raw	raw.json	valid raw image
+chain	chain.json	ordered three-layer chain with compatible formats
+missing	missing-fields.json	reject absent required numeric sizes
+invalid	invalid-values.json	reject wrong types, unsupported format and negative size
+malformed	malformed.json	reject malformed JSON

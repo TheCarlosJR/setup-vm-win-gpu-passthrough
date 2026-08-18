@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<network><name>passthrough-nat</name><uuid>aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee</uuid><description>vm-passthrough:60-rede-nat:v1</description><forward mode="nat" dev="enp3s0"><nat><port start="1024" end="65535"/></nat></forward><bridge name="virbr-vmnat" stp="on" delay="0"/><ip address="192.168.177.1" netmask="255.255.255.0"><dhcp><range start="192.168.177.100" end="192.168.177.254"/><host mac="52:54:00:12:34:56" ip="192.168.177.10"/></dhcp></ip><metadata><fixture keep="yes"/></metadata></network>

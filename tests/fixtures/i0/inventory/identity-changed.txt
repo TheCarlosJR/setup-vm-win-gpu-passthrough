@@ -1,0 +1,25 @@
+== HARDWARE IDENTITY ==
+CPU|Architecture|x86_64
+CPU|CPU(s)|16
+CPU|On-line CPU(s) list|0-15
+CPU|Thread(s) per core|2
+CPU|Core(s) per socket|8
+CPU|Socket(s)|1
+CPU|Model name|Fixture CPU v2
+RAM_MIB|65536
+PCI|0000:01:00.0|0300|9999:0001
+DISK|BYTES="2147483648" MODEL="Replacement Disk" SERIAL="SER999" TYPE="disk"
+== CPU ==
+fixture cpu changed
+== RAM ==
+fixture ram changed
+== BASEBOARD ==
+fixture board
+== BIOS ==
+fixture bios
+== PCI ==
+fixture pci changed
+== BLOCK DEVICES ==
+fixture disk changed
+== IOMMU/DMAR (pré-configuração) ==
+fixture iommu

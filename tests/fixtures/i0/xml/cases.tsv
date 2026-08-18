@@ -1,0 +1,10 @@
+case	fixture	expected
+zero	domain-zero.xml	all managed selectors have cardinality zero
+one	domain-one.xml	exactly one qcow2, block, NIC, TPM, NVRAM, CPU, HugePages and two distinct PCI hostdevs
+multiple	domain-multiple.xml	duplicate qcow2/NIC/GPU/TPM must fail closed
+malformed	domain-malformed.xml	parser error
+order-equivalent	domain-order-equivalent.xml	managed semantics equal despite order/spacing; unmanaged content retained
+hotplug-numa	domain-hotplug-numa.xml	explicit unsupported hotplug/NUMA must not be silently discarded
+network-managed	network-managed.xml	marker and singleton NAT fields valid
+network-unmanaged	network-unmanaged.xml	homonymous network must be preserved/refused
+network-multiple	network-multiple.xml	ambiguous forward/bridge/host cardinality must fail closed

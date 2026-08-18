@@ -1,0 +1,9 @@
+case	fixture	expected
+current	current.txt	structurally valid current identity
+legacy	legacy.txt	legacy parser compatibility
+reordered	current-reordered.txt	identity must not depend on textual order
+truncated	truncated.txt	reject incomplete report
+identity-changed	identity-changed.txt	report CPU/PCI/disk/RAM identity deltas
+absent	-	report no inventory without false success
+relative-link	current.txt	relative ultimo-inventario accepted
+external-link	current.txt	external ultimo-inventario rejected

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" fixture-unmanaged="keep">
+  <name>fixture-win11</name>
+  <uuid>11111111-2222-4333-8444-555555555555</uuid>
+  <memory unit="MiB">8192</memory>
+  <currentMemory unit="MiB">8192</currentMemory>
+  <memoryBacking fixture-unmanaged="keep"><hugepages><page size="1" unit="GiB"/></hugepages><locked/></memoryBacking>
+  <vcpu placement="static" cpuset="2-5">4</vcpu>
+  <cputune><shares>2048</shares><vcpupin vcpu="0" cpuset="2"/><vcpupin vcpu="1" cpuset="3"/><vcpupin vcpu="2" cpuset="4"/><vcpupin vcpu="3" cpuset="5"/><emulatorpin cpuset="0-1,6-7"/><iothreadpin iothread="1" cpuset="0-1"/></cputune>
+  <os><type arch="x86_64" machine="q35">hvm</type><loader readonly="yes" type="pflash">/usr/share/OVMF/OVMF_CODE.fd</loader><nvram>/var/lib/libvirt/qemu/nvram/fixture_VARS.fd</nvram></os>
+  <features><acpi/><apic/><hyperv mode="custom"><vendor_id state="on" value="fixtureid123"/></hyperv><kvm><hidden state="on"/></kvm></features>
+  <cpu mode="host-passthrough" check="none" migratable="off"><topology sockets="1" dies="1" cores="2" threads="2"/><feature policy="require" name="topoext"/></cpu>
+  <devices fixture-unmanaged="keep">
+    <controller type="pci" index="0" model="pcie-root"/>
+    <disk type="file" device="disk"><driver name="qemu" type="qcow2" discard="unmap"/><source file="/vm/fixture.qcow2"/><target dev="vda" bus="virtio"/><alias name="fixture-unmanaged"/></disk>
+    <disk type="block" device="disk"><driver name="qemu" type="raw" cache="none"/><source dev="/dev/disk/by-id/fixture-disk"/><target dev="vdb" bus="virtio"/></disk>
+    <interface type="network"><mac address="52:54:00:12:34:56"/><source network="passthrough-nat"/><model type="virtio"/><address type="pci" domain="0x0000" bus="0x01" slot="0x00" function="0x0"/></interface>
+    <hostdev mode="subsystem" type="pci" managed="yes"><source><address domain="0x0000" bus="0x0a" slot="0x00" function="0x0"/></source></hostdev>
+    <hostdev mode="subsystem" type="pci" managed="yes"><source><address domain="0x0000" bus="0x0a" slot="0x00" function="0x1"/></source></hostdev>
+    <tpm model="tpm-crb"><backend type="emulator" version="2.0"/></tpm>
+    <graphics type="spice" autoport="yes"/><video><model type="qxl"/></video><sound model="ich9"/><audio id="1" type="spice"/><channel type="spicevmc"><target type="virtio" name="com.redhat.spice.0"/></channel><redirdev bus="usb" type="spicevmc"/>
+  </devices>
+  <qemu:commandline><qemu:arg value="-device"/><qemu:arg value="fixture-unmanaged"/></qemu:commandline>
+</domain>

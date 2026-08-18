@@ -1,0 +1,7 @@
+case	fixture	cpus_vm	cpus_host	vcpus	cores	threads	expected
+multisocket-valid	multisocket-smt.csv	0,8,2,10	16,24,18,26	4	2	2	valid canonical socket/core/sibling order
+multisocket-split	multisocket-smt.csv	0,2,10,16	8,24,18,26	4	2	2	reject split physical core
+multisocket-order	multisocket-smt.csv	2,10,0,8	16,24,18,26	4	2	2	reject noncanonical order
+sparse-offline-valid	sparse-offline-numa.csv	11,15,21,29	0,4	4	2	2	valid sparse online IDs across NUMA/socket
+sparse-offline-selected	sparse-offline-numa.csv	2,6,11,15	0,4,21,29	4	2	2	reject offline CPU
+sparse-missing	sparse-offline-numa.csv	11,15	0,4	2	1	2	reject omitted online core

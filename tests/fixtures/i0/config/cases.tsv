@@ -1,0 +1,14 @@
+case	fixture	operation	current_oracle	future_requirement
+roundtrip	roundtrip.conf	load-save-load	preserves comments/order and serializes changed key	REQ-CONF-ISO/schema round-trip
+no-final-newline	no-final-newline.conf	load	accepted without executing content	preserve newline policy explicitly
+duplicate	duplicate.conf	load	rejected	closed schema
+unknown	unknown.conf	load	rejected	closed schema
+malicious	malicious.conf	load	rejected and markers absent	inert input
+symlink	roundtrip.conf	runtime-generated	load/save rejected	sensitive path policy
+hardlink	roundtrip.conf	runtime-generated	currently accepted (known gap)	reject st_nlink != 1
+inode-swap	roundtrip.conf	runtime-generated	inode replacement is not revalidated (known gap)	reject conflict/TOCTOU
+link-count-swap	roundtrip.conf	runtime-generated	concurrent st_nlink change is not revalidated (known gap)	reject conflict/TOCTOU
+device-swap	roundtrip.conf	runtime-generated	concurrent parent/device change is not revalidated (known gap)	reject conflict/TOCTOU
+batch	roundtrip.conf	save batch	one rename after validation	all-or-nothing plus fsync
+reset	roundtrip.conf	reset	backup 0600; scoped keys emptied	preserve out-of-scope keys
+example	../../../passthrough.conf.example	load-only	byte content and mtime invariant	example/schema/consumers synchronized

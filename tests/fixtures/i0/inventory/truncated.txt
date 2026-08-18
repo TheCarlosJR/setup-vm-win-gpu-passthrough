@@ -1,0 +1,4 @@
+== CPU ==
+fixture cpu
+== RAM ==
+fixture ram

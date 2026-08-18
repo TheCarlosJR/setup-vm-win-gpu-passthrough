@@ -1,0 +1,5 @@
+[
+  {"filename":"/vm/top.qcow2","format":"qcow2","virtual-size":10737418240,"actual-size":1048576,"backing-filename":"/vm/mid.qcow2","backing-filename-format":"qcow2"},
+  {"filename":"/vm/mid.qcow2","format":"qcow2","virtual-size":10737418240,"actual-size":2097152,"backing-filename":"/vm/base.raw","backing-filename-format":"raw"},
+  {"filename":"/vm/base.raw","format":"raw","virtual-size":10737418240,"actual-size":10737418240}
+]

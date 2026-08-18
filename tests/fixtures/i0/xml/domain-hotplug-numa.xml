@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<domain type="kvm"><name>fixture-hotplug-numa</name><maxMemory slots="4" unit="MiB">16384</maxMemory><memory unit="MiB">8192</memory><currentMemory unit="MiB">4096</currentMemory><vcpu current="2">4</vcpu><vcpus><vcpu id="0" enabled="yes" hotpluggable="no" order="1"/><vcpu id="1" enabled="yes" hotpluggable="yes" order="2"/></vcpus><numatune><memory mode="strict" nodeset="0"/></numatune><cpu><numa><cell id="0" cpus="0-1" memory="4096" unit="MiB"/></numa></cpu><devices/></domain>

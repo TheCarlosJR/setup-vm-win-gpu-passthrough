@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<network><name>passthrough-nat</name><description>rede homônima de outro administrador</description><forward mode="nat"/><bridge name="virbr99"/><ip address="192.168.199.1" prefix="24"/></network>
