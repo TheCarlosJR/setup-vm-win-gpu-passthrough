@@ -11,6 +11,7 @@
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
+guard_mutation gpu.recover || exit 1
 exigir_nao_root
 exigir_sudo
 exigir_comando virsh modprobe systemctl flock

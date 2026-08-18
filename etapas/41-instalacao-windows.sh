@@ -25,6 +25,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation domain.console || exit 1
 exigir_conf VM_NAME
 titulo "Capítulo 18: Instalação do Windows 11 (interativa)"
 info "Estado atual da VM: $($VIRSH domstate "$VM_NAME" 2>/dev/null || echo 'inexistente')"
@@ -75,8 +76,10 @@ PÓS-INSTALAÇÃO (desenho de segurança do manual):
 TRANSFERÊNCIA INICIAL DOS .ps1 (antes do airlock):
   1. Depois de instalar os guest tools, mantenha a NAT default da etapa 40.
   2. No host, em outro terminal aberto na raiz deste projeto, execute:
-       HOST_NAT_IP="$(virsh --connect qemu:///system net-dumpxml default |
-         xmlstarlet sel -t -v 'string(/network/ip[1]/@address)')"
+       BRIDGE_NAT="$(virsh --connect qemu:///system net-info default |
+         awk '/^Bridge:/ {print $2}')"
+       HOST_NAT_IP="$(ip -4 -o addr show "$BRIDGE_NAT" |
+         awk '{split($4, campo, "/"); print campo[1]; exit}')"
        python3 -m http.server 8000 --bind "$HOST_NAT_IP" --directory windows
   3. No Windows, abra o PowerShell e copie os três scripts:
        $HostNAT = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' |

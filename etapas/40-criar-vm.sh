@@ -221,6 +221,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation domain.create || exit 1
 exigir_plataforma_suportada
 exigir_nao_root
 exigir_conf USUARIO_LINUX VM_NAME QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS
@@ -246,7 +247,9 @@ info "Retorno/reboot: não exige reboot do host e não há rollback automático;
 
 # Toda entrada configurável de armazenamento é validada antes da primeira
 # aquisição/execução sudo. Caminho inseguro nunca alcança um comando privilegiado.
-exigir_comando virt-install qemu-img virsh xmlstarlet getfacl readlink stat
+exigir_comando virt-install qemu-img virsh getfacl readlink stat
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP" \
     || falhar "Modelo de /vm inválido: $GRUPO_VM_ERRO Execute a etapa 21 e faça logout/login."
 [ -r "$VM_DIR" ] && [ -w "$VM_DIR" ] && [ -x "$VM_DIR" ] \
@@ -414,8 +417,24 @@ restaurar_selo_etapa40 \
     || falhar "A VM foi iniciada, mas /vm não voltou ao modelo 2770/ACL: $SELO_VM_ERRO"
 trap encerrar_sudo_keepalive EXIT INT TERM
 
-VM_NIC_MAC_DETECTADO="$($VIRSH dumpxml --inactive "$VM_NAME" \
-    | xmlstarlet sel -t -v "string(/domain/devices/interface[source/@network='default'][1]/mac/@address)")"
+# O MAC da NIC NAT temporária vem do core Python com cardinalidade exigida. A
+# versão anterior usava `interface[...][1]`, ou seja, escolhia silenciosamente a
+# primeira interface, o que a seção 3.5 proíbe: zero ou várias interfaces na
+# rede `default` agora bloqueiam a etapa em vez de persistir um MAC arbitrário.
+NIC40_PERMITIDAS=(
+    "${CORE_PARES_ENVELOPE[@]}"
+    NIC_COUNT MAC_COUNT CONSUMER_COUNT NETWORK_MATCH_COUNT NETWORK_MATCH_MAC
+    MAC_TYPE MAC_NETWORK MAC_BRIDGE MAC_DEV MAC_HAS_ADDRESS
+    'NIC_#_MAC' 'NIC_#_TYPE' 'NIC_#_NETWORK' 'NIC_#_SOURCE'
+)
+XML_VM_CRIADA="$($VIRSH dumpxml --inactive "$VM_NAME")" \
+    || falhar "A VM foi criada, mas seu XML inativo não pôde ser lido."
+NIC40_PAYLOAD=(xml "$XML_VM_CRIADA" network_name default)
+python_core_pares_payload NIC40_PERMITIDAS NIC40_ domain-interfaces NIC40_PAYLOAD \
+    || falhar "A VM foi criada, mas suas interfaces não pôderam ser analisadas."
+[ "$NIC40_NETWORK_MATCH_COUNT" = 1 ] \
+    || falhar "A VM foi criada com $NIC40_NETWORK_MATCH_COUNT interfaces na rede 'default'; esperado exatamente 1."
+VM_NIC_MAC_DETECTADO="$NIC40_NETWORK_MATCH_MAC"
 mac_valido "$VM_NIC_MAC_DETECTADO" \
     || falhar "A VM foi criada, mas não foi possível obter com segurança o MAC da NIC NAT temporária."
 salvar_conf VM_NIC_MAC "${VM_NIC_MAC_DETECTADO,,}"

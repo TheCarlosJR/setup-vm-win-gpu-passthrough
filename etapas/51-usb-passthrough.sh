@@ -30,9 +30,12 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation usb.configure || exit 1
 exigir_nao_root
 exigir_sudo
-exigir_comando lsusb xmlstarlet
+exigir_comando lsusb
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 exigir_conf VM_NAME
 
 echo
@@ -42,16 +45,42 @@ aviso "A seleção usa apenas vendor:product: unidades idênticas têm o mesmo p
 aviso "Desconecte unidades idênticas que não devam ir para a VM antes do próximo boot."
 info "Tanto a adição quanto a remoção passam a valer no próximo boot da VM, não na sessão já em execução."
 
+USB_XML_PERMITIDAS=(
+    "${CORE_PARES_ENVELOPE[@]}"
+    USB_COUNT AMBIGUOUS_PAIRS
+    'USB_#_VENDOR' 'USB_#_PRODUCT' 'USB_#_BUS' 'USB_#_DEVICE' 'USB_#_MANAGED'
+)
+USB_AMBIGUOS=0
 listar_usb_xml() {
-    $VIRSH dumpxml --inactive "$VM_NAME" \
-        | xmlstarlet sel -t -m "/domain/devices/hostdev[@type='usb']" \
-            -v "concat(source/vendor/@id, ' ', source/product/@id)" -n 2>/dev/null || true
+    # A enumeração vem do core Python: cada hostdev USB precisa ter pelo menos
+    # um discriminador (vendor/product ou endereço físico) e a resposta informa
+    # quantos pares VID:PID estão duplicados. Nada é escolhido por ordem.
+    local xml total indice vendor produto nome_vendor nome_produto
+    local -a payload=()
+    USB_AMBIGUOS=0
+    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 0
+    payload=(xml "$xml")
+    python_core_pares_payload USB_XML_PERMITIDAS USBX_ domain-usb-hostdev payload \
+        2>/dev/null || return 0
+    USB_AMBIGUOS="$USBX_AMBIGUOUS_PAIRS"
+    total="$USBX_USB_COUNT"
+    for (( indice = 0; indice < total; indice++ )); do
+        nome_vendor="USBX_USB_${indice}_VENDOR"
+        nome_produto="USBX_USB_${indice}_PRODUCT"
+        vendor="${!nome_vendor}"
+        produto="${!nome_produto}"
+        printf '%s %s\n' "$vendor" "$produto"
+    done
 }
 
 if [ "${1:-}" = "--remover" ]; then
     titulo "Remover USB passthrough da VM $VM_NAME"
     mapfile -t ATUAIS < <(listar_usb_xml | sed '/^$/d')
     [ "${#ATUAIS[@]}" -gt 0 ] || { info "Nenhum hostdev USB no XML."; exit 0; }
+    # REQ-USB-IDENTITY começa aqui: um par VID:PID duplicado no XML não pode ser
+    # removido por ordem de enumeração. O fluxo completo (serial/porta) é de I6.
+    [ "$USB_AMBIGUOS" = 0 ] \
+        || falhar "O XML possui $USB_AMBIGUOS par(es) VID:PID duplicados; a remoção automática seria ambígua. Edite o XML manualmente."
     DESCRICOES=()
     for a in "${ATUAIS[@]}"; do
         DESCRICOES+=("vendor=$(cut -d' ' -f1 <<<"$a") product=$(cut -d' ' -f2 <<<"$a")")

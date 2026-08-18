@@ -35,28 +35,41 @@ RELEASE_ANTIGO="$HOOK_BASE/release/end/01-gpu-para-linux.sh"
 MARCADOR_DISPATCHER="# vm-passthrough-qemu-dispatcher-v2"
 STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 
+# Inspeção do XML de domínio vem do core Python pela ponte única: cardinalidade
+# explícita, comparação hexadecimal de BDF independente de formatação e nenhum
+# dado local em argv. As funções mantêm os nomes e as variáveis já consumidas
+# pelo resto desta etapa.
+
+HOSTDEV_TOTAL=""
+HOSTDEV_EXATO=""
 hostdev_estado_xml() {
-    local endereco="${1,,}" dom bus slot func xml
-    IFS=':.' read -r dom bus slot func <<< "$endereco"
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 1
-    HOSTDEV_TOTAL="$(xmlstarlet sel -t -v \
-        "count(/domain/devices/hostdev/source/address[@domain='0x$dom' and @bus='0x$bus' and @slot='0x$slot' and @function='0x$func'])" \
-        <<< "$xml")" || return 1
-    HOSTDEV_EXATO="$(xmlstarlet sel -t -v \
-        "count(/domain/devices/hostdev[@mode='subsystem' and @type='pci' and @managed='yes']/source/address[@domain='0x$dom' and @bus='0x$bus' and @slot='0x$slot' and @function='0x$func'])" \
-        <<< "$xml")" || return 1
+    local endereco="${1,,}"
+    local -a permitidas=("${CORE_PARES_ENVELOPE[@]}" TOTAL EXACT MANAGED)
+    local -a payload=()
+    XML_CONTEUDO="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 1
+    payload=(xml "$XML_CONTEUDO" pci_address "$endereco")
+    python_core_pares_payload permitidas HD_PCI_ domain-hostdev-pci payload \
+        2>/dev/null || return 1
+    HOSTDEV_TOTAL="$HD_PCI_TOTAL"
+    HOSTDEV_EXATO="$HD_PCI_EXACT"
 }
 
+DISCO_XML_SOURCE=""
+DISCO_XML_EXATO=""
+DISCO_XML_VDB=""
 disco_estado_xml() {
-    local caminho="$1" xml
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 1
-    DISCO_XML_SOURCE="$(xmlstarlet sel -t -v \
-        "count(/domain/devices/disk/source[@dev='$caminho'])" <<< "$xml")" || return 1
-    DISCO_XML_EXATO="$(xmlstarlet sel -t -v \
-        "count(/domain/devices/disk[@type='block' and @device='disk' and driver/@name='qemu' and driver/@type='raw' and driver/@cache='none' and source/@dev='$caminho' and target/@dev='vdb' and target/@bus='virtio'])" \
-        <<< "$xml")" || return 1
-    DISCO_XML_VDB="$(xmlstarlet sel -t -v \
-        "count(/domain/devices/disk/target[@dev='vdb'])" <<< "$xml")" || return 1
+    local caminho="$1"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" SOURCE_COUNT EXACT_COUNT TARGET_COUNT IDENTITY_COUNT
+    )
+    local -a payload=()
+    XML_CONTEUDO="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 1
+    payload=(xml "$XML_CONTEUDO" block_path "$caminho" target_dev vdb)
+    python_core_pares_payload permitidas DISCOXML_ domain-disk-block payload \
+        2>/dev/null || return 1
+    DISCO_XML_SOURCE="$DISCOXML_SOURCE_COUNT"
+    DISCO_XML_EXATO="$DISCOXML_EXACT_COUNT"
+    DISCO_XML_VDB="$DISCOXML_TARGET_COUNT"
 }
 
 verificar_hook() {
@@ -129,6 +142,8 @@ verificar() {
     v_fim
 }
 [ "${1:-}" = "--verificar" ] && verificar
+
+guard_mutation hooks.configure || exit 1
 
 validar_config_hooks() {
     exigir_conf VM_NAME GPU_PCI_ID GPU_VENDOR_DEVICE_ID DM_SERVICE IOMMU_GROUP_GPU
@@ -697,9 +712,34 @@ if [ "${1:-}" = "--renderizar-hooks" ]; then
     exit 0
 fi
 
+# As opções são resolvidas antes de qualquer preflight para que a transação
+# saiba, desde o início, tudo o que precisará aplicar e provar.
+PEDIU_REMOVER_VIDEO=0
+PEDIU_ANTI_CODE43=0
+for ARGUMENTO in "$@"; do
+    case "$ARGUMENTO" in
+        --remover-video) PEDIU_REMOVER_VIDEO=1 ;;
+        --anti-code43) PEDIU_ANTI_CODE43=1 ;;
+        *) falhar "Opção desconhecida da etapa 50: '$ARGUMENTO' (use --remover-video e/ou --anti-code43)." ;;
+    esac
+done
+
 exigir_nao_root
 exigir_sudo
-exigir_comando xmlstarlet virsh udevadm lsblk findmnt flock
+exigir_comando virsh udevadm lsblk findmnt flock virt-xml-validate
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
+# REQ-LIBVIRT-BACKEND: uma resolução autoritativa, a mesma consumida pela etapa
+# 20. Nenhum ponto desta etapa pode assumir `libvirtd`.
+if libvirt_backend_resolver; then
+    info "Backend libvirt resolvido: $LIBVIRT_BACKEND_UNIDADE (daemon $LIBVIRT_BACKEND_UNIDADE_DAEMON)."
+else
+    BACKEND_RC=$?
+    if [ "$BACKEND_RC" -eq 1 ]; then
+        falhar "Nenhuma unidade libvirt do perfil está disponível: $LIBVIRT_BACKEND_ERRO Execute a etapa 20."
+    fi
+    falhar "Não foi possível resolver o backend libvirt: $LIBVIRT_BACKEND_ERRO"
+fi
 exigir_vm_desligada "$VM_NAME"
 exigir_conf IOMMU_GROUP_GPU
 validar_grupo_iommu_gpu \
@@ -741,6 +781,119 @@ if [ -n "${HD1_BY_ID_PATH:-}" ]; then
     if [ "$DISCO_XML_SOURCE" = 0 ] && [ "$DISCO_XML_VDB" != 0 ]; then
         falhar "O alvo vdb já pertence a outro disco no XML; não será substituído."
     fi
+fi
+
+# --- Convergência: segunda execução precisa ser no-op exato -------------------
+# D-HOOKS-IDEMPOTENCE: antes, uma execução sobre estado já convergido ainda
+# criava backups, republicava arquivos e reiniciava o daemon. Aqui o estado
+# gerenciado é comparado byte a byte (mais dono e modo) e, quando tudo já está
+# no lugar, a etapa termina sem nenhum efeito: sem backup, sem mv, sem restart.
+# A comparação é somente leitura e usa exclusivamente o conjunto renderizado.
+
+_legacy_hook_do_dispatcher() {
+    # Somente leitura: extrai LEGACY_HOOK do dispatcher gerenciado instalado.
+    # Qualquer ambiguidade devolve 1, e a etapa segue pelo caminho normal.
+    local declaracao
+    sudo test -f "$HOOK_QEMU" || return 1
+    sudo test ! -L "$HOOK_QEMU" || return 1
+    sudo grep -qF "$MARCADOR_DISPATCHER" "$HOOK_QEMU" || return 1
+    [ "$(sudo grep -Ec '^LEGACY_HOOK=' "$HOOK_QEMU")" -eq 1 ] || return 1
+    declaracao="$(sudo grep -E '^LEGACY_HOOK=' "$HOOK_QEMU")" || return 1
+    _decodificar_literal_conf "${declaracao#LEGACY_HOOK=}" || return 1
+    printf '%s' "$REPLY"
+}
+
+_arquivo_gerenciado_identico() {
+    # $1 = origem renderizada; $2 = destino instalado; $3 = modo esperado.
+    local origem="$1" destino="$2" modo="$3"
+    sudo test -f "$destino" || return 1
+    sudo test ! -L "$destino" || return 1
+    [ "$(sudo stat -c %u -- "$destino")" -eq 0 ] || return 1
+    [ "$(sudo stat -c %a -- "$destino")" = "$modo" ] || return 1
+    sudo cmp -s -- "$origem" "$destino" || return 1
+}
+
+hooks_convergidos() {
+    local render legado par origem destino modo rc=0
+    legado="$(_legacy_hook_do_dispatcher)" || return 1
+    # Marcadores temporários e hooks antigos indicam transação interrompida ou
+    # migração pendente: nunca é estado convergido.
+    ! sudo test -e "$INSTALLING_MARKER" || return 1
+    ! sudo test -e "$INSTALLING_HOOK" || return 1
+    ! sudo test -e "$PREPARE_ANTIGO" || return 1
+    ! sudo test -e "$RELEASE_ANTIGO" || return 1
+    render="$(mktemp -d)" || return 1
+    if ! gerar_conjunto_hooks "$render" "$legado"; then
+        rm -rf -- "$render"
+        return 1
+    fi
+    for par in \
+        "qemu|$HOOK_QEMU|755" \
+        "required|$GATE_REQUIRED|644" \
+        "prepare.sh|$PREPARE|755" \
+        "start.sh|$START|755" \
+        "release.sh|$RELEASE|755"; do
+        origem="$render/${par%%|*}"
+        destino="${par#*|}"
+        modo="${destino#*|}"
+        destino="${destino%%|*}"
+        if ! _arquivo_gerenciado_identico "$origem" "$destino" "$modo"; then
+            rc=1
+            break
+        fi
+    done
+    rm -rf -- "$render"
+    return "$rc"
+}
+
+dispositivos_convergidos() {
+    local endereco
+    for endereco in "$GPU_PCI_ID" ${GPU_AUDIO_PCI_ID:+"$GPU_AUDIO_PCI_ID"}; do
+        hostdev_estado_xml "$endereco" || return 1
+        [ "$HOSTDEV_TOTAL" = 1 ] && [ "$HOSTDEV_EXATO" = 1 ] || return 1
+    done
+    if [ -n "${HD1_BY_ID_PATH:-}" ]; then
+        disco_estado_xml "$HD1_BY_ID_PATH" || return 1
+        [ "$DISCO_XML_SOURCE" = 1 ] && [ "$DISCO_XML_EXATO" = 1 ] || return 1
+    fi
+    return 0
+}
+
+opcoes_convergidas() {
+    # Uma opção já aplicada não muda o candidato. A checagem escreve apenas em
+    # temporários e não toca o domínio.
+    local origem candidato indice=0 rc=0
+    local -a operacoes=() payload=()
+    [ "$PEDIU_REMOVER_VIDEO" -eq 1 ] && operacoes+=(remove-video)
+    [ "$PEDIU_ANTI_CODE43" -eq 1 ] && operacoes+=(anti-code43)
+    (( ${#operacoes[@]} > 0 )) || return 0
+    origem="$(mktemp)" || return 1
+    candidato="$(mktemp)" || { rm -f -- "$origem"; return 1; }
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$origem"; then
+        rm -f -- "$origem" "$candidato"
+        return 1
+    fi
+    payload=(op_count "${#operacoes[@]}")
+    for indice in "${!operacoes[@]}"; do
+        payload+=("op_$indice" "${operacoes[$indice]}")
+        [ "${operacoes[$indice]}" != anti-code43 ] \
+            || payload+=("op_${indice}_vendor_id" randomid123)
+    done
+    if ! _xml_candidato_gerar "$origem" "$candidato" "${payload[@]}"; then
+        rc=1
+    elif [ "$XML_CANDIDATO_MUDOU" != 0 ]; then
+        rc=1
+    fi
+    rm -f -- "$origem" "$candidato"
+    return "$rc"
+}
+
+if hooks_convergidos && dispositivos_convergidos && opcoes_convergidas; then
+    echo
+    ok "Estado já convergido: dispatcher, três hooks, marcador do gate, GPU/áudio, HD1 e opções conferem byte a byte."
+    info "Nenhuma alteração foi feita: nenhum backup novo, nenhuma republicação e nenhum restart do daemon."
+    info "Para revalidar sem alterar nada: bash etapas/50-hooks-gpu-hd1.sh --verificar"
+    exit 0
 fi
 
 echo
@@ -823,7 +976,7 @@ for HOOK_EXISTENTE in "${HOOKS_EXISTENTES[@]}"; do
     fi
 done
 
-titulo "1/4 Dispatcher e hooks transacionais"
+titulo "1/5 Dispatcher e hooks transacionais"
 LEGADO=""
 INSTALAR_DISPATCHER=1
 if sudo test -e "$HOOK_QEMU" || sudo test -L "$HOOK_QEMU"; then
@@ -959,16 +1112,44 @@ rollback_hooks() {
     done
     [ "$falhou" -eq 0 ]
 }
+rollback_xml() {
+    # Restaura o XML original e PROVA a restauração relendo o domínio e
+    # comparando semanticamente. Um define que retorna zero sem aplicar
+    # (rollback divergente) precisa virar erro grave, não sucesso silencioso.
+    local dump rc_compare=0
+    if ! $VIRSH define "$XML_ANTES" >/dev/null; then
+        erro "ROLLBACK XML NÃO COMPROVADO: o virsh recusou restaurar o XML original."
+        return 1
+    fi
+    dump="$(mktemp)" || { erro "ROLLBACK XML NÃO COMPROVADO: sem temporário para releitura."; return 1; }
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$dump"; then
+        rm -f -- "$dump"
+        erro "ROLLBACK XML NÃO COMPROVADO: não foi possível reler o domínio restaurado."
+        return 1
+    fi
+    xml_dominio_equivalente "$XML_ANTES" "$dump" full || rc_compare=$?
+    rm -f -- "$dump"
+    if [ "$rc_compare" -eq 0 ]; then
+        aviso "XML original restaurado e comprovado por releitura semântica."
+        return 0
+    fi
+    if [ "$rc_compare" -eq 2 ]; then
+        erro "ROLLBACK XML NÃO COMPROVADO: falha ao comparar o domínio restaurado: $XML_COMPARACAO_ERRO"
+    else
+        erro "ROLLBACK XML NÃO COMPROVADO: o domínio restaurado divergiu do original (${XML_COMPARACAO_DIFERENCA:-divergência semântica})."
+    fi
+    return 1
+}
+
 rollback_total() {
     local falhou=0
     set +e
     if [ "$XML_MUTADO" -eq 1 ]; then
-        $VIRSH define "$XML_ANTES" >/dev/null \
-            || { erro "Falha ao restaurar XML original: $XML_ANTES"; falhou=1; }
+        rollback_xml || falhou=1
     fi
     rollback_hooks || falhou=1
-    sudo systemctl restart libvirtd \
-        || { erro "Hooks foram revertidos, mas libvirtd não reiniciou. Não inicie VMs."; falhou=1; }
+    libvirt_backend_reiniciar \
+        || { erro "Hooks foram revertidos, mas o daemon libvirt não reiniciou: $LIBVIRT_BACKEND_ERRO Não inicie VMs."; falhou=1; }
     if [ "$falhou" -ne 0 ]; then
         PRESERVAR_XML=1
         return 1
@@ -987,6 +1168,7 @@ finalizar_transacao() {
     else
         erro "XML original preservado em: $XML_ANTES"
     fi
+    python_core_temporarios_limpar
     encerrar_sudo_keepalive
     exit "$rc"
 }
@@ -1016,12 +1198,11 @@ remover_com_backup "$PREPARE_ANTIGO" \
 remover_com_backup "$RELEASE_ANTIGO" \
     || falhar "Falha ao migrar o hook release antigo."
 
-if ! sudo systemctl restart libvirtd || ! sudo systemctl is-active --quiet libvirtd; then
-    falhar "libvirtd não aceitou a instalação; a transação restaurará os hooks anteriores."
-fi
+libvirt_backend_reiniciar \
+    || falhar "$LIBVIRT_BACKEND_UNIDADE_DAEMON não aceitou a instalação ($LIBVIRT_BACKEND_ERRO); a transação restaurará os hooks anteriores."
 ok "Dispatcher e três hooks instalados atomicamente; falhas agora abortam o evento libvirt."
 
-titulo "2/4 GPU e áudio no XML com managed='yes'"
+titulo "2/5 GPU e áudio no XML com managed='yes'"
 
 anexar_hostdev_pci() {
     local endereco="${1,,}" dom bus slot func arquivo
@@ -1060,7 +1241,7 @@ if [ "$XML_FALHOU" -ne 0 ]; then
 fi
 ok "GPU e áudio configurados sob gestão exclusiva do libvirt."
 
-titulo "3/4 Disco físico no XML (opcional)"
+titulo "3/5 Disco físico no XML (opcional)"
 anexar_hd1() {
     local arquivo
     [ -n "${HD1_BY_ID_PATH:-}" ] || { info "Fluxo sem HD1 físico; somente QCOW2."; return 0; }
@@ -1104,6 +1285,95 @@ else
     fi
     falhar "HD1 não foi anexado com segurança; a transação restaurará XML e hooks."
 fi
+titulo "4/5 Opções de vídeo/hypervisor (dentro da transação)"
+# REQ-HOOKS-TX: as opções deixaram de ocorrer depois do commit. Elas entram na
+# mesma transação, como um único candidato validado pelo schema do libvirt,
+# definido uma vez e comprovado por releitura. Falha ou sinal aqui restaura
+# hooks, serviço e XML como em qualquer outra janela mutante.
+OPCOES_XML=()
+OPCOES_DESCRICAO=()
+if [ "$PEDIU_REMOVER_VIDEO" -eq 1 ]; then
+    aviso "Remova o vídeo virtual somente após validar um boot completo com passthrough."
+    if confirmar_digitando REMOVER "A saída gráfica virtual QXL/SPICE será removida."; then
+        OPCOES_XML+=(remove-video)
+        OPCOES_DESCRICAO+=("remoção do vídeo virtual")
+    else
+        aviso "Remoção do vídeo virtual recusada; a transação continua sem essa alteração."
+    fi
+fi
+if [ "$PEDIU_ANTI_CODE43" -eq 1 ]; then
+    OPCOES_XML+=(anti-code43)
+    OPCOES_DESCRICAO+=("ocultação do hypervisor (anti-Code 43)")
+fi
+
+aplicar_opcoes_xml() {
+    local origem candidato pos prova indice=0
+    local -a payload=()
+    (( ${#OPCOES_XML[@]} > 0 )) || { info "Nenhuma opção de vídeo/hypervisor solicitada."; return 0; }
+    origem="$(mktemp)" || return 1
+    candidato="$(mktemp)" || { rm -f -- "$origem"; return 1; }
+    pos="$(mktemp)" || { rm -f -- "$origem" "$candidato"; return 1; }
+    prova="$(mktemp)" || { rm -f -- "$origem" "$candidato" "$pos"; return 1; }
+    limpar_opcoes() { rm -f -- "$origem" "$candidato" "$pos" "$prova"; }
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$origem"; then
+        limpar_opcoes
+        erro "Não foi possível capturar o XML antes das opções."
+        return 1
+    fi
+    payload=(op_count "${#OPCOES_XML[@]}")
+    for indice in "${!OPCOES_XML[@]}"; do
+        payload+=("op_$indice" "${OPCOES_XML[$indice]}")
+        [ "${OPCOES_XML[$indice]}" != anti-code43 ] \
+            || payload+=("op_${indice}_vendor_id" randomid123)
+    done
+    if ! _xml_candidato_gerar "$origem" "$candidato" "${payload[@]}"; then
+        limpar_opcoes
+        erro "Candidato das opções recusado: $XML_CANDIDATO_ERRO"
+        return 1
+    fi
+    if [ "$XML_CANDIDATO_MUDOU" != 1 ]; then
+        limpar_opcoes
+        info "Opções já aplicadas no XML persistente: ${OPCOES_DESCRICAO[*]}."
+        return 0
+    fi
+    if ! virt-xml-validate "$candidato" domain >/dev/null; then
+        limpar_opcoes
+        erro "O schema libvirt recusou o candidato das opções; nada foi definido."
+        return 1
+    fi
+    XML_MUTADO=1
+    if ! $VIRSH define "$candidato" >/dev/null; then
+        limpar_opcoes
+        erro "virsh define recusou o candidato das opções."
+        return 1
+    fi
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$pos"; then
+        limpar_opcoes
+        erro "Não foi possível reler o XML após aplicar as opções."
+        return 1
+    fi
+    # Pós-condição por idempotência, não por igualdade textual/semântica total:
+    # o libvirt normaliza o domínio ao definir (endereços, valores implícitos),
+    # então exigir XML idêntico ao candidato produziria falso negativo. Gerar o
+    # mesmo candidato sobre o estado persistido e obter "nada a mudar" prova
+    # exatamente que cada opção pedida está aplicada.
+    if ! _xml_candidato_gerar "$pos" "$prova" "${payload[@]}"; then
+        limpar_opcoes
+        erro "Não foi possível comprovar as opções no XML persistido: $XML_CANDIDATO_ERRO"
+        return 1
+    fi
+    if [ "$XML_CANDIDATO_MUDOU" != 0 ]; then
+        limpar_opcoes
+        erro "O XML persistido não reflete as opções pedidas: ${OPCOES_DESCRICAO[*]}."
+        return 1
+    fi
+    limpar_opcoes
+    ok "Opções aplicadas e comprovadas por releitura: ${OPCOES_DESCRICAO[*]}."
+}
+aplicar_opcoes_xml \
+    || falhar "Opções de vídeo/hypervisor não foram aplicadas com prova; a transação restaurará XML e hooks."
+
+titulo "5/5 Commit da transação"
 exigir_vm_desligada "$VM_NAME"
 remover_com_backup "$INSTALLING_HOOK" \
     || falhar "Falha ao retirar o bloqueio temporário de start."
@@ -1112,40 +1382,6 @@ remover_com_backup "$INSTALLING_MARKER" \
 TRANSACAO_ATIVA=0
 rm -f -- "$XML_ANTES"
 ok "Configuração persistente de dispositivos validada."
-
-titulo "4/4 Opções de vídeo/hypervisor"
-if [ "${1:-}" = "--remover-video" ] || [ "${2:-}" = "--remover-video" ]; then
-    aviso "Remova o vídeo virtual somente após validar um boot completo com passthrough."
-    if confirmar_digitando REMOVER "A saída gráfica virtual QXL/SPICE será removida."; then
-        TMPX="$(mktemp)"
-        $VIRSH dumpxml --inactive "$VM_NAME" > "$TMPX"
-        xmlstarlet ed -L \
-            -d '/domain/devices/graphics' -d '/domain/devices/video' \
-            -d "/domain/devices/channel[@type='spicevmc']" -d '/domain/devices/redirdev' \
-            -d '/domain/devices/sound' -d '/domain/devices/audio' "$TMPX"
-        $VIRSH define "$TMPX"
-        rm -f -- "$TMPX"
-        ok "Vídeo virtual removido."
-    fi
-fi
-if [ "${1:-}" = "--anti-code43" ] || [ "${2:-}" = "--anti-code43" ]; then
-    TMPX="$(mktemp)"
-    $VIRSH dumpxml --inactive "$VM_NAME" > "$TMPX"
-    xmlstarlet sel -t -c '/domain/features/hyperv' "$TMPX" >/dev/null 2>&1 \
-        || xmlstarlet ed -L -s '/domain/features' -t elem -n hyperv -v '' "$TMPX"
-    xmlstarlet ed -L -d '/domain/features/hyperv/vendor_id' "$TMPX"
-    xmlstarlet ed -L -s '/domain/features/hyperv' -t elem -n vendor_id -v '' "$TMPX"
-    xmlstarlet ed -L -i '/domain/features/hyperv/vendor_id' -t attr -n state -v on "$TMPX"
-    xmlstarlet ed -L -i '/domain/features/hyperv/vendor_id' -t attr -n value -v randomid123 "$TMPX"
-    xmlstarlet sel -t -c '/domain/features/kvm' "$TMPX" >/dev/null 2>&1 \
-        || xmlstarlet ed -L -s '/domain/features' -t elem -n kvm -v '' "$TMPX"
-    xmlstarlet ed -L -d '/domain/features/kvm/hidden' "$TMPX"
-    xmlstarlet ed -L -s '/domain/features/kvm' -t elem -n hidden -v '' "$TMPX"
-    xmlstarlet ed -L -i '/domain/features/kvm/hidden' -t attr -n state -v on "$TMPX"
-    $VIRSH define "$TMPX"
-    rm -f -- "$TMPX"
-    ok "Ocultação de hypervisor aplicada."
-fi
 
 cat <<'RECUPERACAO'
 
