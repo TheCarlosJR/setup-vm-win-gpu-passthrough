@@ -5,6 +5,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
+guard_mutation backup.create || exit 1
 exigir_nao_root
 exigir_conf VM_NAME QCOW2_PATH
 nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros."
@@ -49,6 +50,8 @@ aviso "A VM ficará desligada. Um backup só é comprovadamente restaurável ap�
 
 exigir_destino_backup_disponivel
 exigir_comando rsync qemu-img virsh python3
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 exigir_sudo
 exigir_destino_backup_disponivel
 sudo mkdir -p "$DESTINO_BASE"
@@ -69,58 +72,56 @@ XML_LOCAL="$(mktemp)"
 trap 'rm -f "$XML_LOCAL"; encerrar_sudo_keepalive' EXIT INT TERM
 info "Exportando e validando a definição inativa da VM..."
 $VIRSH dumpxml "$VM_NAME" --inactive > "$XML_LOCAL"
-if ! VALIDACAO_XML="$(python3 - "$XML_LOCAL" "$QCOW2_PATH" 2>&1 <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-arquivo, qcow2 = sys.argv[1:]
-try:
-    root = ET.parse(arquivo).getroot()
-except (OSError, ET.ParseError) as exc:
-    raise SystemExit(f'XML inativo inválido: {exc}')
-matches = []
-for disk in root.findall('./devices/disk'):
-    if disk.get('device') != 'disk':
-        continue
-    source = disk.find('source')
-    if source is not None and source.get('file') == qcow2:
-        matches.append(disk)
-if len(matches) != 1:
-    raise SystemExit(
-        f'QCOW2_PATH={qcow2} precisa ser exatamente o disco ativo no XML; '
-        'um overlay externo ou caminho divergente tornaria a cópia obsoleta'
-    )
-driver = matches[0].find('driver')
-if driver is None or driver.get('type') != 'qcow2':
-    raise SystemExit(f'o disco ativo {qcow2} não usa driver qcow2')
-PY
-)"; then
+# Cardinalidade do disco ativo, driver e demais fontes vêm do core Python. O
+# XML inativo trafega por arquivo controlado 0600, nunca por argv.
+BACKUP_XML_PERMITIDAS=(
+    "${CORE_PARES_ENVELOPE[@]}"
+    TARGET_DEV DRIVER_TYPE NVRAM_PATH OTHER_SOURCE_COUNT 'OTHER_SOURCE_#'
+)
+validar_disco_ativo_xml() {
+    local -a payload=()
+    _xml_ler_arquivo "$XML_LOCAL" \
+        || { VALIDACAO_XML="XML inativo ausente ou ilegível."; return 1; }
+    payload=(xml "$XML_CONTEUDO" qcow2_path "$QCOW2_PATH")
+    if ! python_core_pares_payload BACKUP_XML_PERMITIDAS BKP_ \
+            domain-disk-backup-target payload 2>/dev/null; then
+        VALIDACAO_XML="$(_core_diagnostico 'XML inativo inválido.')"
+        return 1
+    fi
+}
+VALIDACAO_XML=""
+if ! validar_disco_ativo_xml; then
     falhar "$VALIDACAO_XML Consolide snapshots externos ou corrija o XML antes do backup."
 fi
 
 QCOW2_VALIDACAO_ERRO=""
+QCOW2_PERMITIDAS=(
+    "${CORE_PARES_ENVELOPE[@]}"
+    FORMAT HAS_BACKING BACKING_FILENAME CHAIN_LENGTH
+    VIRTUAL_SIZE ACTUAL_SIZE CLUSTER_SIZE
+)
 validar_qcow2_sem_backing() {
-    local arquivo="$1" info resultado
+    # O JSON do qemu-img é capturado aqui e analisado pelo core Python, com
+    # schema fechado: formato inesperado, campo com tipo errado ou presença de
+    # backing file recusam a operação antes de qualquer cópia.
+    local arquivo="$1" info
+    local -a payload=()
     QCOW2_VALIDACAO_ERRO=""
     info="$(sudo qemu-img info --output=json "$arquivo" 2>/dev/null)" \
         || { QCOW2_VALIDACAO_ERRO="qemu-img não conseguiu inspecionar $arquivo."; return 1; }
-    if ! resultado="$(python3 - 3<<< "$info" 2>&1 <<'PY'
-import json
-import os
-
-try:
-    with os.fdopen(3, encoding='utf-8') as stream:
-        info = json.load(stream)
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f'JSON do qemu-img inválido: {exc}')
-if info.get('format') != 'qcow2':
-    raise SystemExit(f"formato inesperado: {info.get('format', 'ausente')}")
-backing = info.get('full-backing-filename') or info.get('backing-filename')
-if backing:
-    raise SystemExit(f'backing file detectado: {backing}')
-PY
-)"; then
-        QCOW2_VALIDACAO_ERRO="$resultado"
+    # O formato é exigido pelo core; a presença de backing file é decidida
+    # aqui para que o diagnóstico continue nomeando o arquivo encontrado, como
+    # antes da migração.
+    IMG_HAS_BACKING=0
+    IMG_BACKING_FILENAME=""
+    payload=(json "$info" expect_format qcow2)
+    if ! python_core_pares_payload QCOW2_PERMITIDAS IMG_ qemu-image-inspect payload \
+            2>/dev/null; then
+        QCOW2_VALIDACAO_ERRO="$(_core_diagnostico 'JSON do qemu-img inválido.')"
+        return 1
+    fi
+    if [ "$IMG_HAS_BACKING" = 1 ]; then
+        QCOW2_VALIDACAO_ERRO="backing file detectado: $IMG_BACKING_FILENAME"
         return 1
     fi
 }
@@ -163,8 +164,9 @@ validar_qcow2_sem_backing "$QCOW2_BACKUP" \
     || falhar "A cópia não é independente: $QCOW2_VALIDACAO_ERRO"
 ok "QCOW2 ativo copiado com preservação sparse, sem backing chain e aprovado em qemu-img check."
 
-# Caminhos extraídos da definição inativa, produzida pelo próprio libvirt.
-NVRAM_PATH="$(sed -n "s|.*<nvram[^>]*>\(.*\)</nvram>.*|\1|p" "$XML_LOCAL" | head -n1)"
+# Caminhos extraídos da definição inativa pelo core Python (cardinalidade
+# exigida), não por expressão regular sobre XML.
+NVRAM_PATH="${BKP_NVRAM_PATH:-}"
 if [ -n "$NVRAM_PATH" ] && [ -f "$NVRAM_PATH" ]; then
     copiar_artefato "$NVRAM_PATH" nvram >/dev/null
     ok "NVRAM incluída."
@@ -189,7 +191,10 @@ exigir_destino_backup_disponivel "$MAPA_DISCOS"
     printf 'Backup: %s\nVM: %s\n\n' "$DATA_BACKUP" "$VM_NAME"
     printf 'Incluído:\n- QCOW2 principal: %s\n- XML inativo: %s\n' "$QCOW2_PATH" "$XML"
     printf '\nDiscos definidos pela VM (exceto o QCOW2 principal), não copiados automaticamente:\n'
-    sed -n "s|.*<source file='\([^']*\)'.*| - \1|p; s|.*<source dev='\([^']*\)'.*| - \1|p" "$XML_LOCAL" | grep -Fvx " - $QCOW2_PATH" || true
+    for INDICE_FONTE in $(seq 0 $(( ${BKP_OTHER_SOURCE_COUNT:-0} - 1 )) ); do
+        NOME_FONTE="BKP_OTHER_SOURCE_$INDICE_FONTE"
+        printf ' - %s\n' "${!NOME_FONTE}"
+    done
     printf '\nHD1 físico, outros discos, ISO e configuração do host estão fora deste backup.\n'
     printf 'Restaure primeiro em uma VM de teste e valide boot, NVRAM e TPM antes de considerar este conjunto recuperável.\n'
 } | sudo tee "$MAPA_DISCOS" >/dev/null

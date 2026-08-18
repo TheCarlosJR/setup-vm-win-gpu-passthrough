@@ -29,7 +29,13 @@ if grep -Eq -- 'find[[:space:]].*-delete' "$RAIZ/etapas/14-working-disk.sh"; the
     falha 'etapas/14-working-disk.sh ainda contém remoção via find -delete'
 fi
 exigir_texto util/backup-vm.sh 'qemu-img check'
-exigir_texto util/backup-vm.sh 'backing-filename'
+# I3: o campo backing-filename do JSON do qemu-img é lido pelo core Python. O
+# utilitário continua obrigado a exigir ausência de backing chain e a nomear o
+# arquivo encontrado no diagnóstico.
+exigir_texto util/backup-vm.sh 'qemu-image-inspect'
+exigir_texto util/backup-vm.sh 'backing file detectado'
+exigir_texto libexec/passthrough_core/qemu_image.py 'full-backing-filename'
+exigir_texto libexec/passthrough_core/qemu_image.py 'backing-filename'
 exigir_texto util/snapshot-vm.sh 'vm_desligada "$VM_NAME" || falhar'
 exigir_texto util/snapshot-vm.sh 'SNAPSHOT_DISKSPECS+=(--diskspec "$alvo,snapshot=$modo")'
 rejeitar_texto util/snapshot-vm.sh '--disk-only'

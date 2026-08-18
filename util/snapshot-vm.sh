@@ -15,6 +15,11 @@ carregar_conf
 exigir_conf VM_NAME
 nome_vm_valido "$VM_NAME" || falhar "VM_NAME inválido: '$VM_NAME'."
 exigir_comando virsh python3
+# A disponibilidade do core NÃO é sondada aqui: neste utilitário a guarda de
+# plataforma (guard_mutation) fica dentro de cada ação, e sondar o core antes
+# dela criaria um temporário antes do primeiro ponto de recusa, contra a regra
+# de REQ-GUARD. A ponte é fail-closed: a primeira chamada real devolve o código
+# 69 com diagnóstico acionável.
 
 mostrar_uso() {
     cat <<'EOF'
@@ -33,110 +38,59 @@ nome_snapshot_valido() {
 SNAPSHOT_ERRO=""
 SNAPSHOT_DISKSPECS=()
 preparar_diskspecs_internos() {
-    local xml mapa alvo modo extra
+    # O plano de diskspec vem do core Python: cardinalidade do disco
+    # configurado, driver exigido e exclusão explícita dos demais discos. O XML
+    # trafega por arquivo controlado 0600, nunca por argv.
+    local indice total alvo modo nome_alvo nome_modo
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" DISK_COUNT 'DISK_#_TARGET' 'DISK_#_MODE'
+    )
+    local -a payload=()
     SNAPSHOT_ERRO=""
     SNAPSHOT_DISKSPECS=()
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" \
+    XML_CONTEUDO="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" \
         || { SNAPSHOT_ERRO="Não foi possível ler o XML inativo de $VM_NAME."; return 1; }
-    if ! mapa="$(python3 - "$QCOW2_PATH" 3<<< "$xml" 2>&1 <<'PY'
-import os
-import re
-import sys
-import xml.etree.ElementTree as ET
-
-qcow2 = sys.argv[1]
-try:
-    with os.fdopen(3, encoding='utf-8') as stream:
-        root = ET.parse(stream).getroot()
-except (OSError, ET.ParseError) as exc:
-    raise SystemExit(f'XML inativo inválido: {exc}')
-
-dispositivos = []
-principais = 0
-alvos = set()
-for disk in root.findall('./devices/disk'):
-    if disk.get('device') != 'disk':
-        continue
-    target = disk.find('target')
-    source = disk.find('source')
-    driver = disk.find('driver')
-    alvo = '' if target is None else target.get('dev', '')
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+', alvo):
-        raise SystemExit(f'alvo de disco inválido ou ausente no XML: {alvo!r}')
-    if alvo in alvos:
-        raise SystemExit(f'alvo de disco duplicado no XML: {alvo}')
-    alvos.add(alvo)
-    arquivo = '' if source is None else source.get('file', '')
-    formato = '' if driver is None else driver.get('type', '')
-    if arquivo == qcow2:
-        principais += 1
-        if formato != 'qcow2':
-            raise SystemExit(f'o disco configurado {qcow2} não usa driver qcow2')
-        dispositivos.append((alvo, 'internal'))
-    else:
-        dispositivos.append((alvo, 'no'))
-
-if principais != 1:
-    raise SystemExit(
-        f'o XML precisa usar QCOW2_PATH={qcow2} exatamente uma vez como disco ativo; '
-        'um overlay externo ou configuração divergente exige consolidação/revisão manual'
-    )
-if not dispositivos:
-    raise SystemExit('nenhum disco de dados foi encontrado no XML inativo')
-for alvo, modo in dispositivos:
-    print(f'{alvo}|{modo}')
-PY
-)"; then
-        SNAPSHOT_ERRO="$mapa"
+    payload=(xml "$XML_CONTEUDO" qcow2_path "$QCOW2_PATH")
+    if ! python_core_pares_payload permitidas SNAP_ domain-disk-snapshot-plan payload \
+            2>/dev/null; then
+        SNAPSHOT_ERRO="$(_core_diagnostico 'XML inativo inválido para snapshot.')"
         return 1
     fi
-    while IFS='|' read -r alvo modo extra; do
-        [ -n "$alvo" ] && [ -z "$extra" ] && [[ "$modo" = internal || "$modo" = no ]] \
+    total="$SNAP_DISK_COUNT"
+    [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -gt 0 ] \
+        || { SNAPSHOT_ERRO="Mapa de discos inválido ao preparar o snapshot."; return 1; }
+    for (( indice = 0; indice < total; indice++ )); do
+        # Expansão indireta por nome; nunca eval, nunca código do Python.
+        nome_alvo="SNAP_DISK_${indice}_TARGET"
+        nome_modo="SNAP_DISK_${indice}_MODE"
+        alvo="${!nome_alvo:-}"
+        modo="${!nome_modo:-}"
+        [ -n "$alvo" ] && [[ "$modo" = internal || "$modo" = no ]] \
             || { SNAPSHOT_ERRO="Mapa de discos inválido ao preparar o snapshot."; return 1; }
         SNAPSHOT_DISKSPECS+=(--diskspec "$alvo,snapshot=$modo")
-    done <<< "$mapa"
+    done
     [ "${#SNAPSHOT_DISKSPECS[@]}" -gt 0 ] \
         || { SNAPSHOT_ERRO="Nenhuma especificação de disco foi preparada."; return 1; }
 }
 
 SNAPSHOT_ALVO_INTERNO=""
 validar_snapshot_interno() {
-    local nome="$1" xml resultado
+    local nome="$1"
+    local -a permitidas=("${CORE_PARES_ENVELOPE[@]}" INTERNAL_TARGET DISK_COUNT)
+    local -a payload=()
     SNAPSHOT_ERRO=""
     SNAPSHOT_ALVO_INTERNO=""
-    xml="$($VIRSH snapshot-dumpxml "$VM_NAME" "$nome" 2>/dev/null)" \
+    XML_CONTEUDO="$($VIRSH snapshot-dumpxml "$VM_NAME" "$nome" 2>/dev/null)" \
         || { SNAPSHOT_ERRO="Snapshot '$nome' não existe ou seus metadados não puderam ser lidos."; return 1; }
-    if ! resultado="$(python3 - 3<<< "$xml" 2>&1 <<'PY'
-import os
-import sys
-import xml.etree.ElementTree as ET
-
-try:
-    with os.fdopen(3, encoding='utf-8') as stream:
-        root = ET.parse(stream).getroot()
-except (OSError, ET.ParseError) as exc:
-    raise SystemExit(f'XML do snapshot inválido: {exc}')
-
-disks = root.findall('./disks/disk')
-externos = [d.get('name', '?') for d in disks if d.get('snapshot') == 'external']
-internos = [d.get('name', '') for d in disks if d.get('snapshot') == 'internal']
-desconhecidos = [d.get('snapshot', '') for d in disks if d.get('snapshot') not in {'internal', 'no'}]
-if externos:
-    raise SystemExit(
-        'snapshot externo não é compatível com reverter/apagar automaticamente; '
-        f'discos externos: {", ".join(externos)}'
-    )
-if desconhecidos:
-    raise SystemExit(f'tipos de snapshot não reconhecidos: {", ".join(desconhecidos)}')
-if len(internos) != 1 or not internos[0]:
-    raise SystemExit(f'esperado exatamente um disco interno; encontrados: {len(internos)}')
-print(internos[0])
-PY
-)"; then
-        SNAPSHOT_ERRO="$resultado"
+    payload=(xml "$XML_CONTEUDO")
+    if ! python_core_pares_payload permitidas SNAPINT_ domain-snapshot-internal payload \
+            2>/dev/null; then
+        SNAPSHOT_ERRO="$(_core_diagnostico 'XML do snapshot inválido.')"
         return 1
     fi
-    SNAPSHOT_ALVO_INTERNO="$resultado"
+    SNAPSHOT_ALVO_INTERNO="$SNAPINT_INTERNAL_TARGET"
+    [ -n "$SNAPSHOT_ALVO_INTERNO" ] \
+        || { SNAPSHOT_ERRO="O core não devolveu o alvo interno do snapshot."; return 1; }
 }
 
 info "Finalidade: criar, listar, reverter ou apagar snapshots internos do QCOW2 principal da VM '$VM_NAME'."
@@ -151,6 +105,7 @@ info "Retorno/reboot: falhas do virsh/cancelamento retornam erro; o script não 
 ACAO="${1:-listar}"
 case "$ACAO" in
     criar)
+        guard_mutation snapshot.manage || exit 1
         NOME="${2:-snap-$(date +%Y%m%d-%H%M%S)}"
         DESC="${3:-Snapshot interno criado por util/snapshot-vm.sh}"
         nome_snapshot_valido "$NOME" || falhar "Nome de snapshot inválido: '$NOME'. Use letras, números, ponto, hífen ou sublinhado."
@@ -172,6 +127,7 @@ case "$ACAO" in
         fi
         ;;
     reverter)
+        guard_mutation snapshot.manage || exit 1
         NOME="${2:-}"
         [ -n "$NOME" ] || falhar "Informe o nome do snapshot (veja: snapshot-vm.sh listar)."
         nome_snapshot_valido "$NOME" || falhar "Nome de snapshot inválido: '$NOME'."
@@ -183,6 +139,7 @@ case "$ACAO" in
         ok "QCOW2 principal revertido para '$NOME'."
         ;;
     apagar)
+        guard_mutation snapshot.manage || exit 1
         NOME="${2:-}"
         [ -n "$NOME" ] || falhar "Informe o nome do snapshot."
         nome_snapshot_valido "$NOME" || falhar "Nome de snapshot inválido: '$NOME'."

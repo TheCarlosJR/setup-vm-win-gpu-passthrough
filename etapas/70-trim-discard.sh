@@ -85,9 +85,12 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation trim.configure || exit 1
 exigir_nao_root
 exigir_conf VM_NAME QCOW2_PATH
-exigir_comando python3 xmlstarlet virt-xml-validate
+exigir_comando python3 virt-xml-validate
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 caminho_absoluto_seguro "$QCOW2_PATH" || falhar "QCOW2_PATH inválido: '$QCOW2_PATH'."
 
 titulo "Capítulo 25: TRIM/discard"
@@ -104,15 +107,97 @@ exigir_sudo
 info "Suporte a discard no host (DISC-GRAN/DISC-MAX diferentes de zero = OK):"
 lsblk --discard | sed 's/^/  /'
 
+# --- Transação de discard (REQ-TRIM-TX) --------------------------------------
+# Estados explícitos, traps armados antes do primeiro define e commit somente
+# depois da prova semântica relida do libvirt. Retorno zero de `define` nunca é
+# tratado como evidência: toda restauração é relida e comparada.
+
+TRIM_ESTADO=IDLE            # IDLE|PREPARED|APPLIED|VERIFIED|COMMITTED|ROLLING_BACK
+TRIM_FINGERPRINT_ORIGINAL=""
+TRIM_PRESERVAR_EVIDENCIA=0
 XML_ATUAL="$(mktemp)"
 XML_CANDIDATO="$(mktemp)"
 XML_POS="$(mktemp)"
-limpar_xml_temporario() { rm -f -- "$XML_ATUAL" "$XML_CANDIDATO" "$XML_POS"; }
+XML_ROLLBACK="$(mktemp)"
+
+limpar_xml_temporario() {
+    rm -f -- "$XML_CANDIDATO" "$XML_POS" "$XML_ROLLBACK"
+    if [ "$TRIM_PRESERVAR_EVIDENCIA" -eq 0 ]; then
+        rm -f -- "$XML_ATUAL"
+    else
+        erro "XML original preservado para recuperação em: $XML_ATUAL"
+    fi
+}
+
+trim_rollback() {
+    # Restaura o XML original e PROVA a restauração relendo o domínio. Um
+    # `define` que retorna zero sem aplicar (rollback divergente) precisa ser
+    # detectado aqui, não anunciado como sucesso.
+    local rc_compare=0
+    TRIM_ESTADO=ROLLING_BACK
+    # Primeiro: o domínio ainda está no estado original? Se a falha ocorreu
+    # antes de qualquer mutação efetiva, não há efeito a desfazer.
+    if $VIRSH dumpxml --inactive "$VM_NAME" > "$XML_ROLLBACK" 2>/dev/null \
+       && xml_dominio_fingerprint "$XML_ROLLBACK" \
+       && [ -n "$TRIM_FINGERPRINT_ORIGINAL" ] \
+       && [ "$XML_DOMINIO_FINGERPRINT" = "$TRIM_FINGERPRINT_ORIGINAL" ]; then
+        aviso "Nenhuma mutação efetiva do XML a desfazer; o domínio segue idêntico ao original."
+        return 0
+    fi
+    if ! $VIRSH define --validate "$XML_ATUAL" >/dev/null 2>&1; then
+        erro "ROLLBACK XML NÃO COMPROVADO. O virsh recusou restaurar o XML original."
+        TRIM_PRESERVAR_EVIDENCIA=1
+        return 1
+    fi
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$XML_ROLLBACK" 2>/dev/null; then
+        erro "ROLLBACK XML NÃO COMPROVADO. Não foi possível reler o domínio após a restauração."
+        TRIM_PRESERVAR_EVIDENCIA=1
+        return 1
+    fi
+    xml_dominio_equivalente "$XML_ATUAL" "$XML_ROLLBACK" full || rc_compare=$?
+    if [ "$rc_compare" -eq 0 ]; then
+        aviso "XML anterior restaurado e comprovado por releitura semântica."
+        return 0
+    fi
+    if [ "$rc_compare" -eq 2 ]; then
+        erro "ROLLBACK XML NÃO COMPROVADO. Falha ao comparar o domínio restaurado: $XML_COMPARACAO_ERRO"
+    else
+        erro "ROLLBACK XML NÃO COMPROVADO. O domínio restaurado divergiu do original: ${XML_COMPARACAO_DIFERENCA:-divergência semântica}."
+    fi
+    TRIM_PRESERVAR_EVIDENCIA=1
+    return 1
+}
+
+trim_finalizar() {
+    local rc=$?
+    trap - EXIT INT TERM
+    case "$TRIM_ESTADO" in
+        # PREPARED entra na restauração de propósito: entre armar os traps e
+        # confirmar o define não é possível saber se a mutação já valeu, e
+        # trim_rollback começa comparando o fingerprint, então um estado
+        # inalterado não gera nenhum efeito adicional.
+        PREPARED|APPLIED|VERIFIED|ROLLING_BACK)
+            erro "Transação de TRIM interrompida antes do commit; restaurando o XML original."
+            if ! trim_rollback; then
+                erro "Recuperação manual necessária: restaure o backup XML informado acima antes de iniciar a VM."
+                [ "$rc" -ne 0 ] || rc=1
+            fi
+            ;;
+    esac
+    limpar_xml_temporario
+    python_core_temporarios_limpar
+    encerrar_sudo_keepalive
+    exit "$rc"
+}
+
 $VIRSH dumpxml --inactive "$VM_NAME" > "$XML_ATUAL" \
     || { limpar_xml_temporario; falhar "Não foi possível ler o XML inativo da VM."; }
+[ -s "$XML_ATUAL" ] \
+    || { limpar_xml_temporario; falhar "O XML inativo capturado está vazio."; }
 
 if xml_disco_qcow2_estado "$XML_ATUAL" "$QCOW2_PATH"; then
     info "discard='unmap' já está configurado no único disco alvo."
+    limpar_xml_temporario
 else
     XML_ESTADO_RC=$?
     if [ "$XML_ESTADO_RC" -ne 1 ]; then
@@ -122,34 +207,49 @@ else
     exigir_vm_desligada "$VM_NAME"
     $VIRSH help define 2>/dev/null | grep -q -- '--validate' \
         || { limpar_xml_temporario; falhar "Este virsh não oferece define --validate; nada foi alterado."; }
-    xml_backup "$VM_NAME"
-    cp -- "$XML_ATUAL" "$XML_CANDIDATO"
-    XPATH_ALVO="/domain/devices/disk[@device='disk'][source/@file='$QCOW2_PATH']/driver"
-    xmlstarlet ed -L -d "$XPATH_ALVO/@discard" "$XML_CANDIDATO"
-    xmlstarlet ed -L -i "$XPATH_ALVO" -t attr -n discard -v unmap "$XML_CANDIDATO"
+
+    # Fingerprint do estado original: base da prova de rollback e da detecção
+    # de mudança concorrente.
+    xml_dominio_fingerprint "$XML_ATUAL" \
+        || { limpar_xml_temporario; falhar "Não foi possível medir o XML original: $XML_DOMINIO_ERRO"; }
+    TRIM_FINGERPRINT_ORIGINAL="$XML_DOMINIO_FINGERPRINT"
+
+    # Candidato gerado e integralmente validado antes da primeira mutação.
+    xml_candidato_discard "$XML_ATUAL" "$XML_CANDIDATO" "$QCOW2_PATH" \
+        || { limpar_xml_temporario; falhar "Candidato de discard recusado: $XML_CANDIDATO_ERRO"; }
+    [ "$XML_CANDIDATO_FINGERPRINT_ANTES" = "$TRIM_FINGERPRINT_ORIGINAL" ] \
+        || { limpar_xml_temporario; falhar "O XML mudou entre a captura e a geração do candidato; nada foi alterado."; }
     virt-xml-validate "$XML_CANDIDATO" domain >/dev/null \
         || { limpar_xml_temporario; falhar "O XML candidato com discard não passa no schema libvirt."; }
     xml_disco_qcow2_estado "$XML_CANDIDATO" "$QCOW2_PATH" \
         || { limpar_xml_temporario; falhar "Pós-condição do candidato recusada: $DISCARD_XML_ERRO"; }
-    if ! $VIRSH define --validate "$XML_CANDIDATO" >/dev/null; then
-        limpar_xml_temporario
-        falhar "virsh define recusou o XML candidato; o domínio original foi preservado."
-    fi
-    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$XML_POS" \
-       || ! virt-xml-validate "$XML_POS" domain >/dev/null \
-       || ! xml_disco_qcow2_estado "$XML_POS" "$QCOW2_PATH"; then
-        erro "A pós-condição de discard falhou; tentando restaurar o backup XML $XML_BACKUP_PATH."
-        if $VIRSH define --validate "$XML_BACKUP_PATH" >/dev/null; then
-            aviso "XML anterior restaurado."
-        else
-            erro "ROLLBACK XML NÃO COMPROVADO. Não inicie a VM antes de revisar $XML_BACKUP_PATH."
-        fi
-        limpar_xml_temporario
-        falhar "discard não foi comprovado no disco alvo após a definição."
-    fi
+    xml_backup "$VM_NAME"
+
+    # Traps armados ANTES do primeiro define: sinal ou falha em qualquer ponto
+    # da janela mutante cai na restauração comprovada, preservando o código.
+    trap 'trim_finalizar' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    TRIM_ESTADO=PREPARED
+
+    $VIRSH define --validate "$XML_CANDIDATO" >/dev/null \
+        || falhar "virsh define recusou o XML candidato; a transação restaurará o XML original."
+    TRIM_ESTADO=APPLIED
+    $VIRSH dumpxml --inactive "$VM_NAME" > "$XML_POS" \
+        || falhar "Não foi possível reler o XML após o define; a transação restaurará o original."
+    virt-xml-validate "$XML_POS" domain >/dev/null \
+        || falhar "O XML persistido não passa no schema libvirt; a transação restaurará o original."
+    xml_disco_qcow2_estado "$XML_POS" "$QCOW2_PATH" \
+        || falhar "discard não foi comprovado no disco alvo após a definição: ${DISCARD_XML_ERRO:-estado divergente}."
+    TRIM_ESTADO=VERIFIED
+
+    # Commit lógico: só a partir daqui o trap deixa de restaurar. O trap volta
+    # a ser o do ticket sudo, instalado por exigir_sudo.
+    TRIM_ESTADO=COMMITTED
+    trap encerrar_sudo_keepalive EXIT INT TERM
+    limpar_xml_temporario
     ok "discard='unmap' aplicado exclusivamente ao disco $QCOW2_PATH."
 fi
-limpar_xml_temporario
 
 titulo "Pasta de backups"
 BACKUP_DESTINO_RESOLVIDO=0
