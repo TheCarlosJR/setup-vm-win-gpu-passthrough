@@ -1,0 +1,5 @@
+lib/shell/boot.sh
+libexec/passthrough_core/cpu.py
+tests/manifests/i5-files.txt
+tests/python/test_cpu.py
+tests/test-i5-cpu-boot.sh
