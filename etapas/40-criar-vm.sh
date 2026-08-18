@@ -151,7 +151,11 @@ verificar() {
         if plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO"; then
             QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
             qemu_ok=1
-            v_ok "Identidade QEMU resolvida: $QEMU_USUARIO."
+            if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
+                v_ok "Identidade QEMU presumida sem privilégio: $QEMU_USUARIO (qemu.conf só é legível pelo root)."
+            else
+                v_ok "Identidade QEMU resolvida: $QEMU_USUARIO."
+            fi
         else
             qemu_rc=$?
             if [ "$qemu_rc" -eq 1 ]; then
@@ -293,6 +297,18 @@ fi
 # Só agora é permitido obter sudo. As primeiras operações são provas de acesso,
 # não correções de metadados em paths configuráveis.
 exigir_sudo
+
+if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
+    # Com o ticket sudo em mãos, qemu.conf volta a ser autoritativo. Uma
+    # divergência invalida as validações já feitas com a identidade presumida.
+    QEMU_USUARIO_PRESUMIDO="$QEMU_USUARIO"
+    plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO" \
+        || falhar "$PLATAFORMA_ERRO"
+    [ "$PLATAFORMA_USUARIO_QEMU" = "$QEMU_USUARIO_PRESUMIDO" ] \
+        || falhar "qemu.conf define a identidade QEMU '$PLATAFORMA_USUARIO_QEMU', divergente da presumida '$QEMU_USUARIO_PRESUMIDO'. Reexecute as etapas 21 e 40 para reconvergir /vm."
+    QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
+fi
+
 sudo -u "$QEMU_USUARIO" test -r "$VM_DIR" \
     && sudo -u "$QEMU_USUARIO" test -w "$VM_DIR" \
     && sudo -u "$QEMU_USUARIO" test -x "$VM_DIR" \

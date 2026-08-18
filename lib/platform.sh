@@ -41,6 +41,7 @@ PLATAFORMA_UNIDADE_RESOLVIDA=""
 PLATAFORMA_UNIDADE_ACAO=""
 PLATAFORMA_QEMU_USUARIO_PADRAO=""
 PLATAFORMA_USUARIO_QEMU=""
+PLATAFORMA_QEMU_ORIGEM=""
 PLATAFORMA_CPU_VENDOR=""
 PLATAFORMA_PACOTES_VIRTUALIZACAO=()
 declare -ag PLATAFORMA_CAPABILITIES_CONHECIDAS=(
@@ -153,6 +154,7 @@ _plataforma_resetar_estado() {
     PLATAFORMA_UNIDADE_ACAO=""
     PLATAFORMA_QEMU_USUARIO_PADRAO=""
     PLATAFORMA_USUARIO_QEMU=""
+    PLATAFORMA_QEMU_ORIGEM=""
     PLATAFORMA_CPU_VENDOR=""
     PLATAFORMA_PACOTES_VIRTUALIZACAO=()
     PLATAFORMA_CAPABILITIES=()
@@ -554,13 +556,26 @@ _plataforma_usuario_qemu_permitido() {
 }
 
 _plataforma_ler_usuario_qemu_conf() {
-    local arquivo="$1" linha conteudo valor usuario="" encontrados=0
+    # Retornos: 0 resolve a diretiva user; 1 indica arquivo ausente ou sem
+    # diretiva ativa; 2 indica qemu.conf inválido (link, diretório, leitura
+    # quebrada); 3 indica arquivo regular que só o root pode ler, que é o modo
+    # 0600 padrão do pacote, sem ticket sudo disponível para lê-lo.
+    local arquivo="$1" linha conteudo valor usuario="" encontrados=0 texto
     PLATAFORMA_USUARIO_QEMU=""
     [ ! -L "$arquivo" ] \
         || { PLATAFORMA_ERRO="qemu.conf deve ser arquivo regular legível, não link: $arquivo"; return 2; }
     [ -e "$arquivo" ] || return 1
-    [ -f "$arquivo" ] && [ -r "$arquivo" ] \
+    [ -f "$arquivo" ] \
         || { PLATAFORMA_ERRO="qemu.conf deve ser arquivo regular legível, não link: $arquivo"; return 2; }
+    if [ -r "$arquivo" ]; then
+        texto="$(cat -- "$arquivo")" \
+            || { PLATAFORMA_ERRO="qemu.conf deve ser arquivo regular legível, não link: $arquivo"; return 2; }
+    elif texto="$(sudo -n cat -- "$arquivo" 2>/dev/null)"; then
+        :
+    else
+        PLATAFORMA_ERRO="qemu.conf é regular, mas legível apenas pelo root (modo padrão do pacote): $arquivo."
+        return 3
+    fi
     while IFS= read -r linha || [ -n "$linha" ]; do
         linha="${linha%$'\r'}"
         conteudo="$(_plataforma_trim "$linha")"
@@ -581,21 +596,46 @@ _plataforma_ler_usuario_qemu_conf() {
         [ "$encontrados" -eq 1 ] \
             || { PLATAFORMA_ERRO="Mais de uma diretiva user ativa em $arquivo; identidade QEMU ambígua."; return 2; }
         usuario="$valor"
-    done < "$arquivo"
+    done <<< "$texto"
     [ "$encontrados" -eq 1 ] || return 1
     PLATAFORMA_USUARIO_QEMU="$usuario"
+}
+
+_plataforma_usuario_qemu_runtime() {
+    # Identidade QEMU efetiva observável sem privilégio: o libvirt cria e
+    # transfere o diretório de estado do QEMU para o usuário realmente
+    # configurado, e os diretórios pais são atravessáveis por qualquer conta.
+    # Ecoa a identidade só quando ela é plausível e permitida pelo perfil.
+    local diretorio dono
+    if declare -F caminho_sistema >/dev/null 2>&1; then
+        diretorio="$(caminho_sistema /var/lib/libvirt/qemu)" || return 1
+    else
+        diretorio=/var/lib/libvirt/qemu
+    fi
+    [ -d "$diretorio" ] && [ ! -L "$diretorio" ] || return 1
+    command -v stat >/dev/null 2>&1 || return 1
+    dono="$(stat -c %U -- "$diretorio" 2>/dev/null)" || return 1
+    [[ "$dono" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
+    _plataforma_usuario_qemu_permitido "$dono" || return 1
+    printf '%s\n' "$dono"
 }
 
 plataforma_resolver_usuario_qemu() {
     # Contrato público: 0 resolve; 1 indica conta NSS ainda ausente; 2 indica
     # qemu.conf/perfil/NSS inválido ou falha operacional. A ausência da
     # diretiva usa o padrão determinístico do perfil.
+    # PLATAFORMA_QEMU_ORIGEM registra de onde veio a identidade resolvida:
+    # 'qemu.conf' quando a diretiva foi lida, 'padrao' quando não há diretiva
+    # ativa e 'presumido' quando qemu.conf existe restrito ao root e a
+    # identidade foi inferida sem privilégio. Só 'presumido' precisa de
+    # reconfirmação com sudo antes de qualquer mutação.
     local arquivo="${1:-}" usuario rc
     if [ "$PLATAFORMA_CARREGADA" -ne 1 ]; then
         plataforma_carregar || return 2
     fi
     PLATAFORMA_ERRO=""
     PLATAFORMA_USUARIO_QEMU=""
+    PLATAFORMA_QEMU_ORIGEM=""
     if [ -z "$arquivo" ]; then
         if declare -F caminho_sistema >/dev/null 2>&1; then
             arquivo="$(caminho_sistema /etc/libvirt/qemu.conf)" || {
@@ -609,17 +649,30 @@ plataforma_resolver_usuario_qemu() {
     if _plataforma_ler_usuario_qemu_conf "$arquivo"; then
         usuario="$PLATAFORMA_USUARIO_QEMU"
         PLATAFORMA_USUARIO_QEMU=""
+        PLATAFORMA_QEMU_ORIGEM=qemu.conf
     else
         rc=$?
         PLATAFORMA_USUARIO_QEMU=""
+        usuario=""
         case "$rc" in
-            1) ;;
+            1) PLATAFORMA_QEMU_ORIGEM=padrao ;;
             2) return 2 ;;
+            3)
+                # qemu.conf existe, é regular e está fechado ao root: nenhuma
+                # etapa roda como root e nem toda verificação tem sudo. A
+                # identidade efetiva ainda é observável pelo dono do estado do
+                # QEMU; sem esse sinal cai no padrão determinístico do perfil.
+                PLATAFORMA_QEMU_ORIGEM=presumido
+                PLATAFORMA_ERRO=""
+                usuario="$(_plataforma_usuario_qemu_runtime)" || usuario=""
+                ;;
             *) PLATAFORMA_ERRO="Falha interna ao interpretar qemu.conf (código $rc)."; return 2 ;;
         esac
-        usuario="$PLATAFORMA_QEMU_USUARIO_PADRAO"
-        [ -n "$usuario" ] \
-            || { PLATAFORMA_ERRO="Perfil sem identidade QEMU padrão e sem user explícito em qemu.conf."; return 2; }
+        if [ -z "$usuario" ]; then
+            usuario="$PLATAFORMA_QEMU_USUARIO_PADRAO"
+            [ -n "$usuario" ] \
+                || { PLATAFORMA_ERRO="Perfil sem identidade QEMU padrão e sem user explícito em qemu.conf."; return 2; }
+        fi
     fi
     _plataforma_usuario_qemu_permitido "$usuario" \
         || { PLATAFORMA_ERRO="Identidade QEMU '$usuario' não pertence ao conjunto permitido do perfil: $PLATAFORMA_QEMU_USUARIOS."; return 2; }
