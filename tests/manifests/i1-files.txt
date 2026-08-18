@@ -1,0 +1,9 @@
+.github/workflows/ci.yml
+tests/check-phase-manifest.sh
+tests/i1/mutators.tsv
+tests/lib/i1-guard-harness.sh
+tests/manifests/i0-files.txt
+tests/manifests/i1-files.txt
+tests/run-gate-i1.sh
+tests/test-atualizar-host-validation.sh
+tests/test-i1-safety-envelope.sh

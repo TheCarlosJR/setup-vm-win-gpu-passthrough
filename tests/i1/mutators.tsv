@@ -1,0 +1,31 @@
+# id	kind	path	capability	menu	arg1	arg2	arg3
+stage-00	mutator	etapas/00-inventario.sh	inventory.write	1
+stage-02-default	mutator	etapas/02-detectar-config.sh	config.manage	3
+stage-02-redetect	mutator	etapas/02-detectar-config.sh	config.manage	-	--redetectar
+stage-10	mutator	etapas/10-atualizar-sistema.sh	host.update	4
+stage-11	mutator	etapas/11-driver-nvidia.sh	nvidia.driver	5
+stage-12	mutator	etapas/12-pacotes-base.sh	packages.base	6
+stage-13	mutator	etapas/13-diretorios.sh	storage.prepare	7
+stage-20	mutator	etapas/20-virtualizacao.sh	virtualization.manage	9
+stage-21	mutator	etapas/21-usuario-grupos.sh	virtualization.manage	10
+stage-30	mutator	etapas/30-iommu-vfio.sh	iommu.configure	11
+stage-40	mutator	etapas/40-criar-vm.sh	domain.create	12
+stage-41	mutator	etapas/41-instalacao-windows.sh	domain.console	13
+stage-50-default	mutator	etapas/50-hooks-gpu-hd1.sh	hooks.configure	14
+stage-50-render	mutator	etapas/50-hooks-gpu-hd1.sh	hooks.configure	-	--renderizar-hooks
+stage-51	mutator	etapas/51-usb-passthrough.sh	usb.configure	15
+stage-52-default	mutator	etapas/52-cpu-pinning-hugepages.sh	cpu.tune	16
+stage-52-undo	mutator	etapas/52-cpu-pinning-hugepages.sh	cpu.tune	-	--desfazer
+stage-53-default	mutator	etapas/53-cpu-isolation.sh	cpu.tune	17
+stage-53-undo	mutator	etapas/53-cpu-isolation.sh	cpu.tune	-	--desfazer
+stage-60	mutator	etapas/60-rede-bridge.sh	network.configure	18
+stage-61	mutator	etapas/61-airlock.sh	airlock.configure	19
+stage-70	mutator	etapas/70-trim-discard.sh	trim.configure	20
+util-diagnostic	mutator	util/diagnostico.sh	diagnostic.write	u1
+util-snapshot-create	mutator	util/snapshot-vm.sh	snapshot.manage	-	criar
+util-snapshot-revert	mutator	util/snapshot-vm.sh	snapshot.manage	-	reverter
+util-snapshot-delete	mutator	util/snapshot-vm.sh	snapshot.manage	-	apagar
+util-backup	mutator	util/backup-vm.sh	backup.create	u4
+util-host-update	mutator	util/atualizar-host.sh	host.update	u5
+util-host-validate-start	validation	util/atualizar-host.sh	domain.console	-	--validar
+util-gpu-recover	mutator	util/recuperar-gpu.sh	gpu.recover	u6
