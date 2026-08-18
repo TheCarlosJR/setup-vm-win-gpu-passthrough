@@ -1,0 +1,4 @@
+libexec/passthrough_core/config.py
+tests/manifests/i4-files.txt
+tests/python/test_config.py
+tests/test-i4-config.sh
