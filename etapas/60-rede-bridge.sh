@@ -407,6 +407,9 @@ tratar_saida() {
         fi
     fi
     limpar_temporarios
+    # Idioma documentado da ponte (seção 3.8): a janela de sinal precisa limpar
+    # a raiz privada do core, além dos temporários da própria etapa.
+    python_core_temporarios_limpar
     exit "$status"
 }
 
@@ -421,28 +424,82 @@ commit_transacao() {
     ok "Commit lógico da transação de rede concluído."
 }
 
-xpath_nic() {
-    printf "/domain/devices/interface[translate(mac/@address,'ABCDEF','abcdef')='%s']" "${VM_NIC_MAC,,}"
+# --- Inspeção de XML pelo core Python ----------------------------------------
+# Todo XML de domínio e de rede desta etapa é analisado pelo core, com
+# cardinalidade explícita e nenhum dado local em argv. Os nomes das funções e as
+# conclusões que o restante da etapa consome permanecem os mesmos.
+
+NIC_XML_PERMITIDAS=(
+    CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+    NIC_COUNT MAC_COUNT CONSUMER_COUNT NETWORK_MATCH_COUNT NETWORK_MATCH_MAC
+    MAC_TYPE MAC_NETWORK MAC_BRIDGE MAC_DEV MAC_HAS_ADDRESS
+    'NIC_#_MAC' 'NIC_#_TYPE' 'NIC_#_NETWORK' 'NIC_#_SOURCE'
+)
+REDE_XML_PERMITIDAS=(
+    CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+    NAME UUID DESCRIPTION MARKER_MATCH
+    FORWARD_COUNT FORWARD_MODE FORWARD_DEV BRIDGE_NAME BRIDGE_STP
+    IP_COUNT DHCP_RANGE_COUNT DHCP_RANGE_START DHCP_RANGE_END
+    DHCP_MAC_COUNT DHCP_MAC_IP DHCP_IP_COUNT FINGERPRINT
+    'IP_#_FAMILY' 'IP_#_ADDRESS' 'IP_#_NETMASK' 'IP_#_PREFIX'
+    'IP_#_NETWORK' 'IP_#_BROADCAST'
+)
+
+inspecionar_nic_dominio() {
+    # $1 = XML do domínio; $2 = prefixo das variáveis; demais = pares extras.
+    local conteudo="$1" prefixo="$2"
+    local -a payload=()
+    shift 2
+    payload=(xml "$conteudo" "$@")
+    python_core_pares_payload NIC_XML_PERMITIDAS "$prefixo" domain-interfaces payload \
+        2>/dev/null
 }
 
-xml_vm_valor() {
-    local expressao="$1"
-    $VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null \
-        | xmlstarlet sel -t -v "$expressao" 2>/dev/null
+inspecionar_rede_xml() {
+    # $1 = XML da rede; $2 = prefixo das variáveis; demais = pares extras.
+    local conteudo="$1" prefixo="$2"
+    local -a payload=()
+    shift 2
+    payload=(xml "$conteudo" "$@")
+    python_core_pares_payload REDE_XML_PERMITIDAS "$prefixo" network-inspect payload \
+        2>/dev/null
+}
+
+COLISAO_XML_PERMITIDAS=(
+    CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+    NAME MARKER_MATCH OVERLAP_COUNT OVERLAP_CIDR CANDIDATE_CIDR
+)
+
+inspecionar_colisao_rede() {
+    # $1 = XML da rede; $2 = CIDR candidato. Publica COLX_OVERLAP_COUNT e
+    # COLX_OVERLAP_CIDR. Um XML de rede inválido devolve falha, nunca "livre".
+    local conteudo="$1" candidata="$2"
+    local -a payload=()
+    payload=(xml "$conteudo" candidate_cidr "$candidata")
+    python_core_pares_payload COLISAO_XML_PERMITIDAS COLX_ network-overlap payload \
+        2>/dev/null
 }
 
 nic_vm_contagem() {
-    local xpath
-    xpath="$(xpath_nic)"
-    xml_vm_valor "count($xpath)"
+    local xml
+    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || { printf '0\n'; return 0; }
+    inspecionar_nic_dominio "$xml" NICVM_ nic_mac "${VM_NIC_MAC,,}" \
+        || { printf '0\n'; return 0; }
+    printf '%s\n' "$NICVM_MAC_COUNT"
 }
 
 nic_vm_confere_fonte() {
-    local tipo="$1" atributo="$2" valor="$3" xpath atual_tipo atual_fonte
-    xpath="$(xpath_nic)"
-    atual_tipo="$(xml_vm_valor "string($xpath/@type)")"
-    atual_fonte="$(xml_vm_valor "string($xpath/source/@$atributo)")"
-    [ "$atual_tipo" = "$tipo" ] && [ "$atual_fonte" = "$valor" ]
+    local tipo="$1" atributo="$2" valor="$3" xml atual_fonte
+    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 1
+    inspecionar_nic_dominio "$xml" NICVM_ nic_mac "${VM_NIC_MAC,,}" || return 1
+    [ "$NICVM_MAC_COUNT" = 1 ] || return 1
+    case "$atributo" in
+        bridge) atual_fonte="$NICVM_MAC_BRIDGE" ;;
+        network) atual_fonte="$NICVM_MAC_NETWORK" ;;
+        dev) atual_fonte="$NICVM_MAC_DEV" ;;
+        *) return 1 ;;
+    esac
+    [ "$NICVM_MAC_TYPE" = "$tipo" ] && [ "$atual_fonte" = "$valor" ]
 }
 
 master_da_interface() {
@@ -476,7 +533,6 @@ derivar_parametros_nat() {
 }
 
 rede_gerenciada() {
-    local descricao
     REDE_XML_ATUAL=""
     consultar_estado_rede_libvirt "$REDE_LIBVIRT" || return 2
     [ "$ESTADO_REDE_EXISTE" = "SIM" ] || return 1
@@ -486,17 +542,18 @@ rede_gerenciada() {
         capturar_xml_estado_rede "$REDE_LIBVIRT" ativo || return 2
     fi
     REDE_XML_ATUAL="$ESTADO_REDE_XML"
-    if ! descricao="$(xmlstarlet sel -t -v 'string(/network/description)' <<< "$REDE_XML_ATUAL")"; then
+    if ! inspecionar_rede_xml "$REDE_XML_ATUAL" MARCA_ marker "$REDE_MARCADOR"; then
         ESTADO_REDE_ERRO="Falha ao analisar o marcador da rede libvirt '$REDE_LIBVIRT'."
         return 2
     fi
-    [ "$descricao" = "$REDE_MARCADOR" ]
+    # O marcador é comparado explicitamente pelo core: rede homônima sem o
+    # marcador deste projeto não é nossa e precisa ser preservada.
+    [ "$MARCA_MARKER_MATCH" = 1 ]
 }
 
 rede_nat_xml_confere() {
     # Retornos: 0=confere, 1=diverge/estado ausente, 2=erro operacional.
-    local estado="${1:-}" xml mac_xpath dados status
-    local -a campos=()
+    local estado="${1:-}" xml status
     REDE_XML_ERRO=""
     derivar_parametros_nat || return 1
     consultar_estado_rede_libvirt "$REDE_LIBVIRT" \
@@ -527,39 +584,28 @@ rede_nat_xml_confere() {
             ;;
         *) return 1 ;;
     esac
-    mac_xpath="/network/ip/dhcp/host[translate(@mac,'ABCDEF','abcdef')='${VM_NIC_MAC,,}']"
-    if ! dados="$(xmlstarlet sel -t \
-        -v 'string(/network/description)' -n \
-        -v 'string(/network/forward/@mode)' -n \
-        -v 'string(/network/forward/@dev)' -n \
-        -v 'string(/network/bridge/@name)' -n \
-        -v 'string(/network/ip/@address)' -n \
-        -v 'string(/network/ip/@netmask)' -n \
-        -v 'string(/network/ip/dhcp/range/@start)' -n \
-        -v 'string(/network/ip/dhcp/range/@end)' -n \
-        -v "count($mac_xpath)" -n \
-        -v "string($mac_xpath/@ip)" -n \
-        -v "count(/network/ip/dhcp/host[@ip='$NAT_VM_IP'])" \
-        <<< "$xml")"; then
+    if ! inspecionar_rede_xml "$xml" NATX_ \
+            marker "$REDE_MARCADOR" nic_mac "${VM_NIC_MAC,,}" vm_ip "$NAT_VM_IP"; then
         REDE_XML_ERRO="Falha ao analisar o XML $estado da rede '$REDE_LIBVIRT'."
         return 2
     fi
-    mapfile -t campos <<< "$dados"
-    if [ "${#campos[@]}" -ne 11 ]; then
-        REDE_XML_ERRO="Análise incompleta do XML $estado da rede '$REDE_LIBVIRT'."
-        return 2
-    fi
-    [ "${campos[0]}" = "$REDE_MARCADOR" ] \
-        && [ "${campos[1]}" = "nat" ] \
-        && [ "${campos[2]}" = "$INTERFACE_FISICA" ] \
-        && [ "${campos[3]}" = "$REDE_BRIDGE_LIBVIRT" ] \
-        && [ "${campos[4]}" = "$NAT_GATEWAY" ] \
-        && [ "${campos[5]}" = "255.255.255.0" ] \
-        && [ "${campos[6]}" = "$NAT_DHCP_INICIO" ] \
-        && [ "${campos[7]}" = "$NAT_DHCP_FIM" ] \
-        && [ "${campos[8]}" = "1" ] \
-        && [ "${campos[9]}" = "$NAT_VM_IP" ] \
-        && [ "${campos[10]}" = "1" ]
+    # Um único bloco <ip> é o contrato desta etapa: zero ou vários significam
+    # configuração fora do modelo gerenciado e devem divergir, não ser aceitos
+    # pela primeira entrada.
+    [ "$NATX_MARKER_MATCH" = 1 ] \
+        && [ "$NATX_FORWARD_COUNT" = 1 ] \
+        && [ "$NATX_FORWARD_MODE" = "nat" ] \
+        && [ "$NATX_FORWARD_DEV" = "$INTERFACE_FISICA" ] \
+        && [ "$NATX_BRIDGE_NAME" = "$REDE_BRIDGE_LIBVIRT" ] \
+        && [ "$NATX_IP_COUNT" = 1 ] \
+        && [ "$NATX_IP_0_ADDRESS" = "$NAT_GATEWAY" ] \
+        && [ "$NATX_IP_0_NETMASK" = "255.255.255.0" ] \
+        && [ "$NATX_DHCP_RANGE_COUNT" = 1 ] \
+        && [ "$NATX_DHCP_RANGE_START" = "$NAT_DHCP_INICIO" ] \
+        && [ "$NATX_DHCP_RANGE_END" = "$NAT_DHCP_FIM" ] \
+        && [ "$NATX_DHCP_MAC_COUNT" = 1 ] \
+        && [ "$NATX_DHCP_MAC_IP" = "$NAT_VM_IP" ] \
+        && [ "$NATX_DHCP_IP_COUNT" = 1 ]
 }
 
 verificar() {
@@ -568,8 +614,8 @@ verificar() {
         v_falta "$REDE_CONFIG_ERRO"
         v_fim
     fi
-    command -v xmlstarlet >/dev/null 2>&1 \
-        || { v_falta "xmlstarlet ausente (etapa 12)."; v_fim; }
+    python_core_disponivel \
+        || { v_indeterminado "Core Python indisponível para analisar XML: ${PYTHON_CORE_ERRO:-sem diagnóstico}."; v_fim; }
     if [ -z "${VM_NAME:-}" ] || ! nome_vm_valido "$VM_NAME"; then
         v_falta "VM_NAME ausente ou inválido."
         v_fim
@@ -702,9 +748,13 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation network.configure || exit 1
 exigir_nao_root
 exigir_sudo
-exigir_comando virsh xmlstarlet ip awk
+exigir_comando virsh ip awk virt-xml-validate
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
+
 exigir_conf VM_NAME REDE_MODO INTERFACE_FISICA
 exigir_config_rede
 nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros."
@@ -745,15 +795,16 @@ salvar_conf_transacao REDE_LIBVIRT "$REDE_LIBVIRT"
 salvar_conf_transacao REDE_BRIDGE_LIBVIRT "$REDE_BRIDGE_LIBVIRT"
 
 garantir_vm_nic_mac() {
-    local arquivo xpath quantidade linha mac tipo fonte rede idx recomendada
-    arquivo="$TMP_DIR/vm-atual.xml"
-    $VIRSH dumpxml --inactive "$VM_NAME" > "$arquivo"
+    local conteudo total indice escolhido mac tipo rede fonte idx recomendada
+    local nome_mac nome_tipo nome_rede nome_fonte
+    conteudo="$($VIRSH dumpxml --inactive "$VM_NAME")" \
+        || falhar "Não foi possível capturar o XML inativo da VM."
     if [ -n "${VM_NIC_MAC:-}" ]; then
         mac_valido "$VM_NIC_MAC" || falhar "VM_NIC_MAC inválido: $VM_NIC_MAC"
         VM_NIC_MAC="${VM_NIC_MAC,,}"
-        xpath="$(xpath_nic)"
-        quantidade="$(xmlstarlet sel -t -v "count($xpath)" "$arquivo")"
-        [ "$quantidade" = "1" ] \
+        inspecionar_nic_dominio "$conteudo" GARNIC_ nic_mac "$VM_NIC_MAC" \
+            || falhar "Não foi possível analisar as NICs do XML da VM."
+        [ "$GARNIC_MAC_COUNT" = "1" ] \
             || falhar "VM_NIC_MAC=$VM_NIC_MAC não identifica exatamente uma NIC no XML da VM."
         salvar_conf_transacao VM_NIC_MAC "$VM_NIC_MAC"
         return 0
@@ -761,55 +812,62 @@ garantir_vm_nic_mac() {
 
     # Migração segura de configurações antigas: consulta e conta TODAS as NICs.
     # Só há escolha automática quando o domínio possui uma única interface.
-    mapfile -t NICS < <(xmlstarlet sel -t -m "/domain/devices/interface" \
-        -v "mac/@address" -o '|' -v "@type" -o '|' \
-        -v "source/@network" -o '|' \
-        -v "concat(source/@network,source/@bridge,source/@dev)" -n "$arquivo")
-    [ "${#NICS[@]}" -gt 0 ] || falhar "A VM não possui NIC para configurar."
-    if [ "${#NICS[@]}" -eq 1 ]; then
-        linha="${NICS[0]}"
+    inspecionar_nic_dominio "$conteudo" GARNIC_ \
+        || falhar "Não foi possível analisar as NICs do XML da VM."
+    total="$GARNIC_NIC_COUNT"
+    [ "$total" -gt 0 ] || falhar "A VM não possui NIC para configurar."
+    if [ "$total" -eq 1 ]; then
+        escolhido=0
     else
         DESCRICOES_NIC=()
-        for linha in "${NICS[@]}"; do
-            IFS='|' read -r mac tipo rede fonte <<< "$linha"
+        for (( indice = 0; indice < total; indice++ )); do
+            nome_mac="GARNIC_NIC_${indice}_MAC"
+            nome_tipo="GARNIC_NIC_${indice}_TYPE"
+            nome_rede="GARNIC_NIC_${indice}_NETWORK"
+            nome_fonte="GARNIC_NIC_${indice}_SOURCE"
+            mac="${!nome_mac}"
+            tipo="${!nome_tipo}"
+            rede="${!nome_rede}"
+            fonte="${!nome_fonte}"
             recomendada=""
             [ "$rede" = "default" ] && recomendada="; RECOMENDADA (network=default)"
             DESCRICOES_NIC+=("MAC=$mac; tipo=$tipo; fonte=${fonte:-sem fonte}$recomendada")
         done
         aviso "Configuração antiga sem VM_NIC_MAC e com várias NICs: escolha entre todas as interfaces abaixo."
         idx="$(escolher_da_lista 'NIC a gerenciar (número)' nao "${DESCRICOES_NIC[@]}")"
-        linha="${NICS[$((idx - 1))]}"
+        escolhido=$((idx - 1))
     fi
-    IFS='|' read -r mac _ _ _ <<< "$linha"
+    nome_mac="GARNIC_NIC_${escolhido}_MAC"
+    mac="${!nome_mac}"
     mac_valido "$mac" || falhar "A NIC escolhida não possui MAC válido: '$mac'."
     salvar_conf_transacao VM_NIC_MAC "${mac,,}"
     ok "Configuração antiga migrada: VM_NIC_MAC=$VM_NIC_MAC."
 }
 
 trocar_fonte_nic() {
-    local tipo="$1" atributo="$2" valor="$3" xpath xml
-    xpath="$(xpath_nic)"
-    xml="$TMP_DIR/vm-rede-${tipo}.xml"
-    $VIRSH dumpxml --inactive "$VM_NAME" > "$xml"
-    [ "$(xmlstarlet sel -t -v "count($xpath)" "$xml")" = "1" ] \
+    local tipo="$1" atributo="$2" valor="$3" origem candidato conteudo
+    origem="$TMP_DIR/vm-rede-${tipo}-origem.xml"
+    candidato="$TMP_DIR/vm-rede-${tipo}.xml"
+    $VIRSH dumpxml --inactive "$VM_NAME" > "$origem" \
+        || falhar "Não foi possível capturar o XML da VM antes de trocar a fonte da NIC."
+    conteudo="$(<"$origem")"
+    inspecionar_nic_dominio "$conteudo" TROCA_ nic_mac "${VM_NIC_MAC,,}" \
+        || falhar "Não foi possível analisar as NICs antes da edição."
+    [ "$TROCA_MAC_COUNT" = "1" ] \
         || falhar "O MAC $VM_NIC_MAC não identifica exatamente uma NIC antes da edição."
 
+    # O candidato é gerado pelo core (que recusa cardinalidade diferente de um e
+    # exige o MAC preservado) e validado pelo schema antes do define.
+    xml_candidato_fonte_nic "$origem" "$candidato" \
+        "${VM_NIC_MAC,,}" "$tipo" "$atributo" "$valor" \
+        || falhar "Candidato da NIC recusado: $XML_CANDIDATO_ERRO"
+    virt-xml-validate "$candidato" domain >/dev/null \
+        || falhar "O schema libvirt recusou o candidato da NIC; nada foi definido."
     xml_backup "$VM_NAME"
-    xmlstarlet ed -L \
-        -d "$xpath/@type" \
-        -d "$xpath/source" \
-        "$xml"
-    xmlstarlet ed -L \
-        -i "$xpath[not(@type)]" -t attr -n type -v "$tipo" \
-        -s "$xpath" -t elem -n source -v '' \
-        "$xml"
-    xmlstarlet ed -L \
-        -i "$xpath/source[not(@$atributo)]" -t attr -n "$atributo" -v "$valor" \
-        "$xml"
-    [ "$(xmlstarlet sel -t -v "count($xpath[mac/@address])" "$xml")" = "1" ] \
-        || falhar "A edição da NIC não preservou o MAC; XML não aplicado."
     registrar_mutacao vm
-    $VIRSH define "$xml" >/dev/null
+    $VIRSH define "$candidato" >/dev/null
+    nic_vm_confere_fonte "$tipo" "$atributo" "$valor" \
+        || falhar "A fonte da NIC não foi comprovada após o define; revise $XML_BACKUP_PATH."
     ok "Fonte da NIC $VM_NIC_MAC alterada para $tipo/$atributo=$valor; MAC preservado."
 }
 
@@ -846,7 +904,9 @@ bridge_atual_rede_gerenciada() {
     else
         xml="$REDE_XML_ATUAL"
     fi
-    if ! bridge="$(xmlstarlet sel -t -v 'string(/network/bridge/@name)' <<< "$xml")"; then
+    if inspecionar_rede_xml "$xml" BRATU_ marker "$REDE_MARCADOR"; then
+        bridge="$BRATU_BRIDGE_NAME"
+    else
         ESTADO_REDE_ERRO="Falha ao analisar a bridge atual da rede gerenciada '$REDE_LIBVIRT'."
         return 2
     fi
@@ -869,10 +929,11 @@ listar_consumidores_rede_gerenciada() {
         [ "$dominio" = "$VM_NAME" ] && continue
         xml="$($VIRSH dumpxml --inactive "$dominio")" \
             || falhar "Não foi possível inspecionar o XML inativo da VM '$dominio'; migração recusada."
-        quantidade="$(xmlstarlet sel -t -v \
-            "count(/domain/devices/interface[source/@network='$REDE_LIBVIRT' or source/@bridge='$bridge_atual' or source/@bridge='$REDE_BRIDGE_LIBVIRT'])" \
-            <<< "$xml")" \
+        inspecionar_nic_dominio "$xml" CONSU_ \
+            network_name "$REDE_LIBVIRT" \
+            bridge_names "$(printf '%s\n%s' "$bridge_atual" "$REDE_BRIDGE_LIBVIRT")" \
             || falhar "Não foi possível analisar as interfaces da VM '$dominio'; migração recusada."
+        quantidade="$CONSU_CONSUMER_COUNT"
         [[ "$quantidade" =~ ^[0-9]+$ ]] \
             || falhar "Contagem de interfaces inválida ao inspecionar a VM '$dominio'; migração recusada."
         [ "$quantidade" = "0" ] || CONSUMIDORES_REDE+=("$dominio")
@@ -1063,7 +1124,7 @@ inteiro_para_ipv4_rede() {
 }
 
 preparar_excecoes_rotas_rede_atual() {
-    local xml dados descricao endereco prefixo netmask inicio fim intervalo status
+    local xml endereco prefixo inicio fim intervalo status
     TEM_EXCECOES_ROTA_REDE_ATUAL=0
     ROTA_REDE_ATUAL_BRIDGE=""
     ROTA_REDE_ATUAL_CIDR=""
@@ -1079,26 +1140,22 @@ preparar_excecoes_rotas_rede_atual() {
         [ "$status" -eq 1 ] && return 1
         return 2
     fi
-    if ! dados="$(xmlstarlet sel -t \
-        -v 'string(/network/description)' -o '|' \
-        -v 'string(/network/bridge/@name)' -o '|' \
-        -v 'string(/network/ip[1]/@address)' -o '|' \
-        -v 'string(/network/ip[1]/@prefix)' -o '|' \
-        -v 'string(/network/ip[1]/@netmask)' <<< "$xml")"; then
+    if ! inspecionar_rede_xml "$xml" ROTAX_ marker "$REDE_MARCADOR"; then
         ESTADO_REDE_ERRO="Falha ao analisar o XML ativo da rede atual '$REDE_LIBVIRT'."
         return 2
     fi
-    IFS='|' read -r descricao ROTA_REDE_ATUAL_BRIDGE endereco prefixo netmask <<< "$dados"
-    [ "$descricao" = "$REDE_MARCADOR" ] || return 1
+    [ "$ROTAX_MARKER_MATCH" = 1 ] || return 1
+    # Exatamente um bloco <ip> é o contrato: várias entradas exigem revisão.
+    if [ "$ROTAX_IP_COUNT" != 1 ]; then
+        ESTADO_REDE_ERRO="A rede '$REDE_LIBVIRT' declara $ROTAX_IP_COUNT blocos <ip>; esperado 1."
+        return 2
+    fi
+    ROTA_REDE_ATUAL_BRIDGE="$ROTAX_BRIDGE_NAME"
+    endereco="$ROTAX_IP_0_ADDRESS"
+    prefixo="$ROTAX_IP_0_PREFIX"
     if ! nome_interface_valido "$ROTA_REDE_ATUAL_BRIDGE" || ! ipv4_valido "$endereco"; then
         ESTADO_REDE_ERRO="XML ativo inválido ao preparar as exceções de rota de '$REDE_LIBVIRT'."
         return 2
-    fi
-    if [ -z "$prefixo" ]; then
-        if ! prefixo="$(netmask_para_prefixo "$netmask")"; then
-            ESTADO_REDE_ERRO="Netmask inválida no XML ativo da rede '$REDE_LIBVIRT'."
-            return 2
-        fi
     fi
     if ! intervalo="$(cidr_intervalo "$endereco/$prefixo")"; then
         ESTADO_REDE_ERRO="Prefixo IPv4 inválido no XML ativo da rede '$REDE_LIBVIRT'."
@@ -1133,8 +1190,8 @@ rota_kernel_exata_da_rede_atual() {
 }
 
 detectar_colisao_subrede() {
-    local candidata="$1" rotas linha destino dev i token tipo classe rede estado xml entradas entrada
-    local endereco prefixo netmask outra status
+    local candidata="$1" rotas linha destino dev i token tipo classe rede estado xml
+    local status
     local -a campos_rota=() redes=() estados_xml=()
     COLISAO_DESC=""
     DETECCAO_SUBREDE="ERRO"
@@ -1217,38 +1274,21 @@ detectar_colisao_subrede() {
                 COLISAO_DESC="${ESTADO_REDE_ERRO:-Falha ao capturar o XML $estado da rede '$rede' (status $status).}"
                 return 0
             fi
-            if ! entradas="$(xmlstarlet sel -t -m '/network/ip[@address]' \
-                -v '@address' -o '|' -v '@prefix' -o '|' -v '@netmask' -n <<< "$xml")"; then
+            # A sobreposição das redes libvirt é decidida pelo core, que usa
+            # `ipaddress` e já recusa endereço/prefixo/netmask inválidos. O XML
+            # da rede-alvo continua sendo validado nos dois estados; apenas a
+            # decisão de colisão a ignora, porque a sub-rede dela é justamente a
+            # candidata usada para atualizá-la.
+            if ! inspecionar_colisao_rede "$xml" "$candidata"; then
                 COLISAO_DESC="falha ao analisar o XML $estado da rede libvirt '$rede'"
                 return 0
             fi
-            while IFS= read -r entrada; do
-                [ -n "$entrada" ] || continue
-                IFS='|' read -r endereco prefixo netmask <<< "$entrada"
-                if ! ipv4_valido "$endereco"; then
-                    COLISAO_DESC="endereço IPv4 inválido no XML $estado da rede libvirt '$rede'"
-                    return 0
-                fi
-                if [ -z "$prefixo" ]; then
-                    if ! prefixo="$(netmask_para_prefixo "$netmask")"; then
-                        COLISAO_DESC="netmask inválida no XML $estado da rede libvirt '$rede'"
-                        return 0
-                    fi
-                fi
-                outra="$endereco/$prefixo"
-                if ! cidr_intervalo "$outra" >/dev/null 2>&1; then
-                    COLISAO_DESC="prefixo IPv4 inválido no XML $estado da rede libvirt '$rede'"
-                    return 0
-                fi
-                # A rede-alvo atual é validada nos dois estados, mas sua própria
-                # sub-rede não colide com a candidata usada para atualizá-la.
-                [ "$rede" = "$REDE_LIBVIRT" ] && continue
-                if cidrs_sobrepoem "$candidata" "$outra"; then
-                    COLISAO_DESC="rede libvirt '$rede'/$estado ($outra)"
-                    DETECCAO_SUBREDE="COLISAO"
-                    return 0
-                fi
-            done <<< "$entradas"
+            [ "$rede" = "$REDE_LIBVIRT" ] && continue
+            if [ "$COLX_OVERLAP_COUNT" != 0 ]; then
+                COLISAO_DESC="rede libvirt '$rede'/$estado ($COLX_OVERLAP_CIDR)"
+                DETECCAO_SUBREDE="COLISAO"
+                return 0
+            fi
         done
     done
     DETECCAO_SUBREDE="LIVRE"
@@ -1327,8 +1367,9 @@ validar_bridge_libvirt_disponivel() {
             capturar_xml_estado_rede "$rede" "$estado" \
                 || falhar "$ESTADO_REDE_ERRO Não foi possível capturar o XML $estado de '$rede'."
             xml="$ESTADO_REDE_XML"
-            bridge="$(xmlstarlet sel -t -v 'string(/network/bridge/@name)' <<< "$xml")" \
+            inspecionar_rede_xml "$xml" VBRID_ \
                 || falhar "Não foi possível analisar a bridge no XML $estado da rede '$rede'."
+            bridge="$VBRID_BRIDGE_NAME"
             [ -n "$bridge" ] || continue
             nome_interface_valido "$bridge" \
                 || falhar "A rede libvirt '$rede' possui bridge inválida no XML $estado."
@@ -1349,10 +1390,11 @@ rede_nat_usada_por_outra_vm_ativa() {
         [ "$dominio" = "$VM_NAME" ] && continue
         xml="$($VIRSH dumpxml "$dominio")" \
             || falhar "Não foi possível inspecionar o XML ativo da VM '$dominio'; atualização NAT recusada."
-        quantidade="$(xmlstarlet sel -t -v \
-            "count(/domain/devices/interface[source/@network='$REDE_LIBVIRT' or source/@bridge='$bridge_atual' or source/@bridge='$REDE_BRIDGE_LIBVIRT'])" \
-            <<< "$xml")" \
+        inspecionar_nic_dominio "$xml" ATIVA_ \
+            network_name "$REDE_LIBVIRT" \
+            bridge_names "$(printf '%s\n%s' "$bridge_atual" "$REDE_BRIDGE_LIBVIRT")" \
             || falhar "Não foi possível analisar as interfaces ativas da VM '$dominio'; atualização NAT recusada."
+        quantidade="$ATIVA_CONSUMER_COUNT"
         [[ "$quantidade" =~ ^[0-9]+$ ]] \
             || falhar "Contagem de interfaces inválida para a VM ativa '$dominio'; atualização NAT recusada."
         [ "$quantidade" = "0" ] || return 0
@@ -1391,12 +1433,14 @@ configurar_nat() {
         else
             xml_bridge_atual="$xml_anterior"
         fi
-        bridge_atual="$(xmlstarlet sel -t -v 'string(/network/bridge/@name)' <<< "$xml_bridge_atual")" \
+        inspecionar_rede_xml "$xml_bridge_atual" NATBR_ \
             || falhar "Não foi possível analisar a bridge atual capturada de '$REDE_LIBVIRT'."
+        bridge_atual="$NATBR_BRIDGE_NAME"
         nome_interface_valido "$bridge_atual" \
             || falhar "A rede existente '$REDE_LIBVIRT' não possui uma bridge atual válida."
-        uuid="$(xmlstarlet sel -t -v 'string(/network/uuid)' <<< "$xml_anterior")" \
+        inspecionar_rede_xml "$xml_anterior" NATANT_ \
             || falhar "Não foi possível analisar o UUID da rede existente '$REDE_LIBVIRT'."
+        uuid="$NATANT_UUID"
         if [ -n "$uuid" ]; then
             [[ "$uuid" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] \
                 || falhar "UUID inválido na rede libvirt existente '$REDE_LIBVIRT'."

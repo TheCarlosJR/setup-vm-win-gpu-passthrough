@@ -295,6 +295,8 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation airlock.configure || exit 1
+
 instalar_chave() {
     local arquivo_chave="/etc/ssh/authorized_keys/$TRANSFER_USER" temporario fingerprint backup
     titulo "Chave pública do Windows -> /etc/ssh/authorized_keys/$TRANSFER_USER"
