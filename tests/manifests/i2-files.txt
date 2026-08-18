@@ -1,0 +1,13 @@
+lib/python-core.sh
+libexec/passthrough_core/__init__.py
+libexec/passthrough_core/cli.py
+libexec/passthrough_core/errors.py
+libexec/passthrough_core/protocol.py
+libexec/passthrough_core_cli.py
+tests/manifests/i2-files.txt
+tests/python/run_tests.py
+tests/python/test_cli.py
+tests/python/test_errors.py
+tests/python/test_isolation.py
+tests/python/test_protocol.py
+tests/test-python-core.sh
