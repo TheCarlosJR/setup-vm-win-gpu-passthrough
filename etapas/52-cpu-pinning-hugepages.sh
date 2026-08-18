@@ -13,6 +13,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 
 CHAVES_HUGEPAGES="default_hugepagesz hugepagesz hugepages"
 TOPOLOGIA_CPU=""
+TOPOLOGIA_FINGERPRINT=""
 HUGEPAGES_ERRO=""
 XML_ORIGINAL=""
 XML_CANDIDATO=""
@@ -24,77 +25,25 @@ param_hugepages() {
     printf 'default_hugepagesz=1G hugepagesz=1G hugepages=%s\n' "$HUGEPAGES_1G"
 }
 
+# Inspeção e comparação de XML vivem no core Python (seção 3.5). As três
+# funções abaixo são só adaptadores finos sobre a API pública da fachada, para
+# preservar os nomes já usados no restante desta etapa.
+
 xml_sem_hugepages() {
-    python3 - "$1" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-root = ET.parse(sys.argv[1]).getroot()
-if root.tag != 'domain':
-    raise SystemExit(2)
-for backing in [c for c in list(root) if c.tag == 'memoryBacking']:
-    if any(c.tag == 'hugepages' for c in list(backing)):
-        raise SystemExit(1)
-PY
+    # 0=não exige HugePages; 1=exige; 2=erro de análise.
+    xml_sem_hugepages_arquivo "$1"
 }
 
 xml_equivalente() {
-    python3 - "$1" "$2" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-def canon(element):
-    children = tuple(canon(child) for child in list(element) if isinstance(child.tag, str))
-    return (
-        element.tag,
-        tuple(sorted(element.attrib.items())),
-        (element.text or '').strip(),
-        children,
-    )
-try:
-    left = canon(ET.parse(sys.argv[1]).getroot())
-    right = canon(ET.parse(sys.argv[2]).getroot())
-except Exception:
-    raise SystemExit(2)
-raise SystemExit(0 if left == right else 1)
-PY
+    # Equivalência semântica total: usada para provar rollback do domínio.
+    xml_dominio_equivalente "$1" "$2" full
 }
 
 xml_ajustes_nao_gerenciados_iguais() {
-    python3 - "$1" "$2" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-def direct(parent, name):
-    return [child for child in list(parent) if child.tag == name]
-
-def canon(element, ignored_children=(), ignored_attrs=()):
-    children = tuple(
-        canon(child) for child in list(element)
-        if isinstance(child.tag, str) and child.tag not in ignored_children
-    )
-    attrs = tuple(sorted((k, v) for k, v in element.attrib.items() if k not in ignored_attrs))
-    return element.tag, attrs, (element.text or '').strip(), children
-
-def projection(path):
-    root = ET.parse(path).getroot()
-    result = []
-    for name, ignored_children, ignored_attrs in (
-        ('cputune', ('vcpupin', 'emulatorpin'), ()),
-        ('memoryBacking', ('hugepages',), ()),
-        ('cpu', ('topology',), ('mode', 'check', 'migratable')),
-    ):
-        nodes = direct(root, name)
-        if len(nodes) > 1:
-            raise ValueError(f'<{name}> duplicado')
-        result.append(None if not nodes else canon(nodes[0], ignored_children, ignored_attrs))
-    return tuple(result)
-
-try:
-    equal = projection(sys.argv[1]) == projection(sys.argv[2])
-except Exception:
-    raise SystemExit(2)
-raise SystemExit(0 if equal else 1)
-PY
+    # Prova que o libvirt não mexeu em cputune/memoryBacking/cpu fora do que
+    # esta etapa gerencia (vcpupin, emulatorpin, hugepages, topology e
+    # mode/check/migratable).
+    xml_dominio_equivalente "$1" "$2" cpu-unmanaged
 }
 
 hugepages_estado_exato() {
@@ -146,21 +95,30 @@ hugepages_estado_exato() {
 }
 
 validar_configuracao() {
-    local ram_max
-    inteiro_na_faixa "${VM_RAM_MB:-}" 1024 1048576 \
-        || { CPU_LAYOUT_ERRO="VM_RAM_MB inválido: '${VM_RAM_MB:-vazio}'."; return 1; }
-    inteiro_na_faixa "${HUGEPAGES_1G:-}" 1 1048576 \
-        || { CPU_LAYOUT_ERRO="HUGEPAGES_1G precisa ser um inteiro positivo."; return 1; }
-    [ $((10#$VM_RAM_MB % 1024)) -eq 0 ] \
-        || { CPU_LAYOUT_ERRO="VM_RAM_MB=$VM_RAM_MB não é múltiplo de 1024 MiB."; return 1; }
-    [ $((10#$HUGEPAGES_1G * 1024)) -eq $((10#$VM_RAM_MB)) ] \
-        || { CPU_LAYOUT_ERRO="HUGEPAGES_1G=$HUGEPAGES_1G diverge de VM_RAM_MB/1024; corrija conscientemente na etapa 02."; return 1; }
-    ram_max="$(ram_max_vm_mib)"
-    [ "$VM_RAM_MB" -le "$ram_max" ] \
-        || { CPU_LAYOUT_ERRO="VM_RAM_MB=$VM_RAM_MB excede o teto seguro atual de ${ram_max} MiB."; return 1; }
+    # A relação RAM/HugePages e a partição de CPU são decididas pelo core; o
+    # shell só sonda o host e publica o diagnóstico. O fingerprint da topologia
+    # fica guardado para a revalidação TOCTOU antes de cada mutação.
+    plano_memoria_vm "$(ram_total_mib)" "${VM_RAM_MB:-}" "${HUGEPAGES_1G:-}" \
+        || { CPU_LAYOUT_ERRO="$CPU_MEMORIA_ERRO"; return 1; }
     TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
         || { CPU_LAYOUT_ERRO="lscpu não forneceu a topologia parseável."; return 1; }
-    validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU"
+    validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU" \
+        || return 1
+    TOPOLOGIA_FINGERPRINT="$CPU_LAYOUT_FINGERPRINT"
+}
+
+exigir_topologia_inalterada() {
+    # Recusa aplicar um plano calculado sobre topologia obsoleta. Uma CPU
+    # colocada offline entre a validação e a mutação muda o significado de
+    # CPUS_VM/CPUS_HOST, e aplicar assim seria convergência parcial.
+    local topologia
+    [ -n "$TOPOLOGIA_FINGERPRINT" ] \
+        || falhar "Fingerprint da topologia ausente; a validação inicial não foi executada."
+    topologia="$(cpu_topologia_csv)" \
+        || falhar "lscpu deixou de fornecer a topologia antes da mutação; nada foi alterado."
+    cpu_topologia_fingerprint "$topologia" || falhar "$CPU_TOPOLOGIA_ERRO"
+    [ "$CPU_TOPOLOGIA_FINGERPRINT" = "$TOPOLOGIA_FINGERPRINT" ] \
+        || falhar "A topologia de CPU mudou desde a validação; nada foi alterado. Rode a etapa 02 e repita esta etapa."
 }
 
 validar_suporte_1g() {
@@ -245,6 +203,7 @@ finalizar_transacao() {
         rm -f -- "${rollback_dump:-}"
     fi
     rm -f -- "${XML_ORIGINAL:-}" "${XML_CANDIDATO:-}" "${XML_POS:-}"
+    python_core_temporarios_limpar
     encerrar_sudo_keepalive
     exit "$status"
 }
@@ -400,8 +359,12 @@ main() {
     carregar_conf
     case "${1:-}" in
         --verificar) verificar ;;
-        --desfazer) desfazer; return ;;
-        "") ;;
+        --desfazer)
+            guard_mutation cpu.tune || return 1
+            desfazer
+            return
+            ;;
+        "") guard_mutation cpu.tune || return 1 ;;
         *) falhar "Uso: $0 [--verificar|--desfazer]" ;;
     esac
 
@@ -442,6 +405,7 @@ main() {
         aviso "Reservar $HUGEPAGES_1G GiB retira essa RAM do host mesmo com a VM desligada."
         confirmar "Remover todas as ocorrências atuais de default_hugepagesz, hugepagesz e hugepages e gravar exatamente '$params' via $BOOTLOADER?" \
             || falhar "Cancelado sem alterações."
+        exigir_topologia_inalterada
         kernel_param_add "$params"
         kernel_parametros_persistentes_exatos "$params" \
             || falhar "A persistência pós-alteração não é exata: $KERNEL_PERSISTENCIA_ERRO"
@@ -460,6 +424,7 @@ main() {
         || falhar "Não é seguro definir o XML: $HUGEPAGES_ERRO"
 
     titulo "Fase 2/2: definir XML somente após comprovar as páginas"
+    exigir_topologia_inalterada
     aplicar_xml
     ok "Fase 2 concluída; o XML será usado no próximo start da VM, sem novo reboot do host."
     info "A etapa 52 é opcional e reversível com: bash etapas/52-cpu-pinning-hugepages.sh --desfazer"

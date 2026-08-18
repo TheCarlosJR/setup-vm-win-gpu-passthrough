@@ -286,9 +286,12 @@ GRUB
     gerar_cfg_fake
     cp -- "$GRUB_DEFAULT_ARQUIVO" "$TMPDIR_TESTE/grub-before-signal"
     : > "$SINALIZAR_MV"
-    if ( _grub_aplicar_cmdline "quiet hugepages=4" "hugepages=4" exato ); then
-        exit 1
-    fi
+    RC_SINAL=0
+    ( _grub_aplicar_cmdline "quiet hugepages=4" "hugepages=4" exato ) || RC_SINAL=$?
+    # I5: o código do sinal é contrato. Antes, a transação do GRUB colapsava
+    # 130/143 em 1 e a etapa acima dela não conseguia distinguir interrupção de
+    # falha comum; a campanha I0 da etapa 30 passou a exigir 130/143.
+    [ "$RC_SINAL" -eq 143 ] || exit 1
     cmp -s -- "$TMPDIR_TESTE/grub-before-signal" "$GRUB_DEFAULT_ARQUIVO" || exit 1
     _grub_cfg_parametros_exatos "hugepages=8"
 ) || falha "transação, recovery ou convergência do GRUB"
@@ -333,7 +336,10 @@ chmod +x "$FAKE_HELP_VIRSH"
     exigir_comando() { :; }
     exigir_conf() { :; }
     exigir_vm_desligada() { :; }
-    validar_configuracao() { CPU_LAYOUT_ONLINE="0,2,4,6"; }
+    # I5: além do layout, a validação publica o fingerprint da topologia, que a
+    # revalidação TOCTOU exige antes de qualquer mutação de boot ou XML.
+    validar_configuracao() { CPU_LAYOUT_ONLINE="0,2,4,6"; TOPOLOGIA_FINGERPRINT=fixture; }
+    exigir_topologia_inalterada() { echo topologia >> "$ORDEM_FASES"; }
     validar_suporte_1g() { :; }
     preparar_xml_candidato() { echo candidate >> "$ORDEM_FASES"; }
     validar_isolamento_compativel() { :; }
@@ -348,8 +354,8 @@ chmod +x "$FAKE_HELP_VIRSH"
     VIRSH="$FAKE_HELP_VIRSH"
     main
 ) || falha "fluxo faseado com doubles"
-[ "$(paste -sd, "$ORDEM_FASES")" = "candidate,boot" ] \
-    || falha "boot foi chamado antes da validação do candidato"
+[ "$(paste -sd, "$ORDEM_FASES")" = "candidate,topologia,boot" ] \
+    || falha "boot foi chamado antes da validação do candidato ou sem revalidar a topologia"
 
 # Double de virsh: uma falha após define deve reinstalar e comprovar o XML
 # original. O fake só copia fixtures no diretório temporário.
@@ -396,7 +402,17 @@ grep -Fq '52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|' "$RAIZ/
     || falha "etapa 52 não está opcional"
 grep -Fq '53-cpu-isolation.sh|CPU isolation|opcional|' "$RAIZ/menu.sh" \
     || falha "etapa 53 não está opcional"
-grep -Fq 'LISTA_HOST="${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}"' "$RAIZ/etapas/02-detectar-config.sh" \
-    || falha "etapa 02 não reserva explicitamente o core da CPU 0"
+# I5: a reserva do core da CPU 0 deixou de ser uma linha do planner em Bash e
+# passou a ser propriedade do core Python. A verificação virou comportamental,
+# no lugar do antigo grep por 'LISTA_HOST="${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}"'.
+cpu_plano_pinning "$TOPO_SMT2_MULTISOCKET" 3 \
+    || falha "plano de pinning com 3 cores recusado: $CPU_PLANO_ERRO"
+[ "$CPUPLANO_BOOT_CORE_CPUS" = "0,4" ] \
+    || falha "core de housekeeping da CPU 0 não foi identificado"
+[ "$CPUPLANO_CPUS_HOST" = "0,4" ] \
+    || falha "o planner não reservou o core da CPU 0 para o host"
+case ",$CPUPLANO_CPUS_VM," in
+    *,0,*|*,4,*) falha "o planner entregou o core de housekeeping à VM" ;;
+esac
 
 echo "CPU_HUGEPAGES_TESTS_OK"

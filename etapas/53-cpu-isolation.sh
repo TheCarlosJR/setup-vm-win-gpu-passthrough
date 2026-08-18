@@ -13,6 +13,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 CHAVES_ISOLAMENTO="isolcpus nohz_full rcu_nocbs"
 ISOLAMENTO_ERRO=""
 TOPOLOGIA_CPU=""
+TOPOLOGIA_FINGERPRINT=""
 
 param_isolamento() {
     printf 'isolcpus=%s nohz_full=%s rcu_nocbs=%s\n' "$CPUS_VM" "$CPUS_VM" "$CPUS_VM"
@@ -75,7 +76,22 @@ isolamento_efetivo_exato() {
 validar_layout_configurado() {
     TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
         || { CPU_LAYOUT_ERRO="lscpu não forneceu a topologia parseável."; return 1; }
-    validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU"
+    validar_layout_cpu "$CPUS_VM" "$CPUS_HOST" "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$TOPOLOGIA_CPU" \
+        || return 1
+    TOPOLOGIA_FINGERPRINT="$CPU_LAYOUT_FINGERPRINT"
+}
+
+exigir_topologia_inalterada() {
+    # Isolar CPUs a partir de um plano calculado sobre topologia obsoleta
+    # retiraria do host CPUs que ele passou a precisar. Conflito bloqueia.
+    local topologia
+    [ -n "$TOPOLOGIA_FINGERPRINT" ] \
+        || falhar "Fingerprint da topologia ausente; a validação inicial não foi executada."
+    topologia="$(cpu_topologia_csv)" \
+        || falhar "lscpu deixou de fornecer a topologia antes da mutação; nada foi alterado."
+    cpu_topologia_fingerprint "$topologia" || falhar "$CPU_TOPOLOGIA_ERRO"
+    [ "$CPU_TOPOLOGIA_FINGERPRINT" = "$TOPOLOGIA_FINGERPRINT" ] \
+        || falhar "A topologia de CPU mudou desde a validação; nada foi alterado. Rode a etapa 02 e repita esta etapa."
 }
 
 validar_pinning_vm() {
@@ -177,8 +193,12 @@ main() {
     carregar_conf
     case "${1:-}" in
         --verificar) verificar ;;
-        --desfazer) desfazer; return ;;
-        "") ;;
+        --desfazer)
+            guard_mutation cpu.tune || return 1
+            desfazer
+            return
+            ;;
+        "") guard_mutation cpu.tune || return 1 ;;
         *) falhar "Uso: $0 [--verificar|--desfazer]" ;;
     esac
 
@@ -207,6 +227,7 @@ main() {
         aviso "Persistência atual divergente/duplicada: ${KERNEL_PERSISTENCIA_ERRO:-estado não exato}."
         confirmar "Remover todas as ocorrências atuais de isolcpus, nohz_full e rcu_nocbs e gravar exatamente '$CPUS_VM' via $BOOTLOADER?" \
             || falhar "Cancelado sem alterações."
+        exigir_topologia_inalterada
         kernel_param_add "$params"
         kernel_parametros_persistentes_exatos "$params" \
             || falhar "A persistência pós-alteração não é exata: $KERNEL_PERSISTENCIA_ERRO"
