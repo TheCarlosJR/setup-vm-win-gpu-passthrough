@@ -51,6 +51,8 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation host.update || exit 1
+
 FWUPD_ULTIMO_ESTADO=""
 FWUPD_ULTIMO_RC=0
 fwupd_rodar() {

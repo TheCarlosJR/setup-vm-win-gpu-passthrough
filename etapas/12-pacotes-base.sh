@@ -3,7 +3,11 @@
 # etapas/12-pacotes-base.sh - Capítulo 9: Instalação dos Pacotes Base
 # ============================================================================
 # Utilitários de diagnóstico, cópia e administração usados pelas próximas
-# etapas. Inclui xmlstarlet (edição segura do XML da VM), rsync (backups) e
+# etapas. Inclui xmlstarlet, rsync (backups) e
+# I3: nenhuma etapa consome mais xmlstarlet operacionalmente (todo XML passa
+# pelo core Python). O pacote continua listado por decisão explícita do plano
+# (risco "Remoção de xmlstarlet"): pacote e documentação saem em I10, depois de
+# a busca por consumidores ficar vazia no gate arquitetural.
 # acl (modelo de permissões compartilhadas em /vm).
 # ============================================================================
 set -euo pipefail
@@ -25,6 +29,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation packages.base || exit 1
 exigir_nao_root
 
 titulo "Antes de continuar"
@@ -32,7 +37,7 @@ info "Finalidade: instalar utilitários de inventário, download, versionamento,
 info "Pré-requisitos: rede funcional, APT sem transações pendentes e usuário com sudo."
 info "Alterações: atualiza o índice APT e instala a lista abaixo, além das dependências resolvidas pelo APT."
 info "Pacotes/finalidades: pciutils, usbutils e dmidecode (inventário de hardware)."
-info "  curl e wget (downloads); git (versionamento); htop (monitoramento); xmlstarlet (XML da VM); rsync (backup); acl (herança segura em /vm)."
+info "  curl e wget (downloads); git (versionamento); htop (monitoramento); xmlstarlet (mantido até I10, sem consumidor operacional); rsync (backup); acl (herança segura em /vm)."
 info "O backup da VM depende de rsync; as etapas 13/21 dependem de setfacl/getfacl do pacote acl."
 aviso "Risco principal: interrupção ou conflito do APT pode deixar a instalação de pacotes incompleta."
 info "Reboot/retorno: não exige reboot; ao concluir, retorne ao menu e siga para a etapa 13."

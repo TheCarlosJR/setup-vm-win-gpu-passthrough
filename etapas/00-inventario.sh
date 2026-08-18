@@ -29,6 +29,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation inventory.write || exit 1
 exigir_nao_root
 exigir_sudo
 

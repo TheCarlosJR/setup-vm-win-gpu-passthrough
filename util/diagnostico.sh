@@ -10,6 +10,7 @@
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
+guard_mutation diagnostic.write || exit 1
 exigir_nao_root
 exigir_sudo
 

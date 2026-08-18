@@ -14,16 +14,6 @@ inicializar_perfil_virtualizacao() {
     [ "${#PACOTES[@]}" -gt 0 ]
 }
 
-ativar_unidade_systemd() {
-    local unidade="$1" acao="$2"
-    case "$acao" in
-        nenhuma) info "Unidade já ativa: $unidade" ;;
-        enable-now) sudo systemctl enable --now "$unidade" ;;
-        start) sudo systemctl start "$unidade" ;;
-        *) falhar "Ação systemd inválida para $unidade: $acao" ;;
-    esac
-}
-
 verificar() {
     local p ovmf_dir servico_rc
     if ! inicializar_perfil_virtualizacao; then
@@ -50,18 +40,18 @@ verificar() {
     done
     if ! command -v systemctl >/dev/null 2>&1; then
         v_indeterminado "systemctl indisponível para sondar o perfil libvirt."
-    elif plataforma_resolver_servico libvirt; then
-        if [ "$PLATAFORMA_UNIDADE_ACAO" = nenhuma ]; then
-            v_ok "Endpoint libvirt ativo: $PLATAFORMA_UNIDADE_RESOLVIDA."
+    elif libvirt_backend_resolver; then
+        if [ "$LIBVIRT_BACKEND_ACAO" = nenhuma ]; then
+            v_ok "Endpoint libvirt ativo: $LIBVIRT_BACKEND_UNIDADE (backend $LIBVIRT_BACKEND_SERVICO)."
         else
-            v_falta "Endpoint libvirt $PLATAFORMA_UNIDADE_RESOLVIDA está disponível, mas requer '$PLATAFORMA_UNIDADE_ACAO'."
+            v_falta "Endpoint libvirt $LIBVIRT_BACKEND_UNIDADE está disponível, mas requer '$LIBVIRT_BACKEND_ACAO'."
         fi
     else
         servico_rc=$?
         if [ "$servico_rc" -eq 1 ]; then
-            v_falta "$PLATAFORMA_ERRO"
+            v_falta "$LIBVIRT_BACKEND_ERRO"
         else
-            v_erro "$PLATAFORMA_ERRO"
+            v_erro "$LIBVIRT_BACKEND_ERRO"
         fi
     fi
     if command -v virsh >/dev/null 2>&1; then
@@ -80,6 +70,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation virtualization.manage || exit 1
 inicializar_perfil_virtualizacao || falhar "$PLATAFORMA_ERRO"
 [ "$PLATAFORMA_GERENCIADOR_PACOTES" = apt ] \
     || falhar "A etapa 20 requer o perfil APT de Ubuntu/Pop!_OS."
@@ -101,11 +92,11 @@ titulo "Capítulo 13: Pilha de virtualização"
 sudo apt update
 sudo apt install -y "${PACOTES[@]}"
 
-plataforma_resolver_servico libvirt \
-    || falhar "A instalação terminou, mas nenhum endpoint libvirt pôde ser resolvido: $PLATAFORMA_ERRO"
-SERVICO_LIBVIRT="$PLATAFORMA_SERVICO_RESOLVIDO"
-UNIDADE_LIBVIRT="$PLATAFORMA_UNIDADE_RESOLVIDA"
-ACAO_LIBVIRT="$PLATAFORMA_UNIDADE_ACAO"
+libvirt_backend_resolver \
+    || falhar "A instalação terminou, mas nenhum endpoint libvirt pôde ser resolvido: $LIBVIRT_BACKEND_ERRO"
+SERVICO_LIBVIRT="$LIBVIRT_BACKEND_SERVICO"
+UNIDADE_LIBVIRT="$LIBVIRT_BACKEND_UNIDADE"
+ACAO_LIBVIRT="$LIBVIRT_BACKEND_ACAO"
 info "Ativando o endpoint libvirt resolvido por estado/perfil: $UNIDADE_LIBVIRT ($ACAO_LIBVIRT)"
 ativar_unidade_systemd "$UNIDADE_LIBVIRT" "$ACAO_LIBVIRT"
 sudo systemctl status "$UNIDADE_LIBVIRT" --no-pager | head -n 5 || true

@@ -13,16 +13,6 @@ VM_DIR="$(caminho_sistema /vm)" || falhar "Não foi possível resolver /vm."
 QEMU_CONF_ARQUIVO="$(caminho_sistema /etc/libvirt/qemu.conf)" \
     || falhar "Não foi possível resolver qemu.conf."
 
-ativar_unidade_systemd() {
-    local unidade="$1" acao="$2"
-    case "$acao" in
-        nenhuma) info "Unidade já ativa: $unidade" ;;
-        enable-now) sudo systemctl enable --now "$unidade" ;;
-        start) sudo systemctl start "$unidade" ;;
-        *) falhar "Ação systemd inválida para $unidade: $acao" ;;
-    esac
-}
-
 VM_DIR_SELADO=0
 restaurar_selo_etapa21() {
     [ "$VM_DIR_SELADO" -eq 1 ] || return 0
@@ -117,6 +107,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation virtualization.manage || exit 1
 exigir_plataforma_suportada
 exigir_nao_root
 exigir_conf USUARIO_LINUX
@@ -161,11 +152,11 @@ configurar_modelo_diretorio_vm "$VM_DIR" "$VM_STORAGE_GROUP"
 validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP" \
     || falhar "Pós-condição de /vm não comprovada: $GRUPO_VM_ERRO"
 
-plataforma_resolver_servico libvirt \
-    || falhar "Endpoint libvirt não pôde ser sondado: $PLATAFORMA_ERRO"
-SERVICO_LIBVIRT="$PLATAFORMA_SERVICO_RESOLVIDO"
-UNIDADE_LIBVIRT="$PLATAFORMA_UNIDADE_RESOLVIDA"
-ativar_unidade_systemd "$UNIDADE_LIBVIRT" "$PLATAFORMA_UNIDADE_ACAO"
+libvirt_backend_resolver \
+    || falhar "Endpoint libvirt não pôde ser sondado: $LIBVIRT_BACKEND_ERRO"
+SERVICO_LIBVIRT="$LIBVIRT_BACKEND_SERVICO"
+UNIDADE_LIBVIRT="$LIBVIRT_BACKEND_UNIDADE"
+ativar_unidade_systemd "$UNIDADE_LIBVIRT" "$LIBVIRT_BACKEND_ACAO"
 if plataforma_resolver_servico virtlogd; then
     ativar_unidade_systemd "$PLATAFORMA_UNIDADE_RESOLVIDA" "$PLATAFORMA_UNIDADE_ACAO"
 else

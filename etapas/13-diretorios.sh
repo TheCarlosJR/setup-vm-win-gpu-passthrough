@@ -36,6 +36,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
+guard_mutation storage.prepare || exit 1
 exigir_nao_root
 exigir_conf USUARIO_LINUX
 exigir_usuario_linux_valido "$USUARIO_LINUX"
