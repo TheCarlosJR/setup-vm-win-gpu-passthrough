@@ -1,0 +1,12 @@
+libexec/passthrough_core/domain_xml.py
+libexec/passthrough_core/network_xml.py
+libexec/passthrough_core/qemu_image.py
+libexec/passthrough_core/xmlutil.py
+tests/manifests/i3-files.txt
+tests/python/fixtures_i3.py
+tests/python/test_cli_domain.py
+tests/python/test_domain_xml.py
+tests/python/test_network_xml.py
+tests/python/test_qemu_image.py
+tests/python/test_xmlutil.py
+tests/test-i3-domain-transactions.sh
