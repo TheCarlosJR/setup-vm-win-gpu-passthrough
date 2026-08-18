@@ -206,6 +206,30 @@ fi
 igual "$RC" 2 'qemu.conf não regular/ilegível deve ser erro de configuração'
 contem "$PLATAFORMA_ERRO" 'arquivo regular legível' \
     'qemu.conf não regular/ilegível sem diagnóstico'
+# qemu.conf regular fechado ao root (modo 0600 do pacote) é o caso normal do
+# Ubuntu/Pop!_OS: sem sudo a identidade é presumida, nunca diagnosticada como
+# link nem promovida a erro de configuração.
+if [ "$(id -u)" -ne 0 ]; then
+    BIN_QEMU_SEM_SUDO="$TMPDIR_TESTE/bin-qemu-sem-sudo"
+    mkdir -p "$BIN_QEMU_SEM_SUDO"
+    cp "$BIN_QEMU_NSS/getent" "$BIN_QEMU_SEM_SUDO/getent"
+    cat > "$BIN_QEMU_SEM_SUDO/sudo" <<'SCRIPT'
+#!/bin/bash
+exit 1
+SCRIPT
+    chmod +x "$BIN_QEMU_SEM_SUDO/sudo"
+    printf 'user = "qemu"\n' > "$TMPDIR_TESTE/qemu-restrito.conf"
+    chmod 000 "$TMPDIR_TESTE/qemu-restrito.conf"
+    PATH="$BIN_QEMU_SEM_SUDO:$PATH_ORIGINAL" \
+        plataforma_resolver_usuario_qemu "$TMPDIR_TESTE/qemu-restrito.conf" \
+        || falha "qemu.conf fechado ao root virou falha: $PLATAFORMA_ERRO"
+    igual "$PLATAFORMA_QEMU_ORIGEM" presumido \
+        'qemu.conf fechado ao root não foi marcado como presunção'
+    igual "$PLATAFORMA_ERRO" '' 'presunção de qemu.conf vazou diagnóstico de erro'
+    [ -n "$PLATAFORMA_USUARIO_QEMU" ] \
+        || falha 'presunção de qemu.conf não resolveu identidade alguma'
+    chmod 644 "$TMPDIR_TESTE/qemu-restrito.conf"
+fi
 BIN_QEMU_NSS_AUSENTE="$TMPDIR_TESTE/bin-qemu-nss-ausente"
 mkdir -p "$BIN_QEMU_NSS_AUSENTE"
 cat > "$BIN_QEMU_NSS_AUSENTE/getent" <<'SCRIPT'
@@ -633,6 +657,7 @@ case "$*" in
     '-un') echo alice ;;
     '-u alice') echo 1001 ;;
     '-g alice') echo 1001 ;;
+    '-nG') echo "${MOCK_ID_GRUPOS_SESSAO:-alice libvirt kvm vm-passthrough}" ;;
     '-nG alice') echo 'alice libvirt kvm vm-passthrough' ;;
     '-nG qemu') echo 'qemu vm-passthrough' ;;
     '-nG libvirt-qemu') echo 'libvirt-qemu vm-passthrough' ;;
@@ -1092,6 +1117,7 @@ rodar_entrypoint_ep() {
         ENTRYPOINT_LOG="$LOG_EP" \
         MOCK_SYSTEMD_MODE="${MOCK_SYSTEMD_MODE:-coexist-active}" \
         MOCK_VIRSH_RC="${MOCK_VIRSH_RC:-0}" MOCK_FWUPD_RC="${MOCK_FWUPD_RC:-2}" \
+        MOCK_ID_GRUPOS_SESSAO="${MOCK_ID_GRUPOS_SESSAO:-alice libvirt kvm vm-passthrough}" \
         /bin/bash "$PROJETO_EP/etapas/$etapa" "$@" > "$saida" 2>&1
 }
 
@@ -1202,6 +1228,20 @@ set -e
 igual "$RC_EP" 3 'URI libvirt falha não foi fatal em --verificar'
 contem "$(< "$ROOT_EP/etapa20-verificar-erro.out")" 'Pós-condição fatal' \
     'diagnóstico fatal da URI ausente no verificador 20'
+: > "$LOG_EP"
+MOCK_ID_GRUPOS_SESSAO='alice'
+export MOCK_ID_GRUPOS_SESSAO
+set +e
+rodar_entrypoint_ep 20-virtualizacao.sh '' "$ROOT_EP/etapa20-verificar-sessao.out" --verificar
+RC_EP=$?
+set -e
+igual "$RC_EP" 1 'sessão sem o grupo libvirt virou erro em vez de pendência'
+contem "$(< "$ROOT_EP/etapa20-verificar-sessao.out")" 'logout/login' \
+    'verificador 20 não orientou a sessão nova'
+if grep -Fq 'Pós-condição fatal' "$ROOT_EP/etapa20-verificar-sessao.out"; then
+    falha 'pendência de sessão foi anunciada como pós-condição fatal'
+fi
+unset MOCK_ID_GRUPOS_SESSAO
 : > "$LOG_EP"
 MOCK_SYSTEMD_MODE=socket
 set +e

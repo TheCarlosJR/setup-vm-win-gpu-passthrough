@@ -54,11 +54,14 @@ verificar() {
             v_erro "$LIBVIRT_BACKEND_ERRO"
         fi
     fi
+    # A ausência do virsh já foi contabilizada acima como pendência de pacote.
     if command -v virsh >/dev/null 2>&1; then
-        if virsh --connect qemu:///system list --all >/dev/null 2>&1; then
+        if libvirt_acesso_operador; then
             v_ok "URI libvirt qemu:///system operacional."
+        elif [ "$LIBVIRT_ACESSO_MOTIVO" = runtime ]; then
+            v_erro "Pós-condição fatal: virsh não conseguiu consultar qemu:///system. $LIBVIRT_ACESSO_ERRO"
         else
-            v_erro "Pós-condição fatal: virsh não conseguiu consultar qemu:///system."
+            v_falta "$LIBVIRT_ACESSO_ERRO"
         fi
     fi
     if compgen -G "$ovmf_dir/OVMF_CODE*.fd" >/dev/null; then

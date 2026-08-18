@@ -2404,6 +2404,59 @@ libvirt_backend_reiniciar() {
     return 0
 }
 
+# --- Acesso do operador a qemu:///system --------------------------------------
+# REQ-VERIFY-FAILCLOSED aplicado à conexão libvirt: falha de conexão não é
+# sinônimo de runtime quebrado. A concessão de grupo só entra na sessão depois
+# de logout/login, e quem concede é a etapa 21. Sem classificar a causa, uma
+# pendência conhecida e resolvível vira erro, e o operador perde a ação certa.
+
+LIBVIRT_ACESSO_ERRO=""
+LIBVIRT_ACESSO_MOTIVO=""
+
+lista_contem_token() {
+    local lista="$1" alvo="$2" item
+    [ -n "$alvo" ] || return 1
+    for item in $lista; do
+        [ "$item" = "$alvo" ] && return 0
+    done
+    return 1
+}
+
+libvirt_acesso_operador() {
+    # Prova o acesso desta sessão a qemu:///system e classifica a falha.
+    # Retornos: 0=acessível; 1=pendência conhecida (grupo ainda não concedido,
+    # ou concedido no NSS e ausente desta sessão); 2=falha real.
+    # LIBVIRT_ACESSO_MOTIVO: ok|virsh-ausente|grupo|sessao|runtime.
+    local grupo="${PLATAFORMA_LIBVIRT_GRUPO:-libvirt}" operador nss sessao
+    LIBVIRT_ACESSO_ERRO=""
+    LIBVIRT_ACESSO_MOTIVO=""
+    if ! command -v virsh >/dev/null 2>&1; then
+        LIBVIRT_ACESSO_MOTIVO=virsh-ausente
+        LIBVIRT_ACESSO_ERRO="virsh ausente: a pilha da etapa 20 ainda não está instalada."
+        return 2
+    fi
+    if virsh --connect qemu:///system list --all >/dev/null 2>&1; then
+        LIBVIRT_ACESSO_MOTIVO=ok
+        return 0
+    fi
+    operador="$(id -un 2>/dev/null || true)"
+    sessao="$(id -nG 2>/dev/null || true)"
+    nss="$(id -nG "$operador" 2>/dev/null || true)"
+    if lista_contem_token "$sessao" "$grupo"; then
+        LIBVIRT_ACESSO_MOTIVO=runtime
+        LIBVIRT_ACESSO_ERRO="A sessão já carrega o grupo '$grupo' e ainda assim qemu:///system não respondeu; o runtime libvirt está inválido."
+        return 2
+    fi
+    if lista_contem_token "$nss" "$grupo"; then
+        LIBVIRT_ACESSO_MOTIVO=sessao
+        LIBVIRT_ACESSO_ERRO="Acesso a qemu:///system pendente de sessão nova: o grupo '$grupo' já consta no NSS de '$operador', mas ainda não nesta sessão. Faça logout/login e verifique de novo."
+        return 1
+    fi
+    LIBVIRT_ACESSO_MOTIVO=grupo
+    LIBVIRT_ACESSO_ERRO="Acesso a qemu:///system pendente: '$operador' ainda não pertence ao grupo '$grupo'. Execute a etapa 21 e faça logout/login."
+    return 1
+}
+
 ativar_unidade_systemd() {
     # Aplica exatamente a ação autorizada pelo provider para a unidade dada.
     local unidade="$1" acao="$2"

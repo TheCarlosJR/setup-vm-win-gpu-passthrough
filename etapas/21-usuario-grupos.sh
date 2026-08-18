@@ -35,7 +35,7 @@ finalizar_etapa21() {
 }
 
 verificar() {
-    local usuario_ok=0 qemu_ok=0 grupos qemu_rc servico_rc
+    local usuario_ok=0 qemu_ok=0 grupos grupos_sessao grupo_alvo qemu_rc servico_rc
     if ! plataforma_carregar; then
         v_erro "$PLATAFORMA_ERRO"
         v_fim
@@ -55,7 +55,11 @@ verificar() {
     if plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO"; then
         QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
         qemu_ok=1
-        v_ok "Identidade QEMU resolvida por qemu.conf/perfil: $QEMU_USUARIO."
+        if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
+            v_ok "Identidade QEMU presumida sem privilégio: $QEMU_USUARIO (qemu.conf só é legível pelo root; a execução da etapa reconfirma com sudo)."
+        else
+            v_ok "Identidade QEMU resolvida por qemu.conf/perfil: $QEMU_USUARIO."
+        fi
     else
         qemu_rc=$?
         if [ "$qemu_rc" -eq 1 ]; then
@@ -67,12 +71,17 @@ verificar() {
     fi
     if [ "$usuario_ok" -eq 1 ]; then
         grupos="$(id -nG "$USUARIO_LINUX" 2>/dev/null || true)"
-        grep -qw "$PLATAFORMA_LIBVIRT_GRUPO" <<< "$grupos" \
-            && v_ok "Usuário no grupo $PLATAFORMA_LIBVIRT_GRUPO." \
-            || v_falta "Usuário fora do grupo $PLATAFORMA_LIBVIRT_GRUPO."
-        grep -qw "$PLATAFORMA_KVM_GRUPO" <<< "$grupos" \
-            && v_ok "Usuário no grupo $PLATAFORMA_KVM_GRUPO." \
-            || v_falta "Usuário fora do grupo $PLATAFORMA_KVM_GRUPO."
+        grupos_sessao="$(id -nG 2>/dev/null || true)"
+        for grupo_alvo in "$PLATAFORMA_LIBVIRT_GRUPO" "$PLATAFORMA_KVM_GRUPO"; do
+            if ! lista_contem_token "$grupos" "$grupo_alvo"; then
+                v_falta "Usuário fora do grupo $grupo_alvo."
+            elif [ "$USUARIO_DIFERE_OPERADOR" -eq 0 ] \
+                 && ! lista_contem_token "$grupos_sessao" "$grupo_alvo"; then
+                v_falta "Grupo $grupo_alvo concedido no NSS, mas ausente desta sessão: faça logout/login para ativá-lo."
+            else
+                v_ok "Usuário no grupo $grupo_alvo."
+            fi
+        done
     fi
     if [ "$usuario_ok" -eq 1 ] && [ "$qemu_ok" -eq 1 ] \
        && validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP"; then
@@ -96,12 +105,12 @@ verificar() {
             v_erro "$PLATAFORMA_ERRO"
         fi
     fi
-    if command -v virsh >/dev/null 2>&1; then
-        virsh --connect qemu:///system list --all >/dev/null 2>&1 \
-            && v_ok "Operador acessa qemu:///system sem sudo." \
-            || v_erro "Operador não conseguiu consultar qemu:///system; grupo/sessão ou runtime libvirt está inválido."
+    if libvirt_acesso_operador; then
+        v_ok "Operador acessa qemu:///system sem sudo."
+    elif [ "$LIBVIRT_ACESSO_MOTIVO" = runtime ]; then
+        v_erro "$LIBVIRT_ACESSO_ERRO"
     else
-        v_falta "virsh ausente."
+        v_falta "$LIBVIRT_ACESSO_ERRO"
     fi
     v_fim
 }
@@ -129,6 +138,17 @@ aviso "Riscos: os grupos concedem controle sobre VMs/KVM; ACLs anteriores de /vm
 info "Retorno/reboot: não exige reboot, mas logout/login de toda a sessão é obrigatório antes da etapa 30/40."
 
 exigir_sudo
+
+if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
+    # A leitura sem privilégio apenas presumiu a identidade; com o ticket sudo
+    # em mãos, qemu.conf passa a ser a fonte autoritativa antes de mutar /vm.
+    QEMU_USUARIO_PRESUMIDO="$QEMU_USUARIO"
+    plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO" \
+        || falhar "$PLATAFORMA_ERRO"
+    QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
+    [ "$QEMU_USUARIO" = "$QEMU_USUARIO_PRESUMIDO" ] \
+        || aviso "qemu.conf define a identidade QEMU '$QEMU_USUARIO'; a presunção sem privilégio apontava '$QEMU_USUARIO_PRESUMIDO'."
+fi
 
 titulo "Capítulo 14: Usuário, grupos e serviços"
 
