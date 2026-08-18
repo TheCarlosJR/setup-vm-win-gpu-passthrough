@@ -26,6 +26,18 @@
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
+
+# REQ-CONF-ISO: a migração pré-parser roda ANTES de carregar_conf, e somente
+# nesta etapa, que é a única com prompt para decidir um caminho novo. Se a
+# configuração já for válida, é no-op exato. Em `--verificar` nada é migrado:
+# verificação é estritamente somente leitura, e uma ISO legada inválida aparece
+# como erro do parser, apontando esta etapa como o caminho de correção.
+if [ "${1:-}" != "--verificar" ]; then
+    conf_migrar_iso_legada \
+        || falhar "A configuração não pôde ser migrada; corrija ou restaure o backup informado."
+    conf_migrar_dispensas_depreciadas \
+        || falhar "As dispensas sem efeito não puderam ser removidas da configuração."
+fi
 carregar_conf
 
 verificar() {
@@ -85,15 +97,11 @@ verificar() {
         fi
     fi
     if [ "$memoria_completa" -eq 1 ]; then
-        ram_max="$(ram_max_vm_mib)"
-        if inteiro_na_faixa "$VM_RAM_MB" 1024 1048576 \
-           && inteiro_na_faixa "$HUGEPAGES_1G" 1 1048576 \
-           && [ $((10#$VM_RAM_MB % 1024)) -eq 0 ] \
-           && [ $((10#$HUGEPAGES_1G * 1024)) -eq $((10#$VM_RAM_MB)) ] \
-           && [ "$VM_RAM_MB" -le "$ram_max" ]; then
+        if plano_memoria_vm "$(ram_total_mib)" "$VM_RAM_MB" "$HUGEPAGES_1G"; then
+            ram_max="$CPUMEM_MAX_VM_MIB"
             v_ok "RAM e HUGEPAGES_1G são coerentes e respeitam o teto atual de ${ram_max} MiB."
         else
-            v_falta "VM_RAM_MB/HUGEPAGES_1G divergentes, fora do teto ou sem alinhamento de 1 GiB."
+            v_falta "VM_RAM_MB/HUGEPAGES_1G recusados: $CPU_MEMORIA_ERRO"
         fi
     fi
     if validar_config_rede; then
@@ -167,6 +175,8 @@ verificar() {
 MODO_EXECUCAO="$(modo_execucao_etapa02 "${1:-}")" \
     || falhar "Uso: $0 [--redetectar|--verificar]"
 [ "$MODO_EXECUCAO" = "verificar" ] && verificar
+
+guard_mutation config.manage || exit 1
 
 # Execução normal e --redetectar são deliberadamente equivalentes: não existe
 # retomada implícita de escolhas administradas por esta etapa.
@@ -253,7 +263,10 @@ ok "Conta validada: $USUARIO_LINUX (uid=$USUARIO_VALIDADO_UID gid=$USUARIO_VALID
 if ja_definido VM_NAME; then
     info "VM_NAME já definido: $VM_NAME"
 else
-    salvar_conf VM_NAME "$(perguntar 'Nome da VM no libvirt' 'win11')"
+    perguntar_validado 'Nome da VM no libvirt' 'win11' nome_vm_valido \
+        'Nome de VM inválido: use letras, números, ponto, hífen ou sublinhado, sem espaços, até 63 caracteres' \
+        || falhar "Cinco tentativas sem um nome de VM válido."
+    salvar_conf VM_NAME "$PERGUNTA_VALIDADA"
 fi
 
 # ----------------------------------------------------------------------------
@@ -568,6 +581,9 @@ fi
 # ----------------------------------------------------------------------------
 titulo "6/8 CPU: plano de pinning por socket/core"
 info "Esta seção apenas calcula e grava o plano; o pinning será aplicado pela etapa 52."
+# I5.3: o planner é o core Python. O shell continua sondando o host (lscpu),
+# mostrando o mapa, perguntando e confirmando; o cálculo determinístico do
+# recorte por core físico e a validação relacional têm uma implementação só.
 TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
     || falhar "lscpu não conseguiu fornecer CPU,CORE,SOCKET,NODE,ONLINE em formato parseável."
 [ -n "$TOPOLOGIA_CPU" ] || falhar "A topologia parseável de CPU está vazia."
@@ -589,68 +605,34 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
     LC_ALL=C lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE
     echo
 
-    # SOCKET faz parte da chave: IDs de CORE podem se repetir em hosts
-    # multissocket. Todos os siblings online de um core permanecem juntos.
-    declare -A NUCLEO_THREADS=()
-    while IFS=, read -r CPU CORE SOCKET NODE ONLINE; do
-        case "$ONLINE" in Y|yes|YES|1) ;; *) continue ;; esac
-        CHAVE_NUCLEO="$SOCKET:$CORE"
-        NUCLEO_THREADS[$CHAVE_NUCLEO]="${NUCLEO_THREADS[$CHAVE_NUCLEO]:+${NUCLEO_THREADS[$CHAVE_NUCLEO]},}$CPU"
-    done <<< "$TOPOLOGIA_CPU"
+    cpu_plano_pinning "$TOPOLOGIA_CPU" || falhar "$CPU_PLANO_ERRO"
+    TOPOLOGIA_FINGERPRINT="$CPUPLANO_FINGERPRINT"
+    info "Detectados $CPUPLANO_TOTAL_CORES cores físicos online, $CPUPLANO_THREADS_PER_CORE thread(s) por core."
+    info "Core de housekeeping da CPU 0: $CPUPLANO_BOOT_CORE [$CPUPLANO_BOOT_CORE_CPUS]."
+    aviso "Máximo permitido para a VM: $CPUPLANO_MAX_VM_CORES de $CPUPLANO_TOTAL_CORES cores físicos."
+    NUC_VM="$(perguntar_inteiro 'Cores físicos dedicados à VM' \
+        "$CPUPLANO_DEFAULT_VM_CORES" 1 "$CPUPLANO_MAX_VM_CORES")"
 
-    mapfile -t NUCLEOS < <(printf '%s\n' "${!NUCLEO_THREADS[@]}" \
-        | LC_ALL=C sort -t: -k1,1n -k2,2n)
-    TOTAL_NUCLEOS="${#NUCLEOS[@]}"
-    [ "$TOTAL_NUCLEOS" -ge 2 ] \
-        || falhar "Só encontrei $TOTAL_NUCLEOS core(s) físico(s) online; um precisa ficar integralmente com o host."
-    THREADS_POR_NUCLEO=""
-    CHAVE_CPU_BOOT=""
-    for CHAVE_NUCLEO in "${NUCLEOS[@]}"; do
-        QTD_THREADS="$(awk -F',' '{print NF}' <<< "${NUCLEO_THREADS[$CHAVE_NUCLEO]}")"
-        IFS=',' read -r -a THREADS_CORE <<< "${NUCLEO_THREADS[$CHAVE_NUCLEO]}"
-        for CPU_LOGICA in "${THREADS_CORE[@]}"; do
-            [ "$CPU_LOGICA" -ne 0 ] || CHAVE_CPU_BOOT="$CHAVE_NUCLEO"
-        done
-        if [ -z "$THREADS_POR_NUCLEO" ]; then
-            THREADS_POR_NUCLEO="$QTD_THREADS"
-        elif [ "$QTD_THREADS" -ne "$THREADS_POR_NUCLEO" ]; then
-            falhar "Topologia SMT heterogênea/offline: core $CHAVE_NUCLEO tem $QTD_THREADS thread(s), esperado $THREADS_POR_NUCLEO. Reative CPUs ou configure manualmente."
-        fi
-    done
-    [ -n "$CHAVE_CPU_BOOT" ] \
-        || falhar "A CPU lógica 0 não aparece online na topologia; não é seguro gerar um mapa pronto para nohz_full."
-    info "Detectados $TOTAL_NUCLEOS cores físicos online, $THREADS_POR_NUCLEO thread(s) por core."
-    info "Core de housekeeping da CPU 0: $CHAVE_CPU_BOOT [${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}]."
-
-    # Teto: o host mantém ao menos um core completo (dois quando há folga).
-    MAX_VM=$((TOTAL_NUCLEOS - 1))
-    [ "$TOTAL_NUCLEOS" -ge 6 ] && MAX_VM=$((TOTAL_NUCLEOS - 2))
-    PADRAO_VM="$MAX_VM"
-    aviso "Máximo permitido para a VM: $MAX_VM de $TOTAL_NUCLEOS cores físicos."
-    NUC_VM="$(perguntar_inteiro 'Cores físicos dedicados à VM' "$PADRAO_VM" 1 "$MAX_VM")"
-
-    LISTA_VM=""
-    LISTA_HOST="${NUCLEO_THREADS[$CHAVE_CPU_BOOT]}"
-    CORES_HOST=$((TOTAL_NUCLEOS - NUC_VM))
-    CORES_HOST_RESTANTES=$((CORES_HOST - 1))
-    IDX_HOST=0
-    for CHAVE_NUCLEO in "${NUCLEOS[@]}"; do
-        [ "$CHAVE_NUCLEO" != "$CHAVE_CPU_BOOT" ] || continue
-        if [ "$IDX_HOST" -lt "$CORES_HOST_RESTANTES" ]; then
-            LISTA_HOST="${LISTA_HOST:+${LISTA_HOST},}${NUCLEO_THREADS[$CHAVE_NUCLEO]}"
-            IDX_HOST=$((IDX_HOST + 1))
-        else
-            LISTA_VM="${LISTA_VM:+${LISTA_VM},}${NUCLEO_THREADS[$CHAVE_NUCLEO]}"
-        fi
-    done
-    VCPUS_TOTAL="$(expandir_lista_cpus "$LISTA_VM" | wc -l)"
-    validar_layout_cpu "$LISTA_VM" "$LISTA_HOST" "$VCPUS_TOTAL" "$NUC_VM" "$THREADS_POR_NUCLEO" "$TOPOLOGIA_CPU" \
-        || falhar "A proposta gerada falhou na validação interna: $CPU_LAYOUT_ERRO"
+    cpu_plano_pinning "$TOPOLOGIA_CPU" "$NUC_VM" || falhar "$CPU_PLANO_ERRO"
+    LISTA_VM="$CPUPLANO_CPUS_VM"
+    LISTA_HOST="$CPUPLANO_CPUS_HOST"
+    VCPUS_TOTAL="$CPUPLANO_VCPUS"
+    THREADS_POR_NUCLEO="$CPUPLANO_THREADS_PER_CORE"
+    TOTAL_NUCLEOS="$CPUPLANO_TOTAL_CORES"
 
     echo "Plano de pinning proposto por core físico completo:"
     echo "  VM   ($NUC_VM cores, $VCPUS_TOTAL vCPUs): $LISTA_VM"
     echo "  HOST ($((TOTAL_NUCLEOS - NUC_VM)) cores): $LISTA_HOST"
     confirmar "Confirmar este plano de pinning?" || falhar "Cancelado sem alterar o plano de CPU."
+
+    # Revalidação antes de persistir: entre mostrar o mapa e confirmar, o
+    # operador pode ter colocado uma CPU offline em outro terminal. Persistir um
+    # plano calculado sobre topologia obsoleta é conflito, não detalhe.
+    TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
+        || falhar "lscpu deixou de fornecer a topologia antes de gravar o plano."
+    cpu_topologia_fingerprint "$TOPOLOGIA_CPU" || falhar "$CPU_TOPOLOGIA_ERRO"
+    [ "$CPU_TOPOLOGIA_FINGERPRINT" = "$TOPOLOGIA_FINGERPRINT" ] \
+        || falhar "A topologia de CPU mudou durante a confirmação; nada foi gravado. Execute a etapa 02 novamente."
 
     salvar_conf_lote \
         CPUS_VM "$LISTA_VM" \
@@ -821,7 +803,10 @@ ok "Rede selecionada: modo=$REDE_MODO, uplink=$INTERFACE_FISICA ($TIPO_UPLINK)."
 # Transferência de arquivos (airlock): local configurável
 WORKING_DISK="${WORKING_DISK_PATH:-}"
 if ! ja_definido TRANSFER_USER; then
-    salvar_conf TRANSFER_USER "$(perguntar 'Usuário de transferência do airlock' 'vmtransfer')"
+    perguntar_validado 'Usuário de transferência do airlock' 'vmtransfer' nome_usuario_valido \
+        'Nome de usuário inválido: use minúsculas, números, hífen ou sublinhado, iniciando por letra ou sublinhado, até 32 caracteres' \
+        || falhar "Cinco tentativas sem um usuário de transferência válido."
+    salvar_conf TRANSFER_USER "$PERGUNTA_VALIDADA"
 fi
 info "Airlock é o canal previsto e recomendado para troca de arquivos entre host e VM (Capítulo 24)."
 info "É uma zona de trânsito: nada permanente, fora do backup e montada sem execução."
@@ -836,22 +821,19 @@ else
         AIRLOCK_PADRAO="/var/lib/vm-passthrough/airlock"
         info "Sem workingDisk, o padrão do airlock usa armazenamento local: $AIRLOCK_PADRAO"
     fi
-    CAMINHO="$(perguntar 'Pasta de trânsito do airlock' "$AIRLOCK_PADRAO")"
-    caminho_absoluto_seguro "$CAMINHO" \
-        || falhar "AIRLOCK_DIR precisa ser um caminho absoluto seguro."
-    salvar_conf AIRLOCK_DIR "$CAMINHO"
+    perguntar_validado 'Pasta de trânsito do airlock' "$AIRLOCK_PADRAO" caminho_absoluto_seguro \
+        'Caminho inválido: informe um caminho absoluto sem componentes relativos, metacaracteres de shell ou quebras de linha' \
+        || falhar "Cinco tentativas sem uma pasta de trânsito válida."
+    salvar_conf AIRLOCK_DIR "$PERGUNTA_VALIDADA"
 fi
 
-# ISOs: opcionais aqui; obrigatórias somente na etapa 40
+# ISOs: opcionais aqui; obrigatórias somente na etapa 40. A política de
+# armazenamento é a mesma da etapa 40: filho direto de /vm, sem vírgula e sem
+# links. Um caminho fora dela é explicado e reperguntado, nunca derruba o fluxo.
 for PAR in "ISO_WINDOWS:ISO do Windows 11" "ISO_VIRTIO:ISO virtio-win"; do
     VAR="${PAR%%:*}"; DESC="${PAR#*:}"
     if ! ja_definido "$VAR"; then
-        CAMINHO="$(perguntar "Caminho local da $DESC (ENTER para informar depois, na etapa 40)" '')"
-        if [ -n "$CAMINHO" ] && [ ! -f "$CAMINHO" ]; then
-            aviso "Arquivo não encontrado: $CAMINHO (ficará vazio; informe na etapa 40)."
-            CAMINHO=""
-        fi
-        salvar_conf "$VAR" "$CAMINHO"
+        perguntar_iso_opcional_conf "$VAR" "$DESC"
     fi
 done
 

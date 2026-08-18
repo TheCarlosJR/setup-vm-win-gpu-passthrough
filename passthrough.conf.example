@@ -25,9 +25,9 @@ VM_STORAGE_GROUP="vm-passthrough" # grupo dedicado compartilhado por operador e 
 BOOTLOADER=""
 
 # --- GPU (Capítulo 16): endereços completos, com domínio 0000: --------------
-GPU_PCI_ID=""                    # <GPU_PCI_ID>            ex. de formato: 0000:0c:00.0
-GPU_AUDIO_PCI_ID=""              # <GPU_AUDIO_PCI_ID>      ex. de formato: 0000:0c:00.1
-GPU_VENDOR_DEVICE_ID=""          # <GPU_VENDOR_DEVICE_ID>  ex. de formato: 10de:2504
+GPU_PCI_ID=""                    # <GPU_PCI_ID>            formato: dddd:bb:ss.f
+GPU_AUDIO_PCI_ID=""              # <GPU_AUDIO_PCI_ID>      formato: dddd:bb:ss.f
+GPU_VENDOR_DEVICE_ID=""          # <GPU_VENDOR_DEVICE_ID>  formato: vvvv:dddd
 GPU_AUDIO_VENDOR_DEVICE_ID=""    # <GPU_AUDIO_VENDOR_DEVICE_ID>
 IOMMU_GROUP_GPU=""               # preenchido automaticamente após a etapa 30
 
@@ -36,7 +36,7 @@ IOMMU_GROUP_GPU=""               # preenchido automaticamente após a etapa 30
 DM_SERVICE=""
 
 # --- Discos e workingDisk externo (Capítulos 5, 11 e 19) ---------------------
-NVME_DEVICE=""                   # ex. de formato: /dev/nvme0n1
+NVME_DEVICE=""                   # formato: /dev/<disco>, detectado pela etapa 02
 WORKING_DISK_PATH="/mnt/workingDisk"
                                  # caminho absoluto opcional, já montado pelo
                                  # operador; o projeto nunca cria/monta a base
@@ -93,8 +93,15 @@ AIRLOCK_DIR=""                   # pasta de TRÂNSITO dos arquivos (configuráve
                                  # workingDisk está configurado; sem ele, usa
                                  # /var/lib/vm-passthrough/airlock.
 AIRLOCK_BIND="/srv/airlock/files"  # visão de serviço exposta pelo SFTP (chroot)
+# AIRLOCK_DISPENSADO foi removida: ela era aceita e não alterava pré-requisito,
+# status nem execução. Para não usar o Airlock, basta não executar a etapa 61;
+# o status continua relatando o estado real. Uma configuração antiga com essa
+# linha continua carregando, e a etapa 02 remove a linha.
 
 # --- Backups da VM (Capítulo 25) ----------------------------------------------
 BACKUPS_VM_DIR=""                # destino explícito, com prioridade.
                                  # Vazio = $WORKING_DISK_PATH/backups-vm somente
                                  # quando o workingDisk está configurado.
+# BACKUP_DISPENSADO foi removida pelo mesmo motivo de AIRLOCK_DISPENSADO: a
+# etapa 70 e util/backup-vm.sh sempre decidiram pelo destino configurado, então
+# a flag não dispensava nada. A etapa 02 remove a linha de configurações antigas.

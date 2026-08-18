@@ -529,6 +529,11 @@ PROJETO_MENU="$TMPDIR_TESTE/projeto-menu"
 mkdir -p "$PROJETO_MENU/lib" "$PROJETO_MENU/etapas"
 cp "$RAIZ/lib/common.sh" "$PROJETO_MENU/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_MENU/lib/platform.sh"
+cp "$RAIZ/lib/python-core.sh" "$PROJETO_MENU/lib/python-core.sh"
+# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+mkdir -p "$PROJETO_MENU/lib/shell"
+cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_MENU/lib/shell/boot.sh"
+cp -a "$RAIZ/libexec" "$PROJETO_MENU/libexec"
 cp "$RAIZ/menu.sh" "$PROJETO_MENU/menu.sh"
 mapfile -t ARQUIVOS_MENU < <(awk -F'["|]' '/^    "[0-9][0-9]-/ { print $2 }' "$RAIZ/menu.sh")
 for ARQUIVO_MENU in "${ARQUIVOS_MENU[@]}"; do
@@ -593,6 +598,11 @@ mkdir -p "$PROJETO_EP/lib" "$PROJETO_EP/etapas" \
     "$ROOT_EP/tmp" "$ROOT_EP/proc" "$ROOT_EP/sys/class/net/eth0"
 cp "$RAIZ/lib/common.sh" "$PROJETO_EP/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_EP/lib/platform.sh"
+cp "$RAIZ/lib/python-core.sh" "$PROJETO_EP/lib/python-core.sh"
+# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+mkdir -p "$PROJETO_EP/lib/shell"
+cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_EP/lib/shell/boot.sh"
+cp -a "$RAIZ/libexec" "$PROJETO_EP/libexec"
 for ETAPA_EP in 10-atualizar-sistema.sh 11-driver-nvidia.sh 20-virtualizacao.sh \
     21-usuario-grupos.sh 40-criar-vm.sh; do
     cp "$RAIZ/etapas/$ETAPA_EP" "$PROJETO_EP/etapas/$ETAPA_EP"
@@ -607,8 +617,11 @@ printf 'aberto\n' > "$ROOT_EP/selo-vm.estado"
 
 # Apenas utilitários locais não privilegiados ficam visíveis; comandos de
 # sistema, NSS, libvirt e mutadores recebem mocks abaixo.
+# python3 entra como o interpretador real: desde I3 os entrypoints consultam o
+# core Python pela ponte única, e o core precisa ser exercitado de verdade (ele
+# só escreve na raiz privada sob TMPDIR do harness).
 for COMANDO_SEGURO in awk cat chmod cut df dirname grep head ln ls mktemp mv \
-    readlink rm sed sleep sort tail tee tr; do
+    python3 readlink rm sed sleep sort tail tee tr; do
     CAMINHO_SEGURO="$(type -P "$COMANDO_SEGURO")"
     ln -s "$CAMINHO_SEGURO" "$BIN_EP/$COMANDO_SEGURO"
 done
@@ -1000,18 +1013,27 @@ cat > "$BIN_EP/kvm-ok" <<'SCRIPT'
 #!/bin/bash
 printf 'KVM acceleration can be used\n'
 SCRIPT
+cat > "$BIN_EP/lscpu" <<'SCRIPT'
+#!/bin/bash
+[ "$#" -eq 0 ] || exit 2
+cat <<'OUT'
+Architecture:        x86_64
+CPU(s):              16
+Vendor ID:           AuthenticAMD
+OUT
+SCRIPT
 cat > "$BIN_EP/nproc" <<'SCRIPT'
 #!/bin/bash
 [ "$*" = --all ] || exit 2
 printf '16\n'
 SCRIPT
+# I3: nenhum entrypoint consome mais xmlstarlet. O shim passou a ser um canário
+# puro: qualquer chamada registra escape e falha, o que reprova a suíte se um
+# consumidor operacional voltar.
 cat > "$BIN_EP/xmlstarlet" <<'SCRIPT'
 #!/bin/bash
-printf 'xmlstarlet|%s\n' "$*" >> "$ENTRYPOINT_LOG"
-[ "${1:-}:${2:-}:${3:-}" = 'sel:-t:-v' ] \
-    || { printf 'escape|xmlstarlet inesperado|%s\n' "$*" >> "$ENTRYPOINT_LOG"; exit 126; }
-cat >/dev/null
-printf '52:54:00:12:34:56\n'
+printf 'escape|xmlstarlet foi chamado apesar da migração de I3|%s\n' "$*" >> "$ENTRYPOINT_LOG"
+exit 126
 SCRIPT
 cat > "$BIN_EP/virt-install" <<'SCRIPT'
 #!/bin/bash
@@ -1529,5 +1551,89 @@ LINHA_SUDO="$(grep -n '^exigir_sudo$' "$ETAPA_30" | cut -d: -f1)"
     || falha 'não foi possível provar a ordem da guarda Intel'
 [ "$LINHA_GUARDA" -lt "$LINHA_NAO_ROOT" ] && [ "$LINHA_GUARDA" -lt "$LINHA_SUDO" ] \
     || falha 'guarda AMD-only ocorre depois de pré-requisitos mutantes/sudo'
+
+# --- Prompt opcional de ISO da etapa 02 nunca aborta pela política /vm --------
+# Regressão do incidente de 16/08/2026: um caminho de ISO existente fora de
+# /vm chegava a salvar_conf e derrubava a detecção inteira com
+# "Valor inválido para a chave 'ISO_WINDOWS'", sem explicar a política.
+CONF_ARQUIVO_ORIGINAL="$CONF_ARQUIVO"
+CONF_ARQUIVO="$TMPDIR_TESTE/conf-iso-opcional.conf"
+printf '# conf de teste do prompt de ISO\n' > "$CONF_ARQUIVO"
+
+classificar_iso_opcional_conf '' || falha 'classificador recusou valor vazio'
+igual "$ISO_OPCIONAL_ESTADO" vazia 'estado do classificador para valor vazio'
+
+ISO_FORA_VM="$TMPDIR_TESTE/win11 em outro lugar.iso"
+: > "$ISO_FORA_VM"
+if classificar_iso_opcional_conf "$ISO_FORA_VM"; then
+    falha 'ISO existente fora de /vm foi aceita pelo classificador'
+fi
+contem "$ISO_OPCIONAL_ERRO" 'filho direto' 'recusa fora de /vm sem diagnóstico da política'
+
+if classificar_iso_opcional_conf '/vm/a,b.iso'; then
+    falha 'ISO com vírgula foi aceita pelo classificador'
+fi
+
+classificar_iso_opcional_conf "/vm/iso-inexistente-teste-$$.iso" \
+    || falha "caminho /vm válido porém ausente foi recusado: $ISO_OPCIONAL_ERRO"
+igual "$ISO_OPCIONAL_ESTADO" ausente 'estado do classificador para arquivo ausente'
+
+SAIDA_ISO="$(printf '%s\n\n' "$ISO_FORA_VM" \
+    | perguntar_iso_opcional_conf ISO_WINDOWS 'ISO do Windows 11' 2>&1)" \
+    || falha 'prompt opcional abortou diante de caminho existente fora de /vm'
+contem "$SAIDA_ISO" 'filho direto' 'prompt não explicou a política /vm ao recusar'
+contem "$SAIDA_ISO" 'etapa 40' 'prompt não orientou a decisão adiada para a etapa 40'
+grep -qx 'ISO_WINDOWS=""' "$CONF_ARQUIVO" \
+    || falha 'ISO_WINDOWS não ficou vazia após recusa seguida de ENTER'
+
+SAIDA_ISO="$(printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$ISO_FORA_VM" "$ISO_FORA_VM" "$ISO_FORA_VM" "$ISO_FORA_VM" "$ISO_FORA_VM" \
+    | perguntar_iso_opcional_conf ISO_VIRTIO 'ISO virtio-win' 2>&1)" \
+    || falha 'prompt opcional abortou após cinco recusas consecutivas'
+contem "$SAIDA_ISO" 'Cinco tentativas' 'limite de tentativas não foi comunicado'
+grep -qx 'ISO_VIRTIO=""' "$CONF_ARQUIVO" \
+    || falha 'ISO_VIRTIO não ficou vazia após o limite de tentativas'
+
+SISTEMA_RAIZ_TESTE_ORIGINAL_ISO="$SISTEMA_RAIZ_TESTE"
+SISTEMA_RAIZ_TESTE="$(readlink -f -- "$TMPDIR_TESTE")/raiz-iso"
+mkdir -p "$SISTEMA_RAIZ_TESTE/vm"
+: > "$SISTEMA_RAIZ_TESTE/vm/Win11.iso"
+classificar_iso_opcional_conf /vm/Win11.iso \
+    || falha "ISO regular em /vm foi recusada: $ISO_OPCIONAL_ERRO"
+igual "$ISO_OPCIONAL_ESTADO" valida 'estado do classificador para ISO regular em /vm'
+SAIDA_ISO="$(printf '/vm/Win11.iso\n' \
+    | perguntar_iso_opcional_conf ISO_WINDOWS 'ISO do Windows 11' 2>&1)" \
+    || falha 'prompt opcional recusou ISO regular válida em /vm'
+contem "$SAIDA_ISO" 'validada sem links' 'confirmação da ISO válida ausente'
+grep -qx 'ISO_WINDOWS="/vm/Win11.iso"' "$CONF_ARQUIVO" \
+    || falha 'caminho válido de /vm não foi persistido'
+SISTEMA_RAIZ_TESTE="$SISTEMA_RAIZ_TESTE_ORIGINAL_ISO"
+
+CONF_ARQUIVO="$CONF_ARQUIVO_ORIGINAL"
+
+# --- perguntar_validado repergunta em vez de estourar em salvar_conf ----------
+perguntar_validado 'Nome da VM no libvirt' 'win11' nome_vm_valido 'Nome de VM inválido' \
+    < <(printf 'nome com espaço\nvm-ok\n') > "$TMPDIR_TESTE/pv-aceita.out" 2>&1 \
+    || falha 'perguntar_validado recusou entrada válida depois de uma recusa'
+igual "$PERGUNTA_VALIDADA" vm-ok 'PERGUNTA_VALIDADA após aceitação'
+contem "$(< "$TMPDIR_TESTE/pv-aceita.out")" 'Nome de VM inválido' \
+    'recusa de perguntar_validado sem a mensagem do chamador'
+
+set +e
+perguntar_validado 'Nome da VM no libvirt' '' nome_vm_valido 'Nome de VM inválido' \
+    < <(printf 'a b\na b\na b\na b\na b\n') > "$TMPDIR_TESTE/pv-limite.out" 2>&1
+RC_PV=$?
+set -e
+igual "$RC_PV" 1 'limite de cinco recusas de perguntar_validado'
+igual "$PERGUNTA_VALIDADA" '' 'PERGUNTA_VALIDADA vazia após o limite'
+
+set +e
+perguntar_validado 'Pergunta' '' validador_inexistente_xyz 'mensagem' \
+    </dev/null > "$TMPDIR_TESTE/pv-validador.out" 2>&1
+RC_PV=$?
+set -e
+igual "$RC_PV" 1 'validador desconhecido deve ser recusado'
+contem "$(< "$TMPDIR_TESTE/pv-validador.out")" 'Validador desconhecido' \
+    'diagnóstico de validador desconhecido ausente'
 
 printf '%s\n' UBUNTU_AUDIT_REGRESSION_TESTS_OK
