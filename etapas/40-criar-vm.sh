@@ -309,18 +309,15 @@ if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
     QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
 fi
 
-sudo -u "$QEMU_USUARIO" test -r "$VM_DIR" \
-    && sudo -u "$QEMU_USUARIO" test -w "$VM_DIR" \
-    && sudo -u "$QEMU_USUARIO" test -x "$VM_DIR" \
-    || falhar "A identidade QEMU '$QEMU_USUARIO' não possui acesso rwx a /vm."
-sudo -u "$QEMU_USUARIO" test -r "$ISO_WINDOWS_USO" \
-    && sudo -u "$QEMU_USUARIO" test -r "$ISO_VIRTIO_USO" \
+acesso_identidade "$QEMU_USUARIO" rwx "$VM_DIR" \
+    || falhar "A identidade QEMU '$QEMU_USUARIO' não possui acesso rwx a /vm. $ACESSO_IDENTIDADE_ERRO"
+acesso_identidade "$QEMU_USUARIO" r "$ISO_WINDOWS_USO" \
+    && acesso_identidade "$QEMU_USUARIO" r "$ISO_VIRTIO_USO" \
     || falhar "QEMU não lê uma das ISOs. Copie-a como operador para um nome direto em /vm, preserve grupo $VM_STORAGE_GROUP:0660 e atualize o conf; esta etapa não mudará permissões."
 comprovar_fingerprint "$ISO_WINDOWS_USO" "$ISO_WINDOWS_FINGERPRINT" "ISO do Windows"
 comprovar_fingerprint "$ISO_VIRTIO_USO" "$ISO_VIRTIO_FINGERPRINT" "ISO VirtIO"
 if [ "$QCOW2_ESTADO_INICIAL" = existente ]; then
-    sudo -u "$QEMU_USUARIO" test -r "$QCOW2_USO" \
-        && sudo -u "$QEMU_USUARIO" test -w "$QCOW2_USO" \
+    acesso_identidade "$QEMU_USUARIO" rw "$QCOW2_USO" \
         || falhar "QEMU não possui rw no QCOW2 existente. Corrija conscientemente o arquivo após conferir inode/formato; nenhuma permissão será alterada aqui."
     comprovar_fingerprint "$QCOW2_USO" "$QCOW2_FINGERPRINT_ESPERADO" "QCOW2"
 fi
@@ -372,9 +369,8 @@ else
     [ "$ARMAZENAMENTO_QCOW2_ESTADO" = existente ] \
         || falhar "QCOW2 recém-criado não foi publicado."
     QCOW2_FINGERPRINT_ESPERADO="$ARMAZENAMENTO_FINGERPRINT"
-    sudo -u "$QEMU_USUARIO" test -r "$QCOW2_USO" \
-        && sudo -u "$QEMU_USUARIO" test -w "$QCOW2_USO" \
-        || falhar "QCOW2 novo não ficou acessível à identidade QEMU."
+    acesso_identidade "$QEMU_USUARIO" rw "$QCOW2_USO" \
+        || falhar "QCOW2 novo não ficou acessível à identidade QEMU. $ACESSO_IDENTIDADE_ERRO"
 fi
 revalidar_artefatos_vm
 qemu-img info "$QCOW2_USO" | sed 's/^/  /'

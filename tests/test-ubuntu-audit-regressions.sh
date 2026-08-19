@@ -472,12 +472,12 @@ grep -Fq 'sudo chmod 2770 "$diretorio"' "$RAIZ/lib/common.sh" \
     || falha 'convergência /vm não fixa setgid 2770'
 grep -Fq "d:u::rwx,d:g::rwx,d:m::rwx,d:o::---" "$RAIZ/lib/common.sh" \
     || falha 'ACL default de /vm não está explícita'
-grep -Fq 'sudo -u "$USUARIO_LINUX" test -r "$TESTE_QEMU"' \
+grep -Fq 'acesso_identidade "$USUARIO_LINUX" rw "$TESTE_QEMU"' \
     "$RAIZ/etapas/21-usuario-grupos.sh" \
-    || falha 'etapa 21 não testa leitura cruzada pelo operador'
-grep -Fq 'sudo -u "$QEMU_USUARIO" test -w "$TESTE_OPERADOR"' \
+    || falha 'etapa 21 não testa leitura/escrita cruzada pelo operador'
+grep -Fq 'acesso_identidade "$QEMU_USUARIO" rw "$TESTE_OPERADOR"' \
     "$RAIZ/etapas/21-usuario-grupos.sh" \
-    || falha 'etapa 21 não testa escrita cruzada pela identidade QEMU'
+    || falha 'etapa 21 não testa leitura/escrita cruzada pela identidade QEMU'
 if grep -E 'chmod[[:space:]]+(-R[[:space:]]+)?777' \
     "$RAIZ/lib/common.sh" "$RAIZ/etapas/13-diretorios.sh" \
     "$RAIZ/etapas/21-usuario-grupos.sh" "$RAIZ/etapas/40-criar-vm.sh"; then
@@ -491,6 +491,53 @@ grep -Fq 'QCOW2 recusado antes de sudo' "$RAIZ/etapas/40-criar-vm.sh" \
     || falha 'guarda de QCOW2 não antecede sudo na etapa 40'
 grep -Fq 'ln -- "$temporario" "$destino"' "$RAIZ/etapas/40-criar-vm.sh" \
     || falha 'publicação atômica sem sobrescrita do QCOW2 novo ausente'
+
+# --- Prova de acesso independente do coreutils da distribuição ---------------
+# O uutils que o Ubuntu 25.10 e derivados instalam em /usr/bin/test ignora
+# grupos suplementares em -r/-w/-x e nega o acesso que o kernel concede, que é
+# exatamente como /vm é compartilhado. Nenhuma etapa pode voltar a delegar essa
+# resposta a um binário de coreutils.
+if grep -rnE 'sudo +-u +[^|&;]*\btest +-[rwx]\b' "$RAIZ/etapas" "$RAIZ/util" "$RAIZ/lib"; then
+    falha 'prova de acesso voltou a depender do test(1) da distribuição'
+fi
+BIN_ACESSO="$TMPDIR_TESTE/bin-acesso"
+mkdir -p "$BIN_ACESSO"
+ALVO_ACESSO="$TMPDIR_TESTE/alvo-acesso.bin"
+: > "$ALVO_ACESSO"
+chmod 0660 "$ALVO_ACESSO"
+# test(1) e [(1) externos envenenados: negam tudo, como o uutils faz quando o
+# acesso só existe pela classe de grupo. A prova precisa ignorá-los.
+cat > "$BIN_ACESSO/test" <<'SCRIPT'
+#!/bin/bash
+exit 1
+SCRIPT
+cp "$BIN_ACESSO/test" "$BIN_ACESSO/["
+cat > "$BIN_ACESSO/sudo" <<'SCRIPT'
+#!/bin/bash
+[ "${1:-}" = -u ] && shift 2
+exec "$@"
+SCRIPT
+chmod +x "$BIN_ACESSO/test" "$BIN_ACESSO/[" "$BIN_ACESSO/sudo"
+PATH="$BIN_ACESSO:$PATH_ORIGINAL" acesso_identidade "$(id -un)" rw "$ALVO_ACESSO" \
+    || falha "prova de acesso regrediu para o coreutils externo: $ACESSO_IDENTIDADE_ERRO"
+PATH="$BIN_ACESSO:$PATH_ORIGINAL" acesso_identidade "$(id -un)" rwx "$TMPDIR_TESTE" \
+    || falha "prova de acesso não confirmou rwx em diretório próprio: $ACESSO_IDENTIDADE_ERRO"
+if PATH="$BIN_ACESSO:$PATH_ORIGINAL" acesso_identidade "$(id -un)" r 'relativo/nao-absoluto'; then
+    falha 'prova de acesso aceitou caminho relativo'
+fi
+if [ "$(id -u)" -ne 0 ]; then
+    # root ignora os bits de modo; a negativa só é observável sem privilégio.
+    ALVO_NEGADO="$TMPDIR_TESTE/alvo-negado.bin"
+    : > "$ALVO_NEGADO"
+    chmod 0000 "$ALVO_NEGADO"
+    set +e
+    PATH="$BIN_ACESSO:$PATH_ORIGINAL" acesso_identidade "$(id -un)" r "$ALVO_NEGADO"
+    RC_ACESSO=$?
+    set -e
+    igual "$RC_ACESSO" 1 'prova de acesso não reprovou caminho sem permissão'
+fi
+grep -Fq 'command -v "["' "$RAIZ/lib/common.sh" \
+    || falha 'prova de acesso não confirma mais que o test é embutido do shell'
 
 # --- Discard somente no QCOW2 alvo e com cardinalidade -----------------------
 cat > "$TMPDIR_TESTE/discard-ausente.xml" <<'XML'
@@ -780,6 +827,22 @@ case "$comando" in
                 || [ "$usuario:$prefixo" = 'qemu:.teste-qemu' ]; }; then
             /bin/bash -c "$script" _ "$diretorio" "$prefixo"
             exit $?
+        fi
+        # Prova de acesso das etapas 21 e 40: roda de verdade sob bash, que
+        # também resolve "[" pelo embutido, confinada à raiz da fixture.
+        caminho_prova="${4:-}"
+        if [ "${1:-}" = -c ] && [ "${3:-}" = _ ] && [ "$#" -ge 5 ] \
+           && [[ "$script" == *'command -v "["'* ]] \
+           && [[ "$script" == *'for modo in "$@"'* ]] \
+           && [[ "$caminho_prova" == "$PASSTHROUGH_TEST_ROOT"/* ]]; then
+            modos_prova_ok=1
+            for modo_prova in "${@:5}"; do
+                case "$modo_prova" in r|w|x) ;; *) modos_prova_ok=0 ;; esac
+            done
+            if [ "$modos_prova_ok" -eq 1 ]; then
+                /bin/bash -c "$script" _ "${@:4}"
+                exit $?
+            fi
         fi
         # A única shell ampla permitida é exatamente o publicador QCOW2 de
         # produção, como qemu, para o destino/tamanho confinados da fixture.

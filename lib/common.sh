@@ -1790,6 +1790,77 @@ restaurar_diretorio_vm() {
         || { SELO_VM_ERRO="ACL de /vm não foi restaurada: $GRUPO_VM_ERRO"; return 1; }
 }
 
+# --- Prova de acesso na identidade alvo --------------------------------------
+# O modelo compartilhado de /vm concede leitura e escrita exclusivamente pela
+# classe de grupo, com other::---. Perguntar isso a um test(1) externo deixava
+# o projeto refém do coreutils que a distribuição instala: o uutils adotado
+# pelo Ubuntu 25.10 e derivados (Pop!_OS) ignora grupos suplementares em
+# -r/-w/-x e nega acesso que o kernel concede, enquanto o coreutils GNU
+# responde por access(2). A prova abaixo não consulta nenhum binário de
+# coreutils: executa um shell POSIX na identidade alvo e usa o test embutido,
+# que em bash, dash e ash resolve por access(2) e enxerga modo, ACL, grupo
+# primário e grupos suplementares em qualquer distribuição.
+ACESSO_IDENTIDADE_ERRO=""
+# O veredito viaja pela saída padrão, não pelo status: assim um sudo que sequer
+# chegou a executar a prova (ticket expirado, identidade recusada) nunca é lido
+# como "sem acesso", que é a confusão mais cara de diagnosticar nesta etapa.
+ACESSO_IDENTIDADE_PROVA='
+        set -eu
+        # Sem o embutido, a resposta viria de um coreutils desconhecido: a
+        # prova se declara impossível em vez de aceitar um veredito alheio.
+        [ "$(command -v "[")" = "[" ] || exit 3
+        caminho=$1
+        shift
+        for modo in "$@"; do
+            case $modo in
+                r) [ -r "$caminho" ] || { echo negado; exit 0; } ;;
+                w) [ -w "$caminho" ] || { echo negado; exit 0; } ;;
+                x) [ -x "$caminho" ] || { echo negado; exit 0; } ;;
+                *) exit 3 ;;
+            esac
+        done
+        echo concedido
+    '
+acesso_identidade() {
+    # acesso_identidade IDENTIDADE MODOS CAMINHO
+    # MODOS é qualquer combinação não vazia de r, w e x. Devolve 0 quando a
+    # identidade tem todos os acessos pedidos, 1 quando o kernel nega algum e
+    # 2 quando a prova não pôde ser produzida. Nenhum modo escreve no alvo.
+    local identidade="${1:-}" modos="${2:-}" caminho="${3:-}" indice saida rc=0
+    local -a argumentos=()
+    ACESSO_IDENTIDADE_ERRO=""
+    nome_usuario_valido "$identidade" \
+        || { ACESSO_IDENTIDADE_ERRO="Identidade inválida para prova de acesso: '${identidade:-vazio}'."; return 2; }
+    [[ "$modos" =~ ^[rwx]+$ ]] \
+        || { ACESSO_IDENTIDADE_ERRO="Modos de acesso inválidos: '${modos:-vazio}'; use apenas r, w e x."; return 2; }
+    [[ "$caminho" == /* ]] \
+        || { ACESSO_IDENTIDADE_ERRO="A prova de acesso exige caminho absoluto: '${caminho:-vazio}'."; return 2; }
+    argumentos=("$caminho")
+    for (( indice = 0; indice < ${#modos}; indice++ )); do
+        argumentos+=("${modos:indice:1}")
+    done
+    saida="$(sudo -u "$identidade" sh -c "$ACESSO_IDENTIDADE_PROVA" _ "${argumentos[@]}")" || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        ACESSO_IDENTIDADE_ERRO="O shell POSIX de '$identidade' não expôs test embutido; a prova dependeria do coreutils da distribuição e não seria confiável."
+        return 2
+    fi
+    if [ "$rc" -ne 0 ]; then
+        ACESSO_IDENTIDADE_ERRO="A prova de acesso como '$identidade' em $caminho não chegou a ser executada (status $rc); isso não significa acesso negado."
+        return 2
+    fi
+    case "$saida" in
+        concedido) return 0 ;;
+        negado)
+            ACESSO_IDENTIDADE_ERRO="A identidade '$identidade' não possui acesso '$modos' a $caminho."
+            return 1
+            ;;
+        *)
+            ACESSO_IDENTIDADE_ERRO="A prova de acesso como '$identidade' em $caminho devolveu um veredito inesperado."
+            return 2
+            ;;
+    esac
+}
+
 validar_arquivo_compartilhado_vm() {
     local arquivo="$1" grupo="$2" estado
     [ -f "$arquivo" ] && [ ! -L "$arquivo" ] || return 1

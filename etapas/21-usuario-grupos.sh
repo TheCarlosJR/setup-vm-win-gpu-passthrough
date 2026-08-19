@@ -225,12 +225,10 @@ selar_diretorio_vm "$VM_DIR" "$VM_STORAGE_GROUP" \
     || { limpar_testes_vm; falhar "Não foi possível proteger os testes contra TOCTOU: $SELO_VM_ERRO"; }
 if ! validar_arquivo_compartilhado_vm "$TESTE_OPERADOR" "$VM_STORAGE_GROUP" \
    || ! validar_arquivo_compartilhado_vm "$TESTE_QEMU" "$VM_STORAGE_GROUP" \
-   || ! sudo -u "$USUARIO_LINUX" test -r "$TESTE_QEMU" \
-   || ! sudo -u "$USUARIO_LINUX" test -w "$TESTE_QEMU" \
-   || ! sudo -u "$QEMU_USUARIO" test -r "$TESTE_OPERADOR" \
-   || ! sudo -u "$QEMU_USUARIO" test -w "$TESTE_OPERADOR"; then
+   || ! acesso_identidade "$USUARIO_LINUX" rw "$TESTE_QEMU" \
+   || ! acesso_identidade "$QEMU_USUARIO" rw "$TESTE_OPERADOR"; then
     limpar_testes_vm
-    falhar "Herança, modo 0660 ou acesso cruzado entre operador/QEMU não foi comprovado."
+    falhar "Herança, modo 0660 ou acesso cruzado entre operador/QEMU não foi comprovado.${ACESSO_IDENTIDADE_ERRO:+ $ACESSO_IDENTIDADE_ERRO}"
 fi
 limpar_testes_vm
 restaurar_selo_etapa21 \
