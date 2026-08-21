@@ -85,7 +85,7 @@ validar_bootloader_configurado() {
     plataforma_boot_backend_suportado "$efetivo" \
         || { BOOTLOADER_VALIDACAO_ERRO="Bootloader efetivo '$efetivo' não é suportado pelo perfil $PLATAFORMA_PERFIL."; return 1; }
     [ "$persistido" = "$efetivo" ] \
-        || { BOOTLOADER_VALIDACAO_ERRO="Divergência de boot: passthrough.conf registra '$persistido', mas o boot efetivo é '$efetivo'. Execute a etapa 02 e confirme a migração com backup."; return 1; }
+        || { BOOTLOADER_VALIDACAO_ERRO="Divergência de boot: passthrough.conf registra '$persistido', mas o boot efetivo é '$efetivo'. Execute a etapa 3 e confirme a migração com backup."; return 1; }
     BOOTLOADER_ATIVO="$efetivo"
 }
 

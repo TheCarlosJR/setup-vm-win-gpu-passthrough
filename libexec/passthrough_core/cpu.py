@@ -583,8 +583,8 @@ def plan_pinning(payload: Mapping[str, Any]) -> dict:
 def memory_plan(payload: Mapping[str, Any]) -> dict:
     """Deriva reserva do host, teto da VM e a contagem de páginas de 1 GiB.
 
-    A relação entre `VM_RAM_MB` e `HUGEPAGES_1G` é a mesma que as etapas 02 e
-    52 exigiam em Bash: múltiplo exato de 1 GiB, contagem derivada por divisão
+    A relação entre `VM_RAM_MB` e `HUGEPAGES_1G` é a mesma que as etapas 3 e
+    16 exigiam em Bash: múltiplo exato de 1 GiB, contagem derivada por divisão
     e teto respeitado. Aqui ela tem uma implementação só.
     """
     total = _require_integer(payload, "total_mib", 0, 1 << 30)
@@ -642,7 +642,7 @@ def memory_plan(payload: Mapping[str, Any]) -> dict:
             data["valid"] = 0
             data["error"] = (
                 "HUGEPAGES_1G=%d diverge de VM_RAM_MB/%d; corrija conscientemente "
-                "na etapa 02." % (declared, HUGEPAGE_MIB)
+                "na etapa 3." % (declared, HUGEPAGE_MIB)
             )
             return data
     if vm_ram > maximum:

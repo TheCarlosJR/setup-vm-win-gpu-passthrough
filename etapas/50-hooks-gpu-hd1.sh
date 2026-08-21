@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/50-hooks-gpu-hd1.sh - Capítulo 19: GPU dinâmica + HD1 opcional
+# etapas/50-hooks-gpu-hd1.sh - Etapa 14: GPU dinâmica + HD1 opcional
 # ============================================================================
 # O libvirt (hostdev managed='yes') é a única autoridade para detach/reattach
 # PCI. Os hooks apenas fazem preflight, liberam/restauram a sessão gráfica e
@@ -125,7 +125,7 @@ verificar() {
         elif [ -z "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
             v_ok "Fluxo sem disco físico dedicado (opção 0 registrada)."
         elif [ -z "${HD1_BY_ID_PATH:-}" ]; then
-            v_falta "Uso do HD1 ainda não decidido na etapa 02."
+            v_falta "Uso do HD1 ainda não decidido na etapa 3."
         elif disco_estado_xml "$HD1_BY_ID_PATH" \
              && [ "$DISCO_XML_SOURCE" = 1 ] && [ "$DISCO_XML_EXATO" = 1 ]; then
             if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}"; then
@@ -163,7 +163,7 @@ validar_config_hooks() {
         caminho_absoluto_seguro "$HD1_BY_ID_PATH" || falhar "HD1_BY_ID_PATH inseguro."
         exigir_conf NVME_DEVICE
     elif [ "${HD1_DISPENSADO:-}" != "sim" ]; then
-        falhar "Uso do disco físico adicional ainda não foi decidido. Rode a etapa 02 e escolha um disco ou a opção 0."
+        falhar "Uso do disco físico adicional ainda não foi decidido. Rode a etapa 3 e escolha um disco ou a opção 0."
     fi
 }
 
@@ -720,7 +720,7 @@ for ARGUMENTO in "$@"; do
     case "$ARGUMENTO" in
         --remover-video) PEDIU_REMOVER_VIDEO=1 ;;
         --anti-code43) PEDIU_ANTI_CODE43=1 ;;
-        *) falhar "Opção desconhecida da etapa 50: '$ARGUMENTO' (use --remover-video e/ou --anti-code43)." ;;
+        *) falhar "Opção desconhecida da etapa 14: '$ARGUMENTO' (use --remover-video e/ou --anti-code43)." ;;
     esac
 done
 
@@ -736,7 +736,7 @@ if libvirt_backend_resolver; then
 else
     BACKEND_RC=$?
     if [ "$BACKEND_RC" -eq 1 ]; then
-        falhar "Nenhuma unidade libvirt do perfil está disponível: $LIBVIRT_BACKEND_ERRO Execute a etapa 20."
+        falhar "Nenhuma unidade libvirt do perfil está disponível: $LIBVIRT_BACKEND_ERRO Execute a etapa 9."
     fi
     falhar "Não foi possível resolver o backend libvirt: $LIBVIRT_BACKEND_ERRO"
 fi
@@ -747,7 +747,7 @@ validar_grupo_iommu_gpu \
     "$GPU_VENDOR_DEVICE_ID" "${GPU_AUDIO_VENDOR_DEVICE_ID:-}" \
     || falhar "$IOMMU_ERRO"
 
-titulo "Capítulo 19: hooks dinâmicos e HD1 físico (VM: $VM_NAME)"
+titulo "Etapa 14: hooks dinâmicos e HD1 físico (VM: $VM_NAME)"
 
 # Todos os preflights ocorrem antes da primeira mutação.
 HD1_IDENTIDADE=""
@@ -976,7 +976,7 @@ for HOOK_EXISTENTE in "${HOOKS_EXISTENTES[@]}"; do
     fi
 done
 
-titulo "1/5 Dispatcher e hooks transacionais"
+titulo "Etapa 14.1/5 Dispatcher e hooks transacionais"
 LEGADO=""
 INSTALAR_DISPATCHER=1
 if sudo test -e "$HOOK_QEMU" || sudo test -L "$HOOK_QEMU"; then
@@ -1202,7 +1202,7 @@ libvirt_backend_reiniciar \
     || falhar "$LIBVIRT_BACKEND_UNIDADE_DAEMON não aceitou a instalação ($LIBVIRT_BACKEND_ERRO); a transação restaurará os hooks anteriores."
 ok "Dispatcher e três hooks instalados atomicamente; falhas agora abortam o evento libvirt."
 
-titulo "2/5 GPU e áudio no XML com managed='yes'"
+titulo "Etapa 14.2/5 GPU e áudio no XML com managed='yes'"
 
 anexar_hostdev_pci() {
     local endereco="${1,,}" dom bus slot func arquivo
@@ -1241,7 +1241,7 @@ if [ "$XML_FALHOU" -ne 0 ]; then
 fi
 ok "GPU e áudio configurados sob gestão exclusiva do libvirt."
 
-titulo "3/5 Disco físico no XML (opcional)"
+titulo "Etapa 14.3/5 Disco físico no XML (opcional)"
 anexar_hd1() {
     local arquivo
     [ -n "${HD1_BY_ID_PATH:-}" ] || { info "Fluxo sem HD1 físico; somente QCOW2."; return 0; }
@@ -1285,7 +1285,7 @@ else
     fi
     falhar "HD1 não foi anexado com segurança; a transação restaurará XML e hooks."
 fi
-titulo "4/5 Opções de vídeo/hypervisor (dentro da transação)"
+titulo "Etapa 14.4/5 Opções de vídeo/hypervisor (dentro da transação)"
 # REQ-HOOKS-TX: as opções deixaram de ocorrer depois do commit. Elas entram na
 # mesma transação, como um único candidato validado pelo schema do libvirt,
 # definido uma vez e comprovado por releitura. Falha ou sinal aqui restaura
@@ -1373,7 +1373,7 @@ aplicar_opcoes_xml() {
 aplicar_opcoes_xml \
     || falhar "Opções de vídeo/hypervisor não foram aplicadas com prova; a transação restaurará XML e hooks."
 
-titulo "5/5 Commit da transação"
+titulo "Etapa 14.5/5 Commit da transação"
 exigir_vm_desligada "$VM_NAME"
 remover_com_backup "$INSTALLING_HOOK" \
     || falhar "Falha ao retirar o bloqueio temporário de start."
@@ -1402,4 +1402,4 @@ Como testar manualmente somente após backup e janela de manutenção:
   4. Desligar o Windows e confirmar GPU em nvidia e $DM_SERVICE ativo.
 Se a restauração falhar, use um TTY e rode: bash util/recuperar-gpu.sh
 TESTE
-ok "Etapa 50 concluída sem executar o primeiro start da VM."
+ok "Etapa 14 concluída sem executar o primeiro start da VM."

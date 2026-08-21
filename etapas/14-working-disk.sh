@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/14-working-disk.sh - Capítulo 11: preflight do workingDisk externo
+# etapas/14-working-disk.sh - Etapa 8: preflight do workingDisk externo
 # ============================================================================
 # Verificação estritamente não destrutiva. O workingDisk é montado e gerenciado
 # externamente pelo operador; esta etapa nunca cria diretórios, monta, formata,
@@ -17,7 +17,7 @@ verificar() {
     elif [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
         v_ok "workingDisk dispensado explicitamente; nenhum preflight é necessário."
     elif [ -z "$WORKING_DISK" ]; then
-        v_falta "workingDisk ainda não configurado nem dispensado; execute a etapa 02."
+        v_falta "workingDisk ainda não configurado nem dispensado; execute a etapa 3."
     elif validar_working_disk_montado "$WORKING_DISK"; then
         v_ok "workingDisk ativo em $WORKING_DISK (source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE)."
     else
@@ -31,15 +31,15 @@ if [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
     falhar "Configuração contraditória: WORKING_DISK_PATH definido e WORKING_DISK_DISPENSADO=sim."
 fi
 if [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
-    titulo "workingDisk externo"
+    titulo "Etapa 8: workingDisk externo"
     ok "Dispensa explícita registrada; nada foi alterado."
     exit 0
 fi
 [ -n "$WORKING_DISK" ] \
-    || falhar "workingDisk não configurado. Execute a etapa 02 e informe um mountpoint já ativo ou escolha 0."
+    || falhar "workingDisk não configurado. Execute a etapa 3 e informe um mountpoint já ativo ou escolha 0."
 exigir_comando mountpoint findmnt
 
-titulo "Preflight do workingDisk externo"
+titulo "Etapa 8: preflight do workingDisk externo"
 info "Verificação somente leitura: caminho seguro, diretório existente e mountpoint exato."
 validar_working_disk_montado "$WORKING_DISK" || falhar "$WORKING_DISK_ERRO"
 info "Caminho: $WORKING_DISK"

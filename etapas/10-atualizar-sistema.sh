@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/10-atualizar-sistema.sh - Capítulo 7: Atualização do Sistema
+# etapas/10-atualizar-sistema.sh - Etapa 4: Atualização do Sistema
 # ============================================================================
 # Atualiza pacotes, kernel e firmware ANTES de instalar drivers e a pilha de
 # virtualização. Termina pedindo reboot se algo foi atualizado.
@@ -40,7 +40,7 @@ verificar() {
         if estado_fw="$(fwupd_classificar_resultado get-updates "$rc_fw")"; then
             case "$estado_fw" in
                 sem-atualizacoes) v_ok "Nenhuma atualização de firmware disponível." ;;
-                sucesso) v_falta "Há atualização de firmware disponível; execute a etapa 10." ;;
+                sucesso) v_falta "Há atualização de firmware disponível; execute a etapa 4." ;;
                 *) v_erro "Estado fwupd inesperado: $estado_fw." ;;
             esac
         else
@@ -74,7 +74,7 @@ fwupd_rodar() {
 
 exigir_plataforma_suportada
 [ "$PLATAFORMA_GERENCIADOR_PACOTES" = apt ] \
-    || falhar "A etapa 10 requer o perfil APT de Ubuntu/Pop!_OS."
+    || falhar "A etapa 4 requer o perfil APT de Ubuntu/Pop!_OS."
 exigir_nao_root
 
 titulo "Antes de continuar"
@@ -89,7 +89,7 @@ info "Reboot/retorno: ao concluir, reinicie; depois valide o kernel ativo com 'u
 
 exigir_sudo
 
-titulo "Capítulo 7: Atualização do Sistema"
+titulo "Etapa 4: Atualização do Sistema"
 KERNEL_ANTES="$(uname -r)"
 
 info "Atualizando índice de pacotes..."

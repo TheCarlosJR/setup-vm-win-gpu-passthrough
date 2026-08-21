@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/52-cpu-pinning-hugepages.sh - CPU pinning e HugePages de 1 GiB
+# etapas/52-cpu-pinning-hugepages.sh - Etapa 16: CPU pinning e HugePages de 1 GiB
 # ============================================================================
 # Otimização opcional e faseada:
 #   1. valida configuração, topologia, suporte e XML candidato sem mutar nada;
@@ -118,7 +118,7 @@ exigir_topologia_inalterada() {
         || falhar "lscpu deixou de fornecer a topologia antes da mutação; nada foi alterado."
     cpu_topologia_fingerprint "$topologia" || falhar "$CPU_TOPOLOGIA_ERRO"
     [ "$CPU_TOPOLOGIA_FINGERPRINT" = "$TOPOLOGIA_FINGERPRINT" ] \
-        || falhar "A topologia de CPU mudou desde a validação; nada foi alterado. Rode a etapa 02 e repita esta etapa."
+        || falhar "A topologia de CPU mudou desde a validação; nada foi alterado. Rode a etapa 3 e repita esta etapa."
 }
 
 validar_suporte_1g() {
@@ -314,7 +314,7 @@ desfazer() {
         virt-xml-validate "$candidato" domain >/dev/null \
             || falhar "O schema libvirt recusou o candidato de reversão."
         aviso "Fase 1/2: será removida apenas a exigência de HugePages do XML."
-        confirmar "Continuar com a reversão segura da etapa 52?" || falhar "Cancelado sem alterações."
+        confirmar "Continuar com a reversão segura da etapa 16?" || falhar "Cancelado sem alterações."
         xml_backup "$VM_NAME"
         exigir_vm_desligada "$VM_NAME"
         XML_MUTACAO_POSSIVEL=1
@@ -340,7 +340,7 @@ desfazer() {
         if cmdline_possui_alguma_chave "$params"; then
             pedir_reboot
         else
-            info "Reversão da etapa 52 já está completa."
+            info "Reversão da etapa 16 já está completa."
         fi
         TRANSACAO_OK=1
         return 0
@@ -383,13 +383,13 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    titulo "CPU pinning e HugePages opcionais (VM: $VM_NAME)"
+    titulo "Etapa 16: CPU pinning e HugePages opcionais (VM: $VM_NAME)"
     aviso "Otimização opcional: aplique somente após medir um baseline e identificar benefício esperado."
-    info "A opção 3 da etapa 02 apenas registra o plano de CPUs/RAM; esta etapa aplica boot e XML de fato."
+    info "A opção 3 da etapa 3 apenas registra o plano de CPUs/RAM; esta etapa aplica boot e XML de fato."
     info "Fase 1: gravar HugePages no boot, reiniciar o host e executar novamente."
     info "Fase 2: comprovar as páginas e então definir pinning/topologia/memória no XML; não exige novo reboot do host."
     aviso "HugePages reservam $HUGEPAGES_1G GiB fora da RAM comum do host mesmo com a VM desligada."
-    info "O pinning organiza a VM quando ligada; somente a etapa 53 opcional retira CPUs do host mesmo com a VM desligada."
+    info "O pinning organiza a VM quando ligada; somente a etapa 17 opcional retira CPUs do host mesmo com a VM desligada."
     info "CPUs online=[$CPU_LAYOUT_ONLINE] VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
     info "Reserva solicitada: $HUGEPAGES_1G x 1 GiB = $VM_RAM_MB MiB."
 
@@ -423,11 +423,11 @@ main() {
     hugepages_estado_exato livres \
         || falhar "Não é seguro definir o XML: $HUGEPAGES_ERRO"
 
-    titulo "Fase 2/2: definir XML somente após comprovar as páginas"
+    titulo "Etapa 16.2/2: definir XML somente após comprovar as páginas"
     exigir_topologia_inalterada
     aplicar_xml
     ok "Fase 2 concluída; o XML será usado no próximo start da VM, sem novo reboot do host."
-    info "A etapa 52 é opcional e reversível com: bash etapas/52-cpu-pinning-hugepages.sh --desfazer"
+    info "A etapa 16 é opcional e reversível com: bash etapas/52-cpu-pinning-hugepages.sh --desfazer"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

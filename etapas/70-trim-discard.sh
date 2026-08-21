@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/70-trim-discard.sh - Capítulo 25: TRIM/discard
+# etapas/70-trim-discard.sh - Etapa 20: TRIM/discard
 # ============================================================================
 # Habilita discard='unmap' exclusivamente no disco device='disk' cujo
 # source/@file é exatamente QCOW2_PATH, exigindo cardinalidade um.
@@ -35,7 +35,7 @@ resolver_destino_backups() {
     elif [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" != "sim" ]; then
         DESTINO_BACKUPS="${WORKING_DISK%/}/backups-vm"
     else
-        BACKUP_DESTINO_ERRO="Defina BACKUPS_VM_DIR ou configure WORKING_DISK_PATH na etapa 02."
+        BACKUP_DESTINO_ERRO="Defina BACKUPS_VM_DIR ou configure WORKING_DISK_PATH na etapa 3."
         return 1
     fi
     caminho_absoluto_seguro "$DESTINO_BACKUPS" \
@@ -93,7 +93,7 @@ python_core_disponivel \
     || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 caminho_absoluto_seguro "$QCOW2_PATH" || falhar "QCOW2_PATH inválido: '$QCOW2_PATH'."
 
-titulo "Capítulo 25: TRIM/discard"
+titulo "Etapa 20.1/2 TRIM/discard no XML da VM"
 
 cat <<ORIENTACAO
 Finalidade: habilitar discard somente no disco cujo source/@file seja
@@ -251,7 +251,7 @@ else
     ok "discard='unmap' aplicado exclusivamente ao disco $QCOW2_PATH."
 fi
 
-titulo "Pasta de backups"
+titulo "Etapa 20.2/2 Pasta de backups"
 BACKUP_DESTINO_RESOLVIDO=0
 if resolver_destino_backups; then
     BACKUP_DESTINO_RESOLVIDO=1
@@ -273,10 +273,10 @@ fi
 
 echo
 cat <<'DICAS'
-Operação contínua (Capítulo 25):
+Operação contínua (etapa 20):
   - Dentro do Windows, "Otimizar Unidades" deve listar o C: como SSD.
   - Compare qemu-img info antes/depois; redução imediata não é garantida.
   - Snapshots rápidos: util/snapshot-vm.sh criar|listar|reverter|apagar
   - Backup real: util/backup-vm.sh em outro disco físico.
 DICAS
-info "Fim da etapa 70: TRIM e disponibilidade do destino de backup são estados independentes."
+info "Fim da etapa 20: TRIM e disponibilidade do destino de backup são estados independentes."

@@ -199,7 +199,7 @@ APT_DIST_REMOCOES=""
 APT_AUTOREMOVE_EXCLUSIVAS=""
 apt_contar_atualizacoes() {
     # Simula, sem locale e sem locks, as duas classes de transação realmente
-    # aplicadas pela etapa 10. O total deduplica nomes de pacote entre os dois
+    # aplicadas pela etapa 4. O total deduplica nomes de pacote entre os dois
     # planos; as categorias são diagnóstico e não devem ser somadas.
     local saida_dist saida_autoremove resumo total instalacoes remocoes auto_exclusivas
     APT_ATUALIZACOES_ERRO=""
@@ -532,7 +532,7 @@ comparar_inventario_com_hardware() {
        || [ -z "$(grep '^RAM_MIB|' <<< "$esperado")" ] \
        || [ -z "$(grep '^PCI|' <<< "$esperado")" ] \
        || [ -z "$(grep '^DISK|' <<< "$esperado")" ]; then
-        INVENTARIO_ERRO="Inventário sem identidade suficiente para comparação; execute novamente a etapa 00."
+        INVENTARIO_ERRO="Inventário sem identidade suficiente para comparação; execute novamente a etapa 1."
         return 1
     fi
     [ -n "$atual" ] || atual="$(normalizar_identidade_hardware_atual)" \
@@ -587,7 +587,7 @@ CHAVES_CONF_PERMITIDAS=(
 # REQ-WAIVERS (decidido em I4.8): AIRLOCK_DISPENSADO e BACKUP_DISPENSADO saíram
 # da allowlist porque nunca alteraram pré-requisito, status ou execução. O core
 # continua aceitando as linhas para não derrubar configuração existente, sem
-# expor o valor, e a etapa 02 remove as linhas na migração. As duas dispensas
+# expor o valor, e a etapa 3 remove as linhas na migração. As duas dispensas
 # que permanecem (workingDisk e HD1) têm efeito real e testado.
 CHAVES_CONF_DEPRECIADAS=(AIRLOCK_DISPENSADO BACKUP_DISPENSADO)
 
@@ -940,11 +940,11 @@ ISO_OPCIONAL_ESTADO=""
 ISO_OPCIONAL_ERRO=""
 classificar_iso_opcional_conf() {
     # Classifica um caminho de ISO digitado ANTES de persisti-lo, com a mesma
-    # política de salvar_conf/etapa 40 (filho direto canônico de /vm, sem
+    # política de salvar_conf/etapa 12 (filho direto canônico de /vm, sem
     # vírgula e sem links). Um prompt opcional consulta esta função para nunca
     # abortar dentro de salvar_conf por um caminho fora da política.
     # Estados em sucesso: vazia (sem valor), ausente (política ok, arquivo
-    # ainda não existe; /vm nasce na etapa 13) e valida (arquivo regular ok).
+    # ainda não existe; /vm nasce na etapa 7) e valida (arquivo regular ok).
     local logico="${1:-}" fisico
     ISO_OPCIONAL_ESTADO=""
     ISO_OPCIONAL_ERRO=""
@@ -973,18 +973,18 @@ perguntar_iso_valor_conf() {
     # permite reaproveitar exatamente este prompt na migração pré-parser de
     # REQ-CONF-ISO, onde a publicação precisa ser um único rename com todas as
     # chaves pendentes.
-    # Publica CONF_ISO_NOVO_VALOR (vazio significa "decidir na etapa 40").
+    # Publica CONF_ISO_NOVO_VALOR (vazio significa "decidir na etapa 12").
     local descricao="$1" caminho tentativas=0
     CONF_ISO_NOVO_VALOR=""
     while :; do
-        caminho="$(perguntar "Caminho da $descricao em /vm (ENTER para informar depois, na etapa 40)" '')"
+        caminho="$(perguntar "Caminho da $descricao em /vm (ENTER para informar depois, na etapa 12)" '')"
         caminho="${caminho/#\~/$HOME}"
         if [ -z "$caminho" ]; then
             return 0
         fi
         if classificar_iso_opcional_conf "$caminho"; then
             if [ "$ISO_OPCIONAL_ESTADO" = ausente ]; then
-                aviso "Arquivo não encontrado: $caminho (ficará vazio; informe na etapa 40)."
+                aviso "Arquivo não encontrado: $caminho (ficará vazio; informe na etapa 12)."
                 return 0
             fi
             CONF_ISO_NOVO_VALOR="$caminho"
@@ -992,18 +992,18 @@ perguntar_iso_valor_conf() {
             return 0
         fi
         aviso "$ISO_OPCIONAL_ERRO"
-        info "Copie a ISO como operador para um nome direto e exclusivo em /vm (criado na etapa 13) e informe esse caminho, ou ENTER para decidir na etapa 40."
+        info "Copie a ISO como operador para um nome direto e exclusivo em /vm (criado na etapa 7) e informe esse caminho, ou ENTER para decidir na etapa 12."
         tentativas=$((tentativas + 1))
         if [ "$tentativas" -ge 5 ]; then
-            aviso "Cinco tentativas sem um caminho aceito; a $descricao ficará vazia (informe na etapa 40)."
+            aviso "Cinco tentativas sem um caminho aceito; a $descricao ficará vazia (informe na etapa 12)."
             return 0
         fi
     done
 }
 
 perguntar_iso_opcional_conf() {
-    # Prompt opcional de ISO da etapa 02. ENTER, arquivo ainda ausente ou cinco
-    # recusas deixam a chave vazia para a etapa 40 exigir depois; somente um
+    # Prompt opcional de ISO da etapa 3. ENTER, arquivo ainda ausente ou cinco
+    # recusas deixam a chave vazia para a etapa 12 exigir depois; somente um
     # caminho aceito pela política é persistido, então salvar_conf nunca
     # derruba a detecção por causa de uma ISO.
     local chave="$1" descricao="$2"
@@ -1209,10 +1209,10 @@ carregar_conf() {
     fi
     [ "${CFG_EXISTS:-0}" = 1 ] || return 0
     # Uma flag depreciada com valor mente sobre ter efeito; avisar é obrigatório
-    # e a etapa 02 remove a linha. Um conflito de relação (caminho definido e
+    # e a etapa 3 remove a linha. Um conflito de relação (caminho definido e
     # dispensa "sim") é reportado aqui e explicado pela etapa que o possui.
     if [ "${CFG_DEPRECATED_WITH_VALUE:-0}" != 0 ]; then
-        aviso "Configuração usa dispensa sem efeito: ${CFG_DEPRECATED_KEYS//$'\n'/, }. Rode a etapa 02 para remover a linha."
+        aviso "Configuração usa dispensa sem efeito: ${CFG_DEPRECATED_KEYS//$'\n'/, }. Rode a etapa 3 para remover a linha."
     fi
     if [ "${CFG_RELATION_CONFLICTS:-0}" != 0 ]; then
         aviso "Configuração contraditória entre caminho e dispensa: ${CFG_RELATION_CONFLICT_KEYS//$'\n'/, }."
@@ -1430,7 +1430,7 @@ conf_migrar_iso_legada() {
     aviso "A configuração guarda ${CONF_ISO_LEGADA_PENDENTES} caminho(s) de ISO que a política atual recusa."
     info "O caminho antigo NÃO foi aberto, resolvido nem reaproveitado: ele é tratado apenas como texto."
     info "Política em vigor: a ISO precisa ser um filho direto canônico de /vm, sem vírgula (ex.: /vm/Win11.iso)."
-    info "ENTER deixa a chave vazia e a etapa 40 pedirá o caminho depois."
+    info "ENTER deixa a chave vazia e a etapa 12 pedirá o caminho depois."
 
     if [ -f "$CONF_ARQUIVO" ]; then
         mkdir -p -- "$BACKUPS_DIR" \
@@ -1996,8 +1996,8 @@ dispositivo_uplink_ipv4_efetivo() {
 
 REDE_CONFIG_ERRO=""
 validar_config_rede() {
-    # Valida apenas a decisão da etapa 02. VM_NIC_MAC, sub-rede e IPs podem
-    # continuar vazios até as etapas 40/60, mas, quando presentes, são validados.
+    # Valida apenas a decisão da etapa 3. VM_NIC_MAC, sub-rede e IPs podem
+    # continuar vazios até as etapas 12/18, mas, quando presentes, são validados.
     local modo="${REDE_MODO:-}" iface="${INTERFACE_FISICA:-}"
     local bridge="${REDE_BRIDGE:-br0}"
     local rede_libvirt="${REDE_LIBVIRT:-passthrough-nat}"
@@ -2399,14 +2399,14 @@ ram_reserva_host_mib() {
 
 ram_max_vm_mib() {
     # Teto para a VM: total menos a reserva do host, arredondado para baixo em
-    # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 52).
+    # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 16).
     local total="${1:-}"
     [ -n "$total" ] || total="$(ram_total_mib)" || return 1
     plano_memoria_vm "$total" || return 1
     printf '%s\n' "$CPUMEM_MAX_VM_MIB"
 }
 
-# --- Bootloader e parâmetros de kernel (Capítulos 15 e 16) --------------------
+# --- Bootloader e parâmetros de kernel (etapas 3 e 11) -----------------------
 # I5.6: toda a implementação vive em lib/shell/boot.sh, carregado logo no topo
 # desta fachada. Nenhuma cópia mutante permanece aqui: os nomes públicos
 # (detectar_bootloader, validar_bootloader_configurado, cmdline_*,
@@ -2416,7 +2416,7 @@ ram_max_vm_mib() {
 # --- Backend libvirt: uma única resolução autoritativa ------------------------
 # REQ-LIBVIRT-BACKEND: nenhuma etapa pode escolher `libvirtd` por conta própria.
 # O provider de plataforma decide o backend (monolítico `libvirtd` ou modular
-# `virtqemud`), a unidade resolvida e a ação autorizada; as etapas 20, 21 e 50
+# `virtqemud`), a unidade resolvida e a ação autorizada; as etapas 9, 10 e 14
 # consomem exatamente este resultado e provam a pós-condição.
 
 LIBVIRT_BACKEND_ERRO=""
@@ -2478,7 +2478,7 @@ libvirt_backend_reiniciar() {
 # --- Acesso do operador a qemu:///system --------------------------------------
 # REQ-VERIFY-FAILCLOSED aplicado à conexão libvirt: falha de conexão não é
 # sinônimo de runtime quebrado. A concessão de grupo só entra na sessão depois
-# de logout/login, e quem concede é a etapa 21. Sem classificar a causa, uma
+# de logout/login, e quem concede é a etapa 10. Sem classificar a causa, uma
 # pendência conhecida e resolvível vira erro, e o operador perde a ação certa.
 
 LIBVIRT_ACESSO_ERRO=""
@@ -2503,7 +2503,7 @@ libvirt_acesso_operador() {
     LIBVIRT_ACESSO_MOTIVO=""
     if ! command -v virsh >/dev/null 2>&1; then
         LIBVIRT_ACESSO_MOTIVO=virsh-ausente
-        LIBVIRT_ACESSO_ERRO="virsh ausente: a pilha da etapa 20 ainda não está instalada."
+        LIBVIRT_ACESSO_ERRO="virsh ausente: a pilha da etapa 9 ainda não está instalada."
         return 2
     fi
     if virsh --connect qemu:///system list --all >/dev/null 2>&1; then
@@ -2524,7 +2524,7 @@ libvirt_acesso_operador() {
         return 1
     fi
     LIBVIRT_ACESSO_MOTIVO=grupo
-    LIBVIRT_ACESSO_ERRO="Acesso a qemu:///system pendente: '$operador' ainda não pertence ao grupo '$grupo'. Execute a etapa 21 e faça logout/login."
+    LIBVIRT_ACESSO_ERRO="Acesso a qemu:///system pendente: '$operador' ainda não pertence ao grupo '$grupo'. Execute a etapa 10 e faça logout/login."
     return 1
 }
 
@@ -2774,7 +2774,7 @@ vm_desligada() {
 }
 
 exigir_vm_desligada() {
-    vm_existe "$1" || falhar "A VM '$1' não existe. Execute a etapa 40 antes."
+    vm_existe "$1" || falhar "A VM '$1' não existe. Execute a etapa 12 antes."
     vm_desligada "$1" \
         || falhar "A VM '$1' precisa estar DESLIGADA (use: virsh --connect qemu:///system shutdown $1)."
 }

@@ -3,8 +3,8 @@
 # etapas/02-detectar-config.sh - Detecção e confirmação da configuração
 # ============================================================================
 # Implementa a regra central do manual: NUNCA usar valores inventados.
-# Detecta no PRÓPRIO hardware os valores dos placeholders (Capítulos 3, 11,
-# 15, 16, 19, 21 e 23), confirma cada um com o usuário e grava tudo em
+# Detecta no PRÓPRIO hardware os valores dos placeholders usados pelas
+# etapas 1, 8, 11, 14, 16, 17 e 18, confirma cada um com o usuário e grava em
 # passthrough.conf, reutilizado por todas as demais etapas.
 #
 # Travas de segurança desta etapa:
@@ -131,7 +131,7 @@ verificar() {
     if [ -n "$rota" ]; then
         v_ok "Rota IPv4 efetiva para 1.1.1.1: dispositivo $rota (nenhum pacote enviado)."
         if [ "${REDE_MODO:-}" = "nat" ] && [ "${INTERFACE_FISICA:-}" != "$rota" ]; then
-            aviso "NAT está selecionado em ${INTERFACE_FISICA:-vazio}, mas a rota IPv4 efetiva usa $rota; ajuste a rota/métrica antes da etapa 60."
+            aviso "NAT está selecionado em ${INTERFACE_FISICA:-vazio}, mas a rota IPv4 efetiva usa $rota; ajuste a rota/métrica antes da etapa 18."
         fi
     else
         aviso "Rota IPv4 efetiva indisponível para destacar."
@@ -188,11 +188,11 @@ exigir_sudo
 exigir_comando lscpu lspci lsblk ip awk sed findmnt mountpoint
 
 if ! resolver_ultimo_inventario >/dev/null; then
-    falhar "$INVENTARIO_ERRO Execute primeiro a opção 1 (etapa 00)."
+    falhar "$INVENTARIO_ERRO Execute primeiro a opção 1 (etapa 1)."
 fi
 INVENTARIO_USADO="$INVENTARIO_RESOLVIDO"
 validar_inventario_principal "$INVENTARIO_USADO" \
-    || falhar "$INVENTARIO_ERRO Execute novamente a opção 1 (etapa 00)."
+    || falhar "$INVENTARIO_ERRO Execute novamente a opção 1 (etapa 1)."
 if ! comparar_inventario_com_hardware "$INVENTARIO_USADO"; then
     erro "$INVENTARIO_ERRO"
     [ -z "$INVENTARIO_DIFERENCAS" ] || while IFS= read -r diferenca; do erro "  - $diferenca"; done <<< "$INVENTARIO_DIFERENCAS"
@@ -245,7 +245,7 @@ info "O inventário recente acima é a referência automática; as validações 
 # ----------------------------------------------------------------------------
 # 1. Identidade
 # ----------------------------------------------------------------------------
-titulo "1/8 Identidade"
+titulo "Etapa 3.1/8 Identidade"
 if ja_definido USUARIO_LINUX; then
     RESPOSTA="$USUARIO_LINUX"
     info "USUARIO_LINUX já definido: $RESPOSTA"
@@ -270,9 +270,9 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 2. Bootloader (Capítulo 15)
+# 2. Bootloader
 # ----------------------------------------------------------------------------
-titulo "2/8 Bootloader (Capítulo 15)"
+titulo "Etapa 3.2/8 Bootloader"
 if ja_definido BOOTLOADER; then
     BL="$BOOTLOADER"
 else
@@ -286,7 +286,7 @@ case "$BL" in
         echo "  - kernelstub: $(command -v kernelstub || echo 'não encontrado')"
         echo "  - /boot/efi/loader/entries: $(ls /boot/efi/loader/entries/ 2>/dev/null || echo 'não encontrado')"
         echo "  - /boot/grub/grub.cfg: $([ -f /boot/grub/grub.cfg ] && echo existe || echo 'não encontrado')"
-        falhar "Sem bootloader efetivo não há como aplicar parâmetros de kernel (etapa 30)."
+        falhar "Sem bootloader efetivo não há como aplicar parâmetros de kernel (etapa 11)."
         ;;
 esac
 [ "$BL" = "$(detectar_bootloader)" ] \
@@ -299,9 +299,9 @@ validar_bootloader_configurado \
 ok "Bootloader efetivo reconciliado e salvo: $BOOTLOADER"
 
 # ----------------------------------------------------------------------------
-# 3. GPU (Capítulo 16)
+# 3. GPU (usada pela etapa 11)
 # ----------------------------------------------------------------------------
-titulo "3/8 GPU do passthrough (Capítulo 16)"
+titulo "Etapa 3.3/8 GPU do passthrough"
 if ja_definido GPU_PCI_ID && ja_definido GPU_VENDOR_DEVICE_ID; then
     info "GPU já definida: $GPU_PCI_ID [$GPU_VENDOR_DEVICE_ID] (use --redetectar para refazer)"
 else
@@ -327,7 +327,7 @@ else
         aviso "Este host tem UMA ÚNICA GPU. Consequências, para você decidir agora:"
         echo "   - Ao ligar a VM, o gerenciador de exibição é encerrado: o desktop Linux"
         echo "     SAI DO AR e o monitor passa a mostrar o Windows. Isso é o desenho, não um defeito."
-        echo "   - Ao desligar o Windows, o desktop volta sozinho (hook release da etapa 50)."
+        echo "   - Ao desligar o Windows, o desktop volta sozinho (hook release da etapa 14)."
         echo "   - Se o vídeo não voltar: Ctrl+Alt+F3 (TTY) e 'bash util/recuperar-gpu.sh';"
         echo "     reiniciar o host é sempre uma saída válida."
         echo "   - Enquanto a VM roda, o Linux fica sem interface gráfica: programe backups,"
@@ -336,7 +336,7 @@ else
             || falhar "Cancelado. Com uma segunda GPU (mesmo uma iGPU) o desktop continuaria ativo."
     else
         info "Há mais de uma saída de vídeo: o host pode continuar com o desktop ativo em outra GPU."
-        aviso "Os hooks da etapa 50 param o gerenciador de exibição de todo jeito (desenho do"
+        aviso "Os hooks da etapa 14 param o gerenciador de exibição de todo jeito (desenho do"
         aviso "manual, feito para GPU única). Se quiser manter o desktop vivo, edite depois"
         aviso "/etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/01-gpu-preflight.sh e remova o systemctl stop."
     fi
@@ -364,7 +364,7 @@ else
     else
         aviso "Não encontrei função de áudio HDMI em ${BASE}.x."
         aviso "Sem ela, o som do Windows não sai pelo cabo HDMI/DP do monitor"
-        aviso "(use um dispositivo USB em passthrough na etapa 51, se precisar)."
+        aviso "(use um dispositivo USB em passthrough na etapa 15, se precisar)."
         confirmar "Seguir com passthrough somente de vídeo?" \
             || falhar "Cancelado. Confira 'lspci -nn | grep -i audio' e rode de novo."
     fi
@@ -384,9 +384,9 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 4. Serviço gráfico (para os hooks do Capítulo 19)
+# 4. Serviço gráfico (para os hooks da etapa 14)
 # ----------------------------------------------------------------------------
-titulo "4/8 Gerenciador de exibição"
+titulo "Etapa 3.4/8 Gerenciador de exibição"
 if ja_definido DM_SERVICE; then
     info "DM_SERVICE já definido: $DM_SERVICE"
 else
@@ -401,9 +401,9 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 5. Discos (Capítulos 5, 11 e 19)
+# 5. Discos (usados pelas etapas 8 e 14)
 # ----------------------------------------------------------------------------
-titulo "5/8 Discos"
+titulo "Etapa 3.5/8 Discos"
 info "O disco físico que contém a montagem '/' será apenas registrado e protegido das escolhas da VM."
 DISCO_RAIZ="$(disco_raiz || true)"
 if [ -n "$DISCO_RAIZ" ]; then
@@ -412,7 +412,7 @@ else
     aviso "Não consegui identificar o disco físico que contém '/'."
     aviso "As travas automáticas ficam mais fracas: confira modelo/serial com muito cuidado; nada será alterado nesta escolha."
 fi
-echo "Visão geral (compare com o inventário da etapa 00):"
+echo "Visão geral (compare com o inventário da etapa 1):"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL,TRAN
 echo
 
@@ -488,7 +488,7 @@ um SEGUNDO DISCO FÍSICO PAI INTEIRO pode ser destinado ao Windows, por exemplo
 para uma biblioteca de jogos.
 
 Esta escolha apenas registra um identificador persistente /dev/disk/by-id/ do
-disco pai: nada é anexado à VM ou formatado agora. A etapa 50 fará a anexação.
+disco pai: nada é anexado à VM ou formatado agora. A etapa 14 fará a anexação.
 Partições como /dev/sdb1 aparecem só para reconhecimento; selecionar /dev/sdb
 registra o pai inteiro, com TODAS as partições. Disco montado ou em uso no host
 permanece bloqueado até ser totalmente liberado.
@@ -537,7 +537,7 @@ EXPLICA_HD1
     else
         echo "Discos detectados (a opção representa o disco pai inteiro):"
         aviso "Localize /dev/sdb1, por exemplo, no campo 'partições' e escolha o /dev/sdb pai correspondente."
-        aviso "Confira modelo, serial e TAMANHO contra o inventário da etapa 00 antes de escolher."
+        aviso "Confira modelo, serial e TAMANHO contra o inventário da etapa 1 antes de escolher."
     fi
     info "A opção 0 sempre mantém a VM somente com o disco virtual QCOW2."
     IDX="$(escolher_da_lista 'Disco físico adicional da VM (número, ou 0 para nenhum)' sim "${DESCRICOES[@]}")"
@@ -577,10 +577,10 @@ EXPLICA_HD1
 fi
 
 # ----------------------------------------------------------------------------
-# 6. CPU: topologia e plano de pinning (Capítulo 21)
+# 6. CPU: topologia e plano de pinning (aplicado pela etapa 16)
 # ----------------------------------------------------------------------------
-titulo "6/8 CPU: plano de pinning por socket/core"
-info "Esta seção apenas calcula e grava o plano; o pinning será aplicado pela etapa 52."
+titulo "Etapa 3.6/8 CPU: plano de pinning por socket/core"
+info "Esta seção apenas calcula e grava o plano; o pinning será aplicado pela etapa 16."
 # I5.3: o planner é o core Python. O shell continua sondando o host (lscpu),
 # mostrando o mapa, perguntando e confirmando; o cálculo determinístico do
 # recorte por core físico e a validação relacional têm uma implementação só.
@@ -632,7 +632,7 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
         || falhar "lscpu deixou de fornecer a topologia antes de gravar o plano."
     cpu_topologia_fingerprint "$TOPOLOGIA_CPU" || falhar "$CPU_TOPOLOGIA_ERRO"
     [ "$CPU_TOPOLOGIA_FINGERPRINT" = "$TOPOLOGIA_FINGERPRINT" ] \
-        || falhar "A topologia de CPU mudou durante a confirmação; nada foi gravado. Execute a etapa 02 novamente."
+        || falhar "A topologia de CPU mudou durante a confirmação; nada foi gravado. Execute a etapa 3 novamente."
 
     salvar_conf_lote \
         CPUS_VM "$LISTA_VM" \
@@ -646,9 +646,9 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 7. Memória da VM e HugePages (Capítulo 21)
+# 7. Memória da VM e HugePages (aplicadas pela etapa 16)
 # ----------------------------------------------------------------------------
-titulo "7/8 Memória da VM"
+titulo "Etapa 3.7/8 Memória da VM"
 RAM_TOTAL_MB="$(ram_total_mib)"
 RESERVA_HOST_MB="$(ram_reserva_host_mib)"
 RAM_MAX_VM_MB="$(ram_max_vm_mib)"
@@ -668,7 +668,7 @@ else
     PADRAO_GIB=16
     [ "$PADRAO_GIB" -gt "$MAX_GIB" ] && PADRAO_GIB="$MAX_GIB"
     aviso "Teto para a VM: ${MAX_GIB} GiB. O restante NÃO é negociável: fica com o host."
-    info "A etapa 52 (HugePages) reserva essa RAM no boot, tirando-a do host mesmo com a VM desligada."
+    info "A etapa 16 (HugePages) reserva essa RAM no boot, tirando-a do host mesmo com a VM desligada."
     RAM_GIB="$(perguntar_inteiro 'RAM da VM em GiB' "$PADRAO_GIB" 4 "$MAX_GIB")"
     NOVA_RAM_MB=$((RAM_GIB * 1024))
     salvar_conf_lote \
@@ -680,7 +680,7 @@ fi
 # ----------------------------------------------------------------------------
 # 8. Rede, transferência de arquivos e ISOs
 # ----------------------------------------------------------------------------
-titulo "8/8 Rede e complementos"
+titulo "Etapa 3.8/8 Rede e complementos"
 
 # Interfaces elegíveis vêm do sysfs: uma interface física possui o vínculo
 # /sys/class/net/<nome>/device. Isso exclui lo, bridges, veth, tun/tap e demais
@@ -776,7 +776,7 @@ salvar_conf REDE_BRIDGE "${REDE_BRIDGE:-br0}"
 salvar_conf REDE_LIBVIRT "${REDE_LIBVIRT:-passthrough-nat}"
 salvar_conf REDE_BRIDGE_LIBVIRT "${REDE_BRIDGE_LIBVIRT:-virbr-vmnat}"
 if [ -n "$MODO_ANTERIOR" ] && [ "$MODO_ANTERIOR" != "$REDE_MODO" ]; then
-    aviso "Modo de rede mudou de '$MODO_ANTERIOR' para '$REDE_MODO'; os IPs serão recalculados na etapa 60."
+    aviso "Modo de rede mudou de '$MODO_ANTERIOR' para '$REDE_MODO'; os IPs serão recalculados na etapa 18."
     salvar_conf VM_IP_FIXO ""
     salvar_conf IP_FIXO_HOST ""
 elif [ -n "$INTERFACE_ANTERIOR" ] \
@@ -788,11 +788,11 @@ elif [ -n "$INTERFACE_ANTERIOR" ] \
 fi
 if [ "$REDE_MODO" = "nat" ]; then
     if [ -z "$UPLINK_IPV4_EFETIVO" ]; then
-        aviso "NAT escolhido, mas a rota IPv4 efetiva não pôde ser determinada; a etapa 60 recusará mutações enquanto isso persistir."
+        aviso "NAT escolhido, mas a rota IPv4 efetiva não pôde ser determinada; a etapa 18 recusará mutações enquanto isso persistir."
     elif [ "$INTERFACE_FISICA" != "$UPLINK_IPV4_EFETIVO" ]; then
         aviso "NAT foi escolhido em INTERFACE_FISICA=$INTERFACE_FISICA, mas a rota IPv4 efetiva usa $UPLINK_IPV4_EFETIVO."
         aviso "Torne $INTERFACE_FISICA a rota padrão ou desconecte/ajuste a métrica do outro adaptador."
-        aviso "Depois execute novamente esta etapa e a etapa 60."
+        aviso "Depois execute novamente esta etapa e a etapa 18."
     else
         ok "NAT selecionado no uplink IPv4 efetivo: $INTERFACE_FISICA."
     fi
@@ -808,7 +808,7 @@ if ! ja_definido TRANSFER_USER; then
         || falhar "Cinco tentativas sem um usuário de transferência válido."
     salvar_conf TRANSFER_USER "$PERGUNTA_VALIDADA"
 fi
-info "Airlock é o canal previsto e recomendado para troca de arquivos entre host e VM (Capítulo 24)."
+info "Airlock é o canal previsto e recomendado para troca de arquivos entre host e VM (etapa 19)."
 info "É uma zona de trânsito: nada permanente, fora do backup e montada sem execução."
 aviso "Essa é uma política recomendada, não uma garantia técnica de que outros canais sejam impossíveis."
 if ja_definido AIRLOCK_DIR; then
@@ -827,8 +827,8 @@ else
     salvar_conf AIRLOCK_DIR "$PERGUNTA_VALIDADA"
 fi
 
-# ISOs: opcionais aqui; obrigatórias somente na etapa 40. A política de
-# armazenamento é a mesma da etapa 40: filho direto de /vm, sem vírgula e sem
+# ISOs: opcionais aqui; obrigatórias somente na etapa 12. A política de
+# armazenamento é a mesma da etapa 12: filho direto de /vm, sem vírgula e sem
 # links. Um caminho fora dela é explicado e reperguntado, nunca derruba o fluxo.
 for PAR in "ISO_WINDOWS:ISO do Windows 11" "ISO_VIRTIO:ISO virtio-win"; do
     VAR="${PAR%%:*}"; DESC="${PAR#*:}"
@@ -844,4 +844,4 @@ ok "Comparação prévia: CPU, RAM, PCI e discos correspondem ao inventário sel
 grep -vE '^\s*(#|$)' "$CONF_ARQUIVO" | sed 's/^/  /'
 echo
 ok "Detecção concluída. Revise o resumo acima antes de seguir para as próximas etapas."
-info "Na etapa 60: bridge solicitará reservas no roteador; NAT criará a reserva e o gateway automaticamente."
+info "Na etapa 18: bridge solicitará reservas no roteador; NAT criará a reserva e o gateway automaticamente."

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/40-criar-vm.sh - Capítulo 17: Criação da Máquina Virtual
+# etapas/40-criar-vm.sh - Etapa 12: Criação da Máquina Virtual
 # ============================================================================
 # Versão automatizada (virt-install) da criação feita no Virt-Manager pelo
 # manual, com exatamente as mesmas escolhas:
@@ -9,8 +9,8 @@
 #   - Disco /vm/Windows11.qcow2 (qcow2 dinâmico, VirtIO, cache=none)
 #   - 2 CD-ROMs: ISO do Windows 11 + virtio-win.iso
 #   - CPU host-passthrough, NIC virtio em NAT 'default' TEMPORÁRIA
-#     (a etapa 60 aplica o modo final bridge ou NAT dedicado)
-#   - Vídeo QXL temporário (a GPU real entra na etapa 50)
+#     (a etapa 18 aplica o modo final bridge ou NAT dedicado)
+#   - Vídeo QXL temporário (a GPU real entra na etapa 14)
 # Também aplica a regra AppArmor para o caminho customizado /vm.
 # ============================================================================
 set -euo pipefail
@@ -131,7 +131,7 @@ criar_qcow2_novo() {
 }
 
 verificar() {
-    [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido (etapa 02)."; v_fim; }
+    [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido (etapa 3)."; v_fim; }
     local usuario_ok=0 qemu_ok=0 qemu_rc
     if ! plataforma_carregar; then
         v_erro "$PLATAFORMA_ERRO"
@@ -173,7 +173,7 @@ verificar() {
         v_falta "Modelo de acesso a /vm pendente: ${GRUPO_VM_ERRO:-identidades indisponíveis}."
     fi
     if validar_config_rede; then
-        v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 60)."
+        v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 18)."
     else
         v_falta "$REDE_CONFIG_ERRO"
     fi
@@ -211,7 +211,7 @@ verificar() {
                 && v_ok "MAC persistido da NIC: $VM_NIC_MAC" \
                 || v_falta "VM_NIC_MAC inválido: $VM_NIC_MAC"
         else
-            v_ok "Configuração antiga: a etapa 60 registrará VM_NIC_MAC antes de alterar a NIC."
+            v_ok "Configuração antiga: a etapa 18 registrará VM_NIC_MAC antes de alterar a NIC."
         fi
     else
         v_falta "VM '$VM_NAME' não definida."
@@ -231,7 +231,7 @@ exigir_nao_root
 exigir_conf USUARIO_LINUX VM_NAME QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS
 exigir_usuario_linux_valido "$USUARIO_LINUX"
 plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO" \
-    || falhar "$PLATAFORMA_ERRO Execute a etapa 20 antes."
+    || falhar "$PLATAFORMA_ERRO Execute a etapa 9 antes."
 QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
 nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP" \
     || falhar "VM_STORAGE_GROUP deve usar o namespace dedicado vm-passthrough[-sufixo]: '$VM_STORAGE_GROUP'."
@@ -240,7 +240,7 @@ nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não 
 
 titulo "Antes de continuar"
 info "Objetivo: preparar o armazenamento e definir/iniciar a VM do Windows 11 com UEFI, TPM, VirtIO e NAT temporária."
-info "Pré-requisitos: etapas 20, 21 (já em sessão nova) e 30 fase B concluídas, ISOs oficiais disponíveis e espaço suficiente no volume do QCOW2."
+info "Pré-requisitos: etapas 9, 10 (já em sessão nova) e 11 fase B concluídas, ISOs oficiais disponíveis e espaço suficiente no volume do QCOW2."
 info "Alterações: salva caminhos de ISOs já legíveis; adiciona '/vm/** rwk,' à abstração local do AppArmor e a recarrega; cria atomicamente o QCOW2 como QEMU se ausente; ativa a rede default; virt-install define e inicia a VM."
 info "Arquivos existentes nunca recebem chmod/chgrp/ACL automáticos; metadados ou acesso divergentes causam falha com instrução segura."
 info "Recomendação: mantenha backup de qualquer QCOW2 existente, confirme o espaço livre e use somente ISOs obtidas dos canais oficiais."
@@ -255,16 +255,16 @@ exigir_comando virt-install qemu-img virsh getfacl readlink stat
 python_core_disponivel \
     || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP" \
-    || falhar "Modelo de /vm inválido: $GRUPO_VM_ERRO Execute a etapa 21 e faça logout/login."
+    || falhar "Modelo de /vm inválido: $GRUPO_VM_ERRO Execute a etapa 10 e faça logout/login."
 [ -r "$VM_DIR" ] && [ -w "$VM_DIR" ] && [ -x "$VM_DIR" ] \
-    || falhar "O operador efetivo ainda não possui acesso rwx a /vm; faça logout/login após a etapa 21."
+    || falhar "O operador efetivo ainda não possui acesso rwx a /vm; faça logout/login após a etapa 10."
 validar_qcow2_configurado "$QCOW2_PATH" "$VM_STORAGE_GROUP" \
     || falhar "QCOW2 recusado antes de sudo: $ARMAZENAMENTO_ERRO"
 QCOW2_USO="$ARMAZENAMENTO_CAMINHO_FISICO"
 QCOW2_ESTADO_INICIAL="$ARMAZENAMENTO_QCOW2_ESTADO"
 QCOW2_FINGERPRINT_ESPERADO="$ARMAZENAMENTO_FINGERPRINT"
 
-titulo "1/5 ISOs de instalação"
+titulo "Etapa 12.1/5 ISOs de instalação"
 pedir_iso ISO_WINDOWS "ISO do Windows 11" \
     "Baixe a ISO do Windows 11 em microsoft.com (nunca de espelhos de terceiros)."
 pedir_iso ISO_VIRTIO "ISO virtio-win" \
@@ -273,10 +273,10 @@ preparar_iso_para_uso ISO_WINDOWS
 preparar_iso_para_uso ISO_VIRTIO
 info "As ISOs serão usadas somente como filhos diretos de /vm e se o QEMU já puder lê-las; nenhum chmod, chgrp, ACL ou sudo install será aplicado."
 
-titulo "Capítulo 17: Criação da VM '$VM_NAME'"
-info "Modo final selecionado: $REDE_MODO via $INTERFACE_FISICA; a criação usa NAT default somente até a etapa 60."
+titulo "Etapa 12: Criação da VM '$VM_NAME'"
+info "Modo final selecionado: $REDE_MODO via $INTERFACE_FISICA; a criação usa NAT default somente até a etapa 18."
 
-# Rede de segurança: o conf pode ter sido editado à mão depois da etapa 02.
+# Rede de segurança: o conf pode ter sido editado à mão depois da etapa 3.
 RAM_MAX="$(ram_max_vm_mib)"
 if [ "$VM_RAM_MB" -gt "$RAM_MAX" ]; then
     erro "VM_RAM_MB=$VM_RAM_MB MiB passa do teto seguro deste host ($RAM_MAX MiB)."
@@ -291,7 +291,7 @@ fi
 info "Recursos: ${VM_RAM_MB} MiB de RAM (teto ${RAM_MAX}), ${VM_VCPUS} vCPUs de ${CPUS_TOTAL}."
 
 if vm_existe "$VM_NAME"; then
-    falhar "A VM '$VM_NAME' já existe. Para recriar: virsh --connect qemu:///system undefine $VM_NAME --nvram (CUIDADO: leia o Capítulo 17, 'Como desfazer')."
+    falhar "A VM '$VM_NAME' já existe. Para recriar: virsh --connect qemu:///system undefine $VM_NAME --nvram (CUIDADO: leia 'Como desfazer' da etapa 12 no Guia)."
 fi
 
 # Só agora é permitido obter sudo. As primeiras operações são provas de acesso,
@@ -305,7 +305,7 @@ if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
     plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO" \
         || falhar "$PLATAFORMA_ERRO"
     [ "$PLATAFORMA_USUARIO_QEMU" = "$QEMU_USUARIO_PRESUMIDO" ] \
-        || falhar "qemu.conf define a identidade QEMU '$PLATAFORMA_USUARIO_QEMU', divergente da presumida '$QEMU_USUARIO_PRESUMIDO'. Reexecute as etapas 21 e 40 para reconvergir /vm."
+        || falhar "qemu.conf define a identidade QEMU '$PLATAFORMA_USUARIO_QEMU', divergente da presumida '$QEMU_USUARIO_PRESUMIDO'. Reexecute as etapas 10 e 12 para reconvergir /vm."
     QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
 fi
 
@@ -329,7 +329,7 @@ fi
 # ----------------------------------------------------------------------------
 # 2. Regra AppArmor para o caminho customizado /vm
 # ----------------------------------------------------------------------------
-titulo "2/5 AppArmor"
+titulo "Etapa 12.2/5 AppArmor"
 sudo mkdir -p "$(dirname "$APPARMOR_LOCAL")"
 sudo touch "$APPARMOR_LOCAL"
 if sudo grep -qF "$REGRA_APPARMOR" "$APPARMOR_LOCAL"; then
@@ -343,7 +343,7 @@ fi
 # ----------------------------------------------------------------------------
 # 3. Disco QCOW2 (dinâmico, criado já com o dono correto)
 # ----------------------------------------------------------------------------
-titulo "3/5 Disco do sistema"
+titulo "Etapa 12.3/5 Disco do sistema"
 if [ "$QCOW2_ESTADO_INICIAL" = existente ]; then
     info "QCOW2 existente validado e mantido sem alteração de owner/grupo/modo: $QCOW2_PATH."
 else
@@ -376,9 +376,9 @@ revalidar_artefatos_vm
 qemu-img info "$QCOW2_USO" | sed 's/^/  /'
 
 # ----------------------------------------------------------------------------
-# 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 60)
+# 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 18)
 # ----------------------------------------------------------------------------
-titulo "4/5 Rede NAT default temporária"
+titulo "Etapa 12.4/5 Rede NAT default temporária"
 # LC_ALL=C mantém os rótulos de net-info em inglês: com locale pt_BR a rede
 # ativa aparece como "Ativo: sim", o filtro por "Active:.*yes" nunca casa e o
 # net-start abaixo é chamado numa rede que já está no ar.
@@ -391,7 +391,7 @@ $VIRSH net-info default | sed 's/^/  /' || aviso "Rede 'default' indisponível; 
 # ----------------------------------------------------------------------------
 # 5. Definição da VM via virt-install
 # ----------------------------------------------------------------------------
-titulo "5/5 virt-install"
+titulo "Etapa 12.5/5 virt-install"
 OSV="win10"
 if command -v osinfo-query >/dev/null 2>&1 && osinfo-query os 2>/dev/null | grep -qw win11; then
     OSV="win11"
@@ -467,7 +467,7 @@ aviso "A ISO do Windows pede 'Press any key to boot from CD' logo no início:"
 aviso "abra o console AGORA e pressione uma tecla, senão o boot cai no shell UEFI."
 if confirmar "Abrir o console gráfico da VM agora (virt-manager)?"; then
     nohup virt-manager --connect qemu:///system --show-domain-console "$VM_NAME" >/dev/null 2>&1 &
-    info "Console aberto. Siga a etapa 41 para o passo a passo da instalação."
+    info "Console aberto. Siga a etapa 13 para o passo a passo da instalação."
 else
     info "Abra depois com: virt-manager --connect qemu:///system --show-domain-console $VM_NAME"
 fi

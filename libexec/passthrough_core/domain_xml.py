@@ -532,7 +532,7 @@ def _hex_equal(actual: Any, expected: str) -> bool:
 def disk_block_state(payload: Mapping[str, Any]) -> dict:
     """Cardinalidade do disco físico (HD1) por caminho e por alvo.
 
-    Substitui `disco_estado_xml`, mantendo as três contagens que a etapa 50
+    Substitui `disco_estado_xml`, mantendo as três contagens que a etapa 14
     compara: fonte, conformidade exata de atributos e ocupação do alvo.
     """
     xml = _require_text(payload, "xml")
@@ -577,7 +577,7 @@ def usb_hostdev_list(payload: Mapping[str, Any]) -> dict:
     """Enumera hostdevs USB com discriminadores explícitos.
 
     Além de vendor/product, projeta serial e endereço físico quando o XML os
-    declara. Isso permite que a etapa 51 mostre por que uma seleção é ambígua
+    declara. Isso permite que a etapa 15 mostre por que uma seleção é ambígua
     em vez de escolher pela ordem de enumeração (REQ-USB-IDENTITY começa aqui;
     o fluxo completo é de I6).
     """
@@ -628,8 +628,8 @@ def interface_state(payload: Mapping[str, Any]) -> dict:
 
     * identificação da NIC gerenciada pelo MAC persistido;
     * descoberta do MAC quando o domínio tem exatamente uma NIC na rede dada
-      (a etapa 40 usava `interface[...][1]`, o que violava a seção 3.5);
-    * contagem de consumidores de uma rede/bridge (etapa 60).
+      (a etapa 12 usava `interface[...][1]`, o que violava a seção 3.5);
+    * contagem de consumidores de uma rede/bridge (etapa 18).
     """
     xml = _require_text(payload, "xml")
     root = xmlutil.parse_document(xml, DOMAIN_ROOT, "XML de domínio")
@@ -749,7 +749,7 @@ def memory_backing_state(payload: Mapping[str, Any]) -> dict:
 
 
 def validate_cpu_pinning(payload: Mapping[str, Any]) -> dict:
-    """Prova, no XML dado, o pinning e a topologia gerenciados pela etapa 52.
+    """Prova, no XML dado, o pinning e a topologia gerenciados pela etapa 16.
 
     Substitui `validar_xml_cpu_pinning` preservando cada recusa: cardinalidade,
     conjunto exato de CPUs, ordem canônica de vcpupin, modo/check/migratable,

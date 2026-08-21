@@ -244,7 +244,7 @@ KEYS = tuple(SCHEMA)
 # --- Dispensas e depreciação (REQ-WAIVERS, decidido em I4.8) ------------------
 # As duas chaves que sobraram no schema não são "dispensa de etapa": são escolha
 # de configuração entre montagens mutuamente exclusivas, com efeito real e
-# testado (etapas 02, 13, 14, 50, 61 e 70). Elas nunca fazem uma etapa relatar
+# testado (etapas 3, 7, 8, 14, 19 e 20). Elas nunca fazem uma etapa relatar
 # conclusão sem execução: quando valem "sim", o estado real do host é "este
 # fluxo não usa esse recurso", e é isso que o verificador diz.
 WAIVER_KEYS = tuple(key for key in KEYS if key.endswith("_DISPENSADO"))
@@ -255,15 +255,15 @@ WAIVER_KEYS = tuple(key for key in KEYS if key.endswith("_DISPENSADO"))
 # explicitamente removê-las por migração em vez de inventar semântica nova
 # (REQ-WAIVERS: "ou removê-las com migração/depreciação segura"). O parser
 # continua ACEITANDO as duas linhas para não derrubar configuração existente,
-# mas o valor não é exposto a consumidor algum e a etapa 02 remove as linhas.
+# mas o valor não é exposto a consumidor algum e a etapa 3 remove as linhas.
 DEPRECATED_KEYS: dict[str, str] = {
     "AIRLOCK_DISPENSADO": (
-        "nunca alterou pré-requisito, status ou execução da etapa 61; para não "
+        "nunca alterou pré-requisito, status ou execução da etapa 19; para não "
         "usar o Airlock, basta não executar a etapa, que continua relatando o "
         "estado real"
     ),
     "BACKUP_DISPENSADO": (
-        "nunca alterou pré-requisito, status ou execução do backup; a etapa 70 "
+        "nunca alterou pré-requisito, status ou execução do backup; a etapa 20 "
         "e util/backup-vm.sh sempre decidiram pelo destino configurado"
     ),
 }
@@ -433,7 +433,7 @@ def parse_document(
         key = match.group(1)
         if key in DEPRECATED_KEYS:
             # Aceita sem expor: o valor não chega a consumidor algum e a linha
-            # fica marcada para a etapa 02 removê-la na migração.
+            # fica marcada para a etapa 3 removê-la na migração.
             if key in deprecated:
                 raise DataError(
                     "Chave %s repetida na linha %d." % (safe_label(key), number)

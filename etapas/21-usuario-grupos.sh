@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/21-usuario-grupos.sh - Capítulo 14: Usuário, Grupos e Serviços
+# etapas/21-usuario-grupos.sh - Etapa 10: Usuário, Grupos e Serviços
 # ============================================================================
 # Integra operador e identidade QEMU ao grupo dedicado de /vm e garante o
 # serviço libvirt sondado pelo perfil da plataforma.
@@ -41,7 +41,7 @@ verificar() {
         v_fim
     fi
     if [ -z "${USUARIO_LINUX:-}" ]; then
-        v_falta "USUARIO_LINUX não definido (etapa 02)."
+        v_falta "USUARIO_LINUX não definido (etapa 3)."
     elif validar_usuario_linux "$USUARIO_LINUX"; then
         usuario_ok=1
         if [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ]; then
@@ -125,9 +125,9 @@ exigir_comando setfacl getfacl
 nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP" \
     || falhar "VM_STORAGE_GROUP deve usar o namespace dedicado vm-passthrough[-sufixo]: '$VM_STORAGE_GROUP'."
 plataforma_resolver_usuario_qemu "$QEMU_CONF_ARQUIVO" \
-    || falhar "$PLATAFORMA_ERRO Execute a etapa 20 antes."
+    || falhar "$PLATAFORMA_ERRO Execute a etapa 9 antes."
 QEMU_USUARIO="$PLATAFORMA_USUARIO_QEMU"
-[ -d "$VM_DIR" ] || falhar "/vm não existe; execute a etapa 13 antes."
+[ -d "$VM_DIR" ] || falhar "/vm não existe; execute a etapa 7 antes."
 
 titulo "Antes de continuar"
 info "Objetivo: permitir que o operador use libvirt/KVM e compartilhar /vm com a identidade QEMU '$QEMU_USUARIO'."
@@ -135,7 +135,7 @@ info "Grupo de armazenamento dedicado: $VM_STORAGE_GROUP; grupos operacionais: $
 info "Alterações: acrescenta ambas as identidades aos grupos necessários, converge /vm para root:$VM_STORAGE_GROUP 2770 com ACL padrão e ativa serviços sondados."
 info "Recomendação: execute antes de criar a VM e confirme depois, em sessão nova, id e virsh sem sudo."
 aviso "Riscos: os grupos concedem controle sobre VMs/KVM; ACLs anteriores de /vm são substituídas pelo modelo dedicado, nunca por 777."
-info "Retorno/reboot: não exige reboot, mas logout/login de toda a sessão é obrigatório antes da etapa 30/40."
+info "Retorno/reboot: não exige reboot, mas logout/login de toda a sessão é obrigatório antes da etapa 11/12."
 
 exigir_sudo
 
@@ -150,11 +150,11 @@ if [ "$PLATAFORMA_QEMU_ORIGEM" = presumido ]; then
         || aviso "qemu.conf define a identidade QEMU '$QEMU_USUARIO'; a presunção sem privilégio apontava '$QEMU_USUARIO_PRESUMIDO'."
 fi
 
-titulo "Capítulo 14: Usuário, grupos e serviços"
+titulo "Etapa 10: Usuário, grupos e serviços"
 
 for GRUPO_NECESSARIO in "$PLATAFORMA_LIBVIRT_GRUPO" "$PLATAFORMA_KVM_GRUPO"; do
     getent group "$GRUPO_NECESSARIO" >/dev/null \
-        || falhar "Grupo '$GRUPO_NECESSARIO' não existe; revise a instalação da etapa 20."
+        || falhar "Grupo '$GRUPO_NECESSARIO' não existe; revise a instalação da etapa 9."
 done
 if ! getent group "$VM_STORAGE_GROUP" >/dev/null; then
     sudo groupadd --system "$VM_STORAGE_GROUP"
@@ -239,6 +239,6 @@ ok "Operador e QEMU criam com O_EXCL, leem e escrevem arquivos herdados como $VM
 echo
 ok "Etapa concluída. Endpoint libvirt: $UNIDADE_LIBVIRT."
 aviso "IMPORTANTE: os novos grupos só valem em sessões NOVAS."
-aviso "Encerre este menu e faça LOGOUT e LOGIN de toda a sessão (ou reinicie) antes da etapa 30/40."
+aviso "Encerre este menu e faça LOGOUT e LOGIN de toda a sessão (ou reinicie) antes da etapa 11/12."
 info "Depois do login, confirme com: id"
 info "E teste sem sudo: virsh --connect qemu:///system list --all"

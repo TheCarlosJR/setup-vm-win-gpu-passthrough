@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/00-inventario.sh - Capítulo 3: Inventário de Hardware
+# etapas/00-inventario.sh - Etapa 1: Inventário de Hardware
 # ============================================================================
 # Levanta a identificação completa do hardware e grava um arquivo datado em
 # ~/inventario-hardware/. A coleta não reconfigura o hardware; se necessário,
@@ -33,7 +33,7 @@ guard_mutation inventory.write || exit 1
 exigir_nao_root
 exigir_sudo
 
-titulo "Capítulo 3: Inventário de Hardware"
+titulo "Etapa 1: Inventário de Hardware"
 info "Finalidade: registrar CPU, RAM, firmware, PCI, discos e IOMMU para conferir as próximas etapas."
 info "Pré-requisito: execute como usuário normal com acesso sudo e mantenha o hardware conectado."
 aviso "Alterações: pode atualizar o índice APT e instalar dmidecode; grava um relatório datado em ~/inventario-hardware/."
@@ -41,7 +41,7 @@ info "A coleta não altera hardware, BIOS/UEFI, firmware, partições nem config
 aviso "Risco: o relatório contém modelos, seriais e IDs do equipamento; guarde-o em local confiável."
 info "Não exige reboot; ao terminar, volte ao menu para continuar."
 
-# dmidecode pode não existir antes da etapa 12 (pacotes base); resolve aqui.
+# dmidecode pode não existir antes da etapa 6 (pacotes base); resolve aqui.
 if ! command -v dmidecode >/dev/null 2>&1; then
     info "Instalando dmidecode (necessário para ler SMBIOS/DMI)..."
     sudo apt-get update -qq
@@ -71,7 +71,7 @@ trap limpar_temporarios_inventario EXIT INT TERM
     echo "== BLOCK DEVICES =="; LC_ALL=C lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
     echo "== IOMMU/DMAR (pré-configuração) =="
     MENSAGENS_IOMMU="$(sudo dmesg | grep -i -e DMAR -e IOMMU || true)"
-    printf '%s\n' "${MENSAGENS_IOMMU:-(vazio: normal antes da etapa 30)}"
+    printf '%s\n' "${MENSAGENS_IOMMU:-(vazio: normal antes da etapa 11)}"
 } | tee "$TMP_INVENTARIO"
 
 validar_inventario_principal "$TMP_INVENTARIO" \

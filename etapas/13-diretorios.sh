@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================================
-# etapas/13-diretorios.sh - Capítulo 10: Estrutura de Diretórios
+# etapas/13-diretorios.sh - Etapa 7: Estrutura de Diretórios
 # ============================================================================
-# Cria e converge somente /vm com o grupo compartilhado dedicado. A etapa 21
+# Cria e converge somente /vm com o grupo compartilhado dedicado. A etapa 10
 # acrescenta a identidade QEMU ao mesmo grupo.
 # ============================================================================
 set -euo pipefail
@@ -13,7 +13,7 @@ VM_STORAGE_GROUP="${VM_STORAGE_GROUP:-vm-passthrough}"
 verificar() {
     local usuario_valido=0
     if [ -z "${USUARIO_LINUX:-}" ]; then
-        v_falta "USUARIO_LINUX não definido (etapa 02)."
+        v_falta "USUARIO_LINUX não definido (etapa 3)."
     elif validar_usuario_linux "$USUARIO_LINUX"; then
         usuario_valido=1
         if [ "$USUARIO_DIFERE_OPERADOR" -eq 1 ]; then
@@ -46,17 +46,17 @@ nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP" \
 
 titulo "Antes de continuar"
 info "Finalidade: preparar somente /vm para o disco virtual da VM."
-info "Pré-requisitos: conta Linux validada, pacote acl (etapa 12), sudo e confirmação do caminho."
+info "Pré-requisitos: conta Linux validada, pacote acl (etapa 6), sudo e confirmação do caminho."
 aviso "Alterações: cria o grupo dedicado '$VM_STORAGE_GROUP', acrescenta o operador, cria /vm e converge o diretório para root:$VM_STORAGE_GROUP 2770 com ACL de herança."
-info "A etapa 21 acrescentará a identidade QEMU detectada ao mesmo grupo; não se usa 777 nem o grupo interno libvirt-qemu como proprietário."
+info "A etapa 10 acrescentará a identidade QEMU detectada ao mesmo grupo; não se usa 777 nem o grupo interno libvirt-qemu como proprietário."
 info "Recomendação: inspecione conteúdo, ACLs e permissões preexistentes de /vm antes de continuar."
 aviso "Risco principal: ACLs preexistentes de /vm são substituídas pelo modelo dedicado; arquivos existentes não são removidos."
 info "O workingDisk é externo e não é criado, montado ou alterado por esta etapa."
-info "Reboot/retorno: os novos grupos exigem logout/login; a etapa 21 reforçará esse requisito antes da criação da VM."
+info "Reboot/retorno: os novos grupos exigem logout/login; a etapa 10 reforçará esse requisito antes da criação da VM."
 
 exigir_sudo
 
-titulo "Capítulo 10: Estrutura de diretórios"
+titulo "Etapa 7: Estrutura de diretórios"
 
 if ! getent group "$VM_STORAGE_GROUP" >/dev/null; then
     sudo groupadd --system "$VM_STORAGE_GROUP"
@@ -70,4 +70,4 @@ validar_modelo_diretorio_vm /vm "$USUARIO_LINUX" "" "$VM_STORAGE_GROUP" \
 ok "Diretório /vm garantido:"
 ls -ld /vm
 getfacl -cp /vm | sed 's/^/  /'
-info "/vm está em root:$VM_STORAGE_GROUP 2770 com ACL padrão; a etapa 21 integrará a identidade QEMU e testará arquivos novos pelas duas contas."
+info "/vm está em root:$VM_STORAGE_GROUP 2770 com ACL padrão; a etapa 10 integrará a identidade QEMU e testará arquivos novos pelas duas contas."

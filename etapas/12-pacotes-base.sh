@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/12-pacotes-base.sh - Capítulo 9: Instalação dos Pacotes Base
+# etapas/12-pacotes-base.sh - Etapa 6: Instalação dos Pacotes Base
 # ============================================================================
 # Utilitários de diagnóstico, cópia e administração usados pelas próximas
 # etapas. Inclui xmlstarlet, rsync (backups) e
@@ -38,13 +38,13 @@ info "Pré-requisitos: rede funcional, APT sem transações pendentes e usuário
 info "Alterações: atualiza o índice APT e instala a lista abaixo, além das dependências resolvidas pelo APT."
 info "Pacotes/finalidades: pciutils, usbutils e dmidecode (inventário de hardware)."
 info "  curl e wget (downloads); git (versionamento); htop (monitoramento); xmlstarlet (mantido até I10, sem consumidor operacional); rsync (backup); acl (herança segura em /vm)."
-info "O backup da VM depende de rsync; as etapas 13/21 dependem de setfacl/getfacl do pacote acl."
+info "O backup da VM depende de rsync; as etapas 7/10 dependem de setfacl/getfacl do pacote acl."
 aviso "Risco principal: interrupção ou conflito do APT pode deixar a instalação de pacotes incompleta."
-info "Reboot/retorno: não exige reboot; ao concluir, retorne ao menu e siga para a etapa 13."
+info "Reboot/retorno: não exige reboot; ao concluir, retorne ao menu e siga para a etapa 7."
 
 exigir_sudo
 
-titulo "Capítulo 9: Pacotes base"
+titulo "Etapa 6: Pacotes base"
 sudo apt update
 sudo apt install -y "${PACOTES[@]}"
 

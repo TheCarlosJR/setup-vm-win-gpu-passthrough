@@ -15,7 +15,7 @@ if [ -n "${BACKUPS_VM_DIR:-}" ]; then
 elif [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" != "sim" ]; then
     DESTINO_BASE="${WORKING_DISK%/}/backups-vm"
 else
-    falhar "Destino de backup não resolvido. Defina BACKUPS_VM_DIR ou configure WORKING_DISK_PATH na etapa 02 e mantenha o workingDisk montado."
+    falhar "Destino de backup não resolvido. Defina BACKUPS_VM_DIR ou configure WORKING_DISK_PATH na etapa 3 e mantenha o workingDisk montado."
 fi
 caminho_absoluto_seguro "$DESTINO_BASE" \
     || falhar "Destino de backup inseguro: '$DESTINO_BASE'."

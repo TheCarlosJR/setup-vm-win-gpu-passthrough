@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/61-airlock.sh - Capítulo 24: Compartilhamento Seguro (Airlock)
+# etapas/61-airlock.sh - Etapa 19: Compartilhamento Seguro (Airlock)
 # ============================================================================
 # Canal recomendado de troca host<->VM, exposto por SFTP com chroot, chave
 # obrigatória, usuário sem shell e firewall restrito ao IP fixo da VM.
@@ -257,7 +257,7 @@ verificar() {
     if ip link show "$AIRLOCK_REDE_IFACE" >/dev/null 2>&1; then
         v_ok "Interface do airlock: $AIRLOCK_REDE_IFACE (modo $REDE_MODO)."
     else
-        v_falta "Interface do airlock $AIRLOCK_REDE_IFACE ausente; conclua a etapa 60."
+        v_falta "Interface do airlock $AIRLOCK_REDE_IFACE ausente; conclua a etapa 18."
     fi
     if validar_ips_interface_rede "$AIRLOCK_REDE_IFACE" "${VM_IP_FIXO:-}" "${IP_FIXO_HOST:-}"; then
         v_ok "IPs do airlock coerentes: VM=$VM_IP_FIXO, host=$IP_FIXO_HOST."
@@ -356,7 +356,7 @@ nome_usuario_valido "$TRANSFER_USER" \
 nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não seguros para caminhos."
 AIRLOCK_REDE_IFACE="$(interface_rede_airlock)"
 ip link show "$AIRLOCK_REDE_IFACE" >/dev/null 2>&1 \
-    || falhar "Interface $AIRLOCK_REDE_IFACE ausente; conclua e verifique a etapa 60 primeiro."
+    || falhar "Interface $AIRLOCK_REDE_IFACE ausente; conclua e verifique a etapa 18 primeiro."
 validar_ips_interface_rede "$AIRLOCK_REDE_IFACE" "$VM_IP_FIXO" "$IP_FIXO_HOST" \
     || falhar "$REDE_IP_ERRO"
 caminho_absoluto_seguro "$AIRLOCK_TRANSITO" \
@@ -381,7 +381,7 @@ dpkg -s ufw >/dev/null 2>&1 || { sudo apt update; sudo apt install -y ufw; }
 airlock_iniciar_transacao
 trap airlock_finalizar EXIT INT TERM
 
-titulo "Capítulo 24: Airlock (modo: $REDE_MODO; interface: $AIRLOCK_REDE_IFACE; VM: $VM_NAME)"
+titulo "Etapa 19: Airlock (modo: $REDE_MODO; interface: $AIRLOCK_REDE_IFACE; VM: $VM_NAME)"
 if [ "$AIRLOCK_TRANSITO" = "$AIRLOCK_BIND" ] \
    || [[ "$AIRLOCK_BIND" == "$AIRLOCK_TRANSITO"/* ]] \
    || [[ "$AIRLOCK_TRANSITO" == "$AIRLOCK_BIND"/* ]]; then
@@ -412,7 +412,7 @@ ORIENTACAO
 # ----------------------------------------------------------------------------
 # 1. Grupo e usuário dedicados
 # ----------------------------------------------------------------------------
-titulo "1/7 Grupo e usuário dedicados"
+titulo "Etapa 19.1/7 Grupo e usuário dedicados"
 getent group airlock-transfer >/dev/null || sudo groupadd --system airlock-transfer
 if ! getent passwd "$TRANSFER_USER" >/dev/null; then
     sudo useradd --system --no-create-home --home-dir /files \
@@ -424,7 +424,7 @@ ok "Conta de sistema sem shell, sem home real e sem senha (raio de alcance míni
 # ----------------------------------------------------------------------------
 # 2. Pastas
 # ----------------------------------------------------------------------------
-titulo "2/7 Pastas"
+titulo "Etapa 19.2/7 Pastas"
 classificar_airlock_working_disk || falhar "$AIRLOCK_CONTENCAO_ERRO"
 if [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
     validar_working_disk_montado "$WORKING_DISK" \
@@ -442,7 +442,7 @@ ok "Trânsito: $AIRLOCK_TRANSITO | Base do chroot (root:root 755): $AIRLOCK_BASE
 # ----------------------------------------------------------------------------
 # 3. Visão de serviço (bindfs)
 # ----------------------------------------------------------------------------
-titulo "3/7 Visão de serviço (bindfs)"
+titulo "Etapa 19.3/7 Visão de serviço (bindfs)"
 classificar_airlock_working_disk || falhar "$AIRLOCK_CONTENCAO_ERRO"
 if [ "$AIRLOCK_DEPENDS_ON_WORKING_DISK" -eq 1 ]; then
     validar_working_disk_montado "$WORKING_DISK" \
@@ -464,7 +464,7 @@ ok "Ponta a ponta confirmado: escrita do $TRANSFER_USER na visão chega a $AIRLO
 # ----------------------------------------------------------------------------
 # 4. Servidor SSH endurecido
 # ----------------------------------------------------------------------------
-titulo "4/7 Servidor SSH"
+titulo "Etapa 19.4/7 Servidor SSH"
 sudo mkdir -p /etc/ssh/authorized_keys
 sudo chmod 755 /etc/ssh/authorized_keys
 
@@ -475,7 +475,7 @@ aviso "chave SSH nesse dispositivo ANTES, ou ele perderá o acesso (console loca
 confirmar "Aplicar o drop-in $SSHD_DROPIN?" || falhar "Cancelado."
 
 sudo tee "$SSHD_DROPIN" >/dev/null <<'SSHDCONF'
-# Endurecimento global - a porta 22 fica alcancavel pela VM (Capitulo 24).
+# Endurecimento global - a porta 22 fica alcancavel pela VM (etapa 19).
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
@@ -506,7 +506,7 @@ ok "sshd validado (sshd -t) e recarregado."
 # ----------------------------------------------------------------------------
 # 5. Chave pública gerada dentro do Windows
 # ----------------------------------------------------------------------------
-titulo "5/7 Chave"
+titulo "Etapa 19.5/7 Chave"
 if [ -s "/etc/ssh/authorized_keys/$TRANSFER_USER" ]; then
     info "Já existe chave instalada para $TRANSFER_USER (troque com --instalar-chave)."
 else
@@ -516,7 +516,7 @@ fi
 # ----------------------------------------------------------------------------
 # 6. Firewall (ufw)
 # ----------------------------------------------------------------------------
-titulo "6/7 Firewall (ufw: $AIRLOCK_REDE_IFACE <- $VM_IP_FIXO)"
+titulo "Etapa 19.6/7 Firewall (ufw: $AIRLOCK_REDE_IFACE <- $VM_IP_FIXO)"
 aviso "As regras e políticas UFW abaixo são globais. Se o UFW já estiver ativo, cada alteração terá efeito imediato."
 aviso "Se você administra por SSH, deixar o IP do administrador vazio pode bloquear o acesso quando deny incoming for aplicado."
 info "Informe um IPv4 administrativo estável/correto ou garanta acesso por console antes de prosseguir."
@@ -571,7 +571,7 @@ fi
 # ----------------------------------------------------------------------------
 # 7. Hook 00-airlock.sh (antes do 01-gpu-preflight.sh, ordem alfabética)
 # ----------------------------------------------------------------------------
-titulo "7/7 Hook de criação automática"
+titulo "Etapa 19.7/7 Hook de criação automática"
 sudo mkdir -p "$HOOK_DIR"
 sudo tee "$HOOK_FILE" >/dev/null <<'HOOKAIR'
 #!/bin/bash
@@ -663,7 +663,7 @@ ok "Hook instalado: $HOOK_FILE (roda ANTES do 01-gpu-preflight.sh)."
 
 # ----------------------------------------------------------------------------
 echo
-titulo "Como testar (as 7 verificações do Capítulo 24)"
+titulo "Como testar (as 7 verificações da etapa 19)"
 IP_FIXO_HOST_DISPLAY="${IP_FIXO_HOST:-<IP_FIXO_HOST>}"
 SUBDIR="$(basename "$AIRLOCK_BIND")"
 if [ "$REDE_MODO" = "bridge" ]; then
@@ -685,7 +685,6 @@ cat <<TESTES
                  journalctl -t hook-qemu -b deve registrar a remontagem.
 
 Regras operacionais: airlock é zona de TRÂNSITO (sem dados permanentes, fora
-do backup); nunca execute binários vindos dela (a visão é noexec); nunca crie
-exclusão do Defender para essa pasta dentro do Windows.
+do backup); nunca execute binários vindos dela (a visão é noexec).
 TESTES
-ok "Etapa 61 concluída."
+ok "Etapa 19 concluída."

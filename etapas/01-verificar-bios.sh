@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/01-verificar-bios.sh - Capítulo 12: Configuração da BIOS/UEFI
+# etapas/01-verificar-bios.sh - Etapa 2: Configuração da BIOS/UEFI
 # ============================================================================
 # A configuração da BIOS é MANUAL (feita na interface do firmware ASUS).
 # Este script:
@@ -34,7 +34,7 @@ verificar() {
 exigir_nao_root
 exigir_sudo
 
-titulo "Capítulo 12: BIOS/UEFI (ASUS TUF Gaming B550-Plus WiFi II)"
+titulo "Etapa 2: BIOS/UEFI (ASUS TUF Gaming B550-Plus WiFi II)"
 info "Finalidade: orientar a configuração manual da virtualização e verificar do Linux o que for observável."
 info "Pré-requisitos: acesso à BIOS/UEFI, senha sudo e registro dos valores atuais antes de alterá-los."
 info "Este script apenas orienta e lê o estado atual; não modifica nem reinicia a BIOS/UEFI."
@@ -89,7 +89,7 @@ IOMMU_LOG="$(awk 'tolower($0) ~ /(amd-vi|iommu)/ && exibidas < 10 { print; exibi
 if [ -n "$IOMMU_LOG" ]; then
     printf '%s\n' "$IOMMU_LOG"
 else
-    info "(vazio: normal ANTES da etapa 30, que aplica amd_iommu=on ao kernel)"
+    info "(vazio: normal ANTES da etapa 11, que aplica amd_iommu=on ao kernel)"
 fi
 
 echo "4) Secure Boot:"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/20-virtualizacao.sh - Capítulo 13: KVM, QEMU, Libvirt, Virt-Manager,
+# etapas/20-virtualizacao.sh - Etapa 9: KVM, QEMU, Libvirt, Virt-Manager,
 #                              OVMF, SWTPM e VirtIO
 # ============================================================================
 set -euo pipefail
@@ -76,13 +76,13 @@ verificar() {
 guard_mutation virtualization.manage || exit 1
 inicializar_perfil_virtualizacao || falhar "$PLATAFORMA_ERRO"
 [ "$PLATAFORMA_GERENCIADOR_PACOTES" = apt ] \
-    || falhar "A etapa 20 requer o perfil APT de Ubuntu/Pop!_OS."
+    || falhar "A etapa 9 requer o perfil APT de Ubuntu/Pop!_OS."
 exigir_nao_root
 
 titulo "Antes de continuar"
 info "Objetivo: instalar a pilha KVM/QEMU/libvirt usada para criar e executar a VM do Windows 11."
 info "Perfil: $PLATAFORMA_PERFIL; pacote QEMU: $PLATAFORMA_QEMU_PACOTE; capacidade esperada: $PLATAFORMA_QEMU_COMANDO."
-info "Pré-requisitos: SVM/virtualização habilitada na BIOS, rede para o APT e a etapa 12 concluída."
+info "Pré-requisitos: SVM/virtualização habilitada na BIOS, rede para o APT e a etapa 6 concluída."
 info "Pacotes do perfil: ${PACOTES[*]}."
 info "Alterações: atualiza o APT, instala a pilha e habilita a unidade libvirt realmente encontrada entre as alternativas do perfil."
 info "Recomendação: não interrompa o APT e só avance depois de confirmar KVM, OVMF e a conexão qemu:///system."
@@ -91,7 +91,7 @@ info "Retorno/reboot: não há rollback automático nem reboot obrigatório; con
 
 exigir_sudo
 
-titulo "Capítulo 13: Pilha de virtualização"
+titulo "Etapa 9: Pilha de virtualização"
 sudo apt update
 sudo apt install -y "${PACOTES[@]}"
 
@@ -109,7 +109,7 @@ else
     aviso "Nenhum endpoint virtlogd separado foi encontrado; o perfil libvirt pode usar ativação integrada."
 fi
 
-titulo "Verificações do capítulo"
+titulo "Verificações da etapa 9"
 command -v "$PLATAFORMA_QEMU_COMANDO" >/dev/null 2>&1 \
     && "$PLATAFORMA_QEMU_COMANDO" --version | head -n1 \
     || falhar "O pacote foi instalado, mas $PLATAFORMA_QEMU_COMANDO continua indisponível."
@@ -120,7 +120,7 @@ if ! command -v kvm-ok >/dev/null 2>&1; then
     info "kvm-ok não está disponível; instalando cpu-checker para executar a verificação."
     sudo apt install -y cpu-checker
 fi
-kvm-ok || aviso "kvm-ok reprovou: revise SVM na BIOS (etapa 01/Capítulo 12)."
+kvm-ok || aviso "kvm-ok reprovou: revise SVM na BIOS (etapa 2)."
 
 info "Firmware OVMF:"
 OVMF_DIR="$(caminho_sistema /usr/share/OVMF)" \
@@ -130,7 +130,7 @@ ls "$OVMF_DIR/"
 info "Conexão com o libvirt (modo sistema):"
 sudo virsh --connect qemu:///system list --all \
     || falhar "Pós-condição fatal: qemu:///system não respondeu após ativar $UNIDADE_LIBVIRT. Consulte o journal dessa unidade."
-ok "$UNIDADE_LIBVIRT responde em qemu:///system (o acesso sem sudo será comprovado na etapa 21)."
+ok "$UNIDADE_LIBVIRT responde em qemu:///system (o acesso sem sudo será comprovado na etapa 10)."
 
 echo
 ok "Pilha instalada. Próxima etapa: 21 (grupos e permissões do usuário)."

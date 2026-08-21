@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/30-iommu-vfio.sh - Capítulo 16: IOMMU e VFIO
+# etapas/30-iommu-vfio.sh - Etapa 11: IOMMU e VFIO
 # ============================================================================
 # Duas fases automáticas (o script percebe sozinho em qual está):
 #   Fase A (antes do reboot): converge, em UMA transação, os parâmetros de
@@ -17,7 +17,7 @@
 # os dois.
 #
 # Fiel ao manual: a GPU NÃO é presa ao vfio-pci no boot (GPU única!);
-# a vinculação é dinâmica, feita pelos hooks da etapa 50.
+# a vinculação é dinâmica, feita pelos hooks da etapa 14.
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -108,7 +108,7 @@ fi
 titulo "Antes de continuar"
 info "Objetivo: habilitar IOMMU/VFIO no host AMD e validar que o grupo PCI da GPU é seguro para passthrough dinâmico."
 info "Limitação segura: CPUs Intel e fabricantes desconhecidos são bloqueados antes de sudo; suporte Intel não é inferido nem aplicado parcialmente."
-info "Pré-requisitos: SVM e IOMMU habilitados na BIOS, configuração da etapa 02 completa e etapa 21 concluída já em uma sessão nova."
+info "Pré-requisitos: SVM e IOMMU habilitados na BIOS, configuração da etapa 3 completa e etapa 10 concluída já em uma sessão nova."
 info "Fases: a A altera boot/módulos e exige reboot; após reiniciar, execute novamente esta mesma etapa/opção para a fase B validar o kernel e registrar o grupo da GPU."
 info "Alterações: a fase A é uma transação única que define $IOMMU_PARAMS_PADRAO, converge o bloco gerenciado de $VFIO_MODULES_ARQUIVO e regenera o initramfs via $PLATAFORMA_INITRAMFS_BACKEND; a B grava IOMMU_GROUP_GPU e o inventário."
 info "Recomendação: não interrompa a atualização do boot/initramfs; se ela for interrompida, a própria etapa restaura e comprova o estado anterior antes de sair."
@@ -120,7 +120,7 @@ info "Retorno comum: apague o bloco entre '$VFIO_MARCADOR_INICIO' e '$VFIO_MARCA
 exigir_sudo
 exigir_comando lspci
 
-titulo "Capítulo 16: IOMMU e VFIO"
+titulo "Etapa 11: IOMMU e VFIO"
 
 # ----------------------------------------------------------------------------
 # Fase A: convergência transacional de boot, VFIO e initramfs (REQ-IOMMU-TX)
@@ -142,7 +142,7 @@ iommu_finalizar() {
     exit "$rc"
 }
 
-titulo "Fase A: convergir parâmetros de kernel, módulos VFIO e initramfs"
+titulo "Etapa 11.1/2 Fase A: convergir parâmetros de kernel, módulos VFIO e initramfs"
 boot_estado_iommu "$IOMMU_PARAMS_PADRAO" \
     || aviso "Estado de boot parcialmente indeterminado: ${BOOT_IOMMU_ERRO:-sem diagnóstico}."
 info "Estado atual: ativo=$BOOT_IOMMU_ATIVO, persistido=$BOOT_IOMMU_PERSISTENTE."
@@ -163,7 +163,7 @@ ok "Boot persistente, $VFIO_MODULES_ARQUIVO e initramfs convergidos e comprovado
 
 if ! cmdline_parametros_exatos "$IOMMU_PARAMS_PADRAO"; then
     aviso "O kernel em execução ainda não tem $IOMMU_PARAMS_PADRAO: ${CMDLINE_PARAM_ERRO:-parâmetros ausentes}."
-    info "Reversão (Capítulo 16, 'Como desfazer'):"
+    info "Reversão (etapa 11, 'Como desfazer'):"
     if [ "$BOOTLOADER_ATIVO" = "kernelstub" ]; then
         info "  sudo kernelstub -d \"$IOMMU_PARAMS_PADRAO\""
     else
@@ -179,7 +179,7 @@ fi
 # ----------------------------------------------------------------------------
 # Fase B: validação pós-reboot
 # ----------------------------------------------------------------------------
-titulo "Fase B: validação pós-reboot"
+titulo "Etapa 11.2/2 Fase B: validação pós-reboot"
 
 info "1) /proc/cmdline:"
 cat /proc/cmdline
@@ -193,7 +193,7 @@ if [ -n "$AMD_VI_LOG" ]; then
     printf '%s\n' "$AMD_VI_LOG"
     ok "AMD-Vi reportado pelo kernel."
 else
-    aviso "Nenhuma mensagem AMD-Vi: confirme IOMMU=Enabled na BIOS (etapa 01)."
+    aviso "Nenhuma mensagem AMD-Vi: confirme IOMMU=Enabled na BIOS (etapa 2)."
 fi
 
 info "3) Módulos VFIO:"
@@ -234,4 +234,4 @@ bash "$PROJETO_DIR/util/listar-grupos-iommu.sh" | tee "$HOME/inventario-hardware
 info "(arquivo completo salvo; acima só as últimas linhas)"
 
 echo
-ok "Capítulo 16 concluído. GPU pronta para vinculação DINÂMICA na etapa 50."
+ok "Etapa 11 concluída. GPU pronta para vinculação DINÂMICA na etapa 14."

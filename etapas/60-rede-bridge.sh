@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================================
-# etapas/60-rede-bridge.sh - Capítulo 23: configuração final da rede da VM
+# etapas/60-rede-bridge.sh - Etapa 18: configuração final da rede da VM
 # ============================================================================
 # O nome do arquivo é preservado por compatibilidade. O comportamento depende
-# de REDE_MODO, gravado pela etapa 02:
+# de REDE_MODO, gravado pela etapa 3:
 #   bridge - somente Ethernet; mantém o fluxo histórico Netplan + bridge.
 #   nat    - Ethernet ou Wi-Fi; NÃO toca Netplan e cria uma rede libvirt
 #            dedicada, vinculada explicitamente ao uplink físico escolhido.
@@ -383,7 +383,7 @@ restaurar_conf_anterior() {
 
 executar_rollback() {
     ROLLBACK_FALHOU=0
-    aviso "Falha/sinal após mutação: iniciando rollback transacional da etapa 60."
+    aviso "Falha/sinal após mutação: iniciando rollback transacional da etapa 18."
     restaurar_netplan_anterior
     restaurar_rede_anterior
     restaurar_vm_anterior
@@ -781,7 +781,7 @@ rede e SSH imediatamente; prefira console local e uma janela de manutenção.
 Recuperação: antes do commit, falha/sinal aciona o rollback do estado capturado.
 Na bridge, netplan try volta em cerca de 120 s sem confirmação; se necessário,
 use o console local para restaurar o backup datado anunciado e rode netplan apply.
-No modo bridge, IP vazio deixa reservas, --verificar e a etapa 61 pendentes.
+No modo bridge, IP vazio deixa reservas, --verificar e a etapa 19 pendentes.
 Não há reboot do host; a NIC persistente será usada no próximo start da VM.
 ORIENTACAO
 
@@ -987,8 +987,8 @@ configurar_bridge() {
     local resposta host_atual
     exigir_comando netplan
     interface_wifi "$INTERFACE_FISICA" \
-        && falhar "Bridge sobre Wi-Fi station não é suportada. Selecione REDE_MODO=nat na etapa 02."
-    titulo "Capítulo 23: bridge Ethernet ($INTERFACE_FISICA -> $REDE_BRIDGE)"
+        && falhar "Bridge sobre Wi-Fi station não é suportada. Selecione REDE_MODO=nat na etapa 3."
+    titulo "Etapa 18: bridge Ethernet ($INTERFACE_FISICA -> $REDE_BRIDGE)"
 
     confirmar "Aplicar/verificar bridge $REDE_BRIDGE sobre $INTERFACE_FISICA?" || falhar "Cancelado."
     # Antes até mesmo de consultar o arquivo dedicado, trata a eventual rede
@@ -1022,7 +1022,7 @@ NETPLAN
     [ "$arquivo_igual" -eq 1 ] && [ "$runtime_ok" -eq 1 ] && precisa_aplicar=0
 
     if [ "$precisa_aplicar" -eq 1 ]; then
-        titulo "1/3 Netplan dedicado (somente modo bridge)"
+        titulo "Etapa 18.1/3 Netplan dedicado (somente modo bridge)"
         registrar_mutacao netplan
         if sudo test -e "$NETPLAN_BRIDGE_ARQUIVO"; then
             backup="${NETPLAN_BRIDGE_ARQUIVO}.bak-$(date +%Y%m%d-%H%M%S)"
@@ -1056,14 +1056,14 @@ NETPLAN
         && ok "Conectividade externa do host OK via bridge." \
         || aviso "Sem resposta de 8.8.8.8; confira cabo, DHCP e roteador."
 
-    titulo "2/3 NIC da VM na bridge"
+    titulo "Etapa 18.2/3 NIC da VM na bridge"
     if nic_vm_confere_fonte bridge bridge "$REDE_BRIDGE"; then
         info "NIC $VM_NIC_MAC já usa bridge=$REDE_BRIDGE."
     else
         trocar_fonte_nic bridge bridge "$REDE_BRIDGE"
     fi
 
-    titulo "3/3 Reservas DHCP no roteador"
+    titulo "Etapa 18.3/3 Reservas DHCP no roteador"
     echo "MAC da VM:   $VM_NIC_MAC"
     echo -n "MAC do host em $REDE_BRIDGE: "
     ip link show "$REDE_BRIDGE" | awk '/link\/ether/{print $2; achou=1} END{if (!achou) print "não encontrado"}'
@@ -1071,7 +1071,7 @@ NETPLAN
 No roteador:
   1. reserve um endereço da LAN para o MAC da VM -> IP da VM Windows (VM_IP_FIXO);
   2. reserve outro para o MAC de $REDE_BRIDGE -> IP do host Linux na bridge (IP_FIXO_HOST).
-A etapa 61 restringe o airlock à interface $REDE_BRIDGE e ao IP da VM Windows.
+A etapa 19 restringe o airlock à interface $REDE_BRIDGE e ao IP da VM Windows.
 INSTRUCOES
     if resposta="$(perguntar_ipv4_opcional 'IP reservado para a VM Windows' "${VM_IP_FIXO:-}")"; then
         salvar_conf_transacao VM_IP_FIXO "$resposta"
@@ -1085,8 +1085,8 @@ INSTRUCOES
             || falhar "$REDE_IP_ERRO Corrija as reservas/renove o DHCP e execute a etapa novamente."
         ok "Reservas coerentes com o IPv4 efetivo de $REDE_BRIDGE."
     else
-        aviso "Endereços da bridge incompletos: a rede pode estar aplicada, mas a etapa 60 permanece pendente."
-        aviso "Preencha o IP da VM Windows e o IP do host Linux, renove o DHCP e rode --verificar antes da etapa 61."
+        aviso "Endereços da bridge incompletos: a rede pode estar aplicada, mas a etapa 18 permanece pendente."
+        aviso "Preencha o IP da VM Windows e o IP do host Linux, renove o DHCP e rode --verificar antes da etapa 19."
     fi
     info "No Windows, 'ipconfig' deve mostrar o IP da VM Windows na mesma sub-rede da LAN."
 }
@@ -1403,7 +1403,7 @@ rede_nat_usada_por_outra_vm_ativa() {
 }
 
 configurar_nat() {
-    titulo "Capítulo 23: NAT libvirt dedicado ($REDE_LIBVIRT via $INTERFACE_FISICA)"
+    titulo "Etapa 18: NAT libvirt dedicado ($REDE_LIBVIRT via $INTERFACE_FISICA)"
     info "Caminho NAT: nenhuma configuração ou comando do Netplan será usado."
 
     local master xml_rede rede_existia="$TX_REDE_EXISTIA" precisa_definir=1
@@ -1540,7 +1540,7 @@ XML
         || falhar "$REDE_IP_ERRO"
     ok "Rede gerenciada $REDE_LIBVIRT ativa/autostart: bridge=$REDE_BRIDGE_LIBVIRT, sub-rede=$REDE_NAT_CIDR."
 
-    titulo "NIC da VM na rede NAT dedicada"
+    titulo "Etapa 18: NIC da VM na rede NAT dedicada"
     if nic_vm_confere_fonte network network "$REDE_LIBVIRT"; then
         info "NIC $VM_NIC_MAC já usa network=$REDE_LIBVIRT."
     else
@@ -1564,5 +1564,5 @@ esac
 commit_transacao
 
 echo
-ok "Alterações da etapa 60 aplicadas: modo=$REDE_MODO, uplink=$INTERFACE_FISICA, NIC=$VM_NIC_MAC."
+ok "Alterações da etapa 18 aplicadas: modo=$REDE_MODO, uplink=$INTERFACE_FISICA, NIC=$VM_NIC_MAC."
 info "A etapa só fica pronta para o airlock quando os endereços da VM Windows e do host estão preenchidos e --verificar aprova."

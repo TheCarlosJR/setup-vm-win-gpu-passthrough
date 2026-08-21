@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/11-driver-nvidia.sh - Capítulo 8: Drivers NVIDIA no Host
+# etapas/11-driver-nvidia.sh - Etapa 5: Drivers NVIDIA no Host
 # ============================================================================
 # Garante o driver proprietário NVIDIA funcionando no Ubuntu/Pop!_OS. Este é
 # o estado de repouso da GPU enquanto a VM está desligada.
@@ -32,13 +32,13 @@ verificar() {
 guard_mutation nvidia.driver || exit 1
 exigir_plataforma_suportada
 [ "$PLATAFORMA_GERENCIADOR_PACOTES" = apt ] \
-    || falhar "A etapa 11 requer o perfil APT de Ubuntu/Pop!_OS."
+    || falhar "A etapa 5 requer o perfil APT de Ubuntu/Pop!_OS."
 exigir_nao_root
 
 titulo "Antes de continuar"
 info "Finalidade: manter a GPU no driver proprietário NVIDIA enquanto a VM estiver desligada."
 info "Plataforma: $PLATAFORMA_PERFIL; estratégia selecionada por ID: $PLATAFORMA_NVIDIA_ESTRATEGIA."
-info "Pré-requisitos: etapa 10 concluída, GPU NVIDIA presente, rede/repositórios funcionais e sudo."
+info "Pré-requisitos: etapa 4 concluída, GPU NVIDIA presente, rede/repositórios funcionais e sudo."
 info "Alterações: se nvidia-smi já funciona, nenhuma; caso contrário, o APT é atualizado e pacotes NVIDIA são instalados."
 info "Recomendação: mantenha acesso a TTY ou mídia de recuperação e não interrompa a instalação."
 aviso "Risco principal: um driver incompatível pode impedir a sessão gráfica no próximo boot."
@@ -46,7 +46,7 @@ info "Reboot/retorno: com nvidia-smi funcional, sai sem alteração nem reboot; 
 
 exigir_sudo
 
-titulo "Capítulo 8: Driver NVIDIA no host"
+titulo "Etapa 5: Driver NVIDIA no host"
 
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     ok "nvidia-smi já funciona: nenhum pacote será alterado e não é necessário reiniciar."
@@ -94,7 +94,7 @@ if ! sudo apt install -y "$PACOTE"; then
     erro "A instalação falhou."
     [ "$PLATAFORMA_NVIDIA_ESTRATEGIA" != ubuntu-drivers ] \
         || info "Após corrigir repositórios, a alternativa oficial é: sudo ubuntu-drivers install"
-    falhar "Driver não instalado; sem ele o passthrough dinâmico (etapa 50) não funciona."
+    falhar "Driver não instalado; sem ele o passthrough dinâmico (etapa 14) não funciona."
 fi
 
 echo

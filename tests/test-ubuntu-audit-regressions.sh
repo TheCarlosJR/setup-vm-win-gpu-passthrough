@@ -1685,7 +1685,7 @@ SAIDA_ISO="$(printf '%s\n\n' "$ISO_FORA_VM" \
     | perguntar_iso_opcional_conf ISO_WINDOWS 'ISO do Windows 11' 2>&1)" \
     || falha 'prompt opcional abortou diante de caminho existente fora de /vm'
 contem "$SAIDA_ISO" 'filho direto' 'prompt não explicou a política /vm ao recusar'
-contem "$SAIDA_ISO" 'etapa 40' 'prompt não orientou a decisão adiada para a etapa 40'
+contem "$SAIDA_ISO" 'etapa 12' 'prompt não orientou a decisão adiada para a etapa 12'
 grep -qx 'ISO_WINDOWS=""' "$CONF_ARQUIVO" \
     || falha 'ISO_WINDOWS não ficou vazia após recusa seguida de ENTER'
 
