@@ -282,4 +282,18 @@ if $VIRSH qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' >/dev/null 2>
 else
     info "guest-agent ainda sem resposta. Normal antes de instalar o virtio-win-guest-tools."
     info "Rode 'bash etapas/41-instalacao-windows.sh --verificar' (etapa 13) depois da instalação."
+    # O canal virtio é pré-requisito do lado do host: sem ele, o serviço QEMU-GA
+    # roda no Windows e o guest-ping nunca responde. VMs criadas antes de a
+    # etapa 12 passar a declarar o canal precisam recebê-lo uma única vez.
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null \
+        | grep -Fq "org.qemu.guest_agent.0"; then
+        aviso "Esta VM não tem o canal 'org.qemu.guest_agent.0' no XML: nenhum guest-agent responderá enquanto isso não for corrigido."
+        info "Com a VM DESLIGADA, adicione o canal uma única vez (as três linhas, na ordem):"
+        printf "\n  printf '%%s\\\\n' \"<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>\" > /tmp/guest-agent.xml\n"
+        printf '  virsh --connect qemu:///system attach-device %s /tmp/guest-agent.xml --config\n' \
+            "$VM_NAME"
+        printf '  rm -f /tmp/guest-agent.xml\n\n'
+        info "Depois inicie a VM uma vez: o canal só passa a existir no boot seguinte."
+        info "VMs criadas pela etapa 12 a partir desta versão já nascem com o canal."
+    fi
 fi

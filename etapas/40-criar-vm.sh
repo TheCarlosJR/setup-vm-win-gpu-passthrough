@@ -11,6 +11,8 @@
 #   - CPU host-passthrough, NIC virtio em NAT 'default' TEMPORÁRIA
 #     (a etapa 18 aplica o modo final bridge ou NAT dedicado)
 #   - Vídeo QXL temporário (a GPU real entra na etapa 14)
+#   - Canal virtio org.qemu.guest_agent.0, sem o qual o qemu-guest-agent
+#     instalado no Windows na etapa 13 nunca responde a guest-ping
 # Também aplica a regra AppArmor para o caminho customizado /vm.
 # ============================================================================
 set -euo pipefail
@@ -241,7 +243,7 @@ nome_vm_valido "$VM_NAME" || falhar "VM_NAME='$VM_NAME' contém caracteres não 
 titulo "Antes de continuar"
 info "Objetivo: preparar o armazenamento e definir/iniciar a VM do Windows 11 com UEFI, TPM, VirtIO e NAT temporária."
 info "Pré-requisitos: etapas 9, 10 (já em sessão nova) e 11 fase B concluídas, ISOs oficiais disponíveis e espaço suficiente no volume do QCOW2."
-info "Alterações: salva caminhos de ISOs já legíveis; adiciona '/vm/** rwk,' à abstração local do AppArmor e a recarrega; cria atomicamente o QCOW2 como QEMU se ausente; ativa a rede default; virt-install define e inicia a VM."
+info "Alterações: salva caminhos de ISOs já legíveis; adiciona '/vm/** rwk,' à abstração local do AppArmor e a recarrega; cria atomicamente o QCOW2 como QEMU se ausente; ativa a rede default; virt-install define e inicia a VM com o canal do guest agent."
 info "Arquivos existentes nunca recebem chmod/chgrp/ACL automáticos; metadados ou acesso divergentes causam falha com instrução segura."
 info "Recomendação: mantenha backup de qualquer QCOW2 existente, confirme o espaço livre e use somente ISOs obtidas dos canais oficiais."
 aviso "Riscos: a regra AppArmor concede ao QEMU leitura/escrita/bloqueio sob /vm; falta de espaço pode corromper o convidado; uma interrupção pode deixar disco, configuração ou definição parciais."
@@ -423,6 +425,7 @@ virt-install \
     --disk path="$ISO_WINDOWS_USO",device=cdrom,bus=sata \
     --disk path="$ISO_VIRTIO_USO",device=cdrom,bus=sata \
     --network network=default,model=virtio \
+    --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0 \
     --graphics spice \
     --video qxl \
     --sound ich9 \
