@@ -98,16 +98,16 @@ Antes de agir, identifique a proteção disponível para a etapa responsável.
 
 | Componente | Proteção durante a execução | Reversão depois do sucesso |
 |---|---|---|
-| etapa 00, inventário | publica arquivo e symlink final de forma atômica | preserve ou volte manualmente para um inventário válido |
-| etapa 02, configuração | cria backup restrito antes de redetectar | não há subcomando de restauração; use conscientemente o backup exato |
-| etapa 30, IOMMU/VFIO | mutações individuais tentam rollback e verificam pós-condições | não existe `--desfazer` global; boot, `vfio.conf` e initramfs são revertidos separadamente |
-| etapa 40, criação da VM | restaura apenas o selo temporário de `/vm` | não existe rollback global; definição, QCOW2, NVRAM e AppArmor exigem revisão separada |
-| etapa 50, hooks/GPU/HD1 | hooks e XML são transacionais antes do commit | não existe teardown automático pós-commit; use os backups anunciados |
-| etapa 52, pinning/HugePages | backup e rollback semântico do XML | possui `--desfazer`, em ordem inversa e possivelmente em duas execuções |
-| etapa 53, isolamento | valida persistência e efeito no kernel | possui `--desfazer` para as três chaves de isolamento |
-| etapa 60, bridge/NAT | restaura Netplan, rede libvirt, XML e configuração antes do commit; bridge usa `netplan try` | não possui `--desfazer`; restauração pós-commit é manual |
-| etapa 61, Airlock | restaura arquivos, conta/grupo, mount, SSH e UFW dentro da transação | não possui teardown completo; pacotes instalados antes da transação não são removidos |
-| etapa 70, TRIM | faz backup do XML e tenta restaurá-lo se a pós-condição falhar | não possui `--desfazer`; a pasta de backup é independente do XML |
+| etapa 1, inventário | publica arquivo e symlink final de forma atômica | preserve ou volte manualmente para um inventário válido |
+| etapa 3, configuração | cria backup restrito antes de redetectar | não há subcomando de restauração; use conscientemente o backup exato |
+| etapa 11, IOMMU/VFIO | mutações individuais tentam rollback e verificam pós-condições | não existe `--desfazer` global; boot, `vfio.conf` e initramfs são revertidos separadamente |
+| etapa 12, criação da VM | restaura apenas o selo temporário de `/vm` | não existe rollback global; definição, QCOW2, NVRAM e AppArmor exigem revisão separada |
+| etapa 14, hooks/GPU/HD1 | hooks e XML são transacionais antes do commit | não existe teardown automático pós-commit; use os backups anunciados |
+| etapa 16, pinning/HugePages | backup e rollback semântico do XML | possui `--desfazer`, em ordem inversa e possivelmente em duas execuções |
+| etapa 17, isolamento | valida persistência e efeito no kernel | possui `--desfazer` para as três chaves de isolamento |
+| etapa 18, bridge/NAT | restaura Netplan, rede libvirt, XML e configuração antes do commit; bridge usa `netplan try` | não possui `--desfazer`; restauração pós-commit é manual |
+| etapa 19, Airlock | restaura arquivos, conta/grupo, mount, SSH e UFW dentro da transação | não possui teardown completo; pacotes instalados antes da transação não são removidos |
+| etapa 20, TRIM | faz backup do XML e tenta restaurá-lo se a pós-condição falhar | não possui `--desfazer`; a pasta de backup é independente do XML |
 | snapshot | ponto interno no QCOW2 principal | pode ser revertido pelo utilitário, com perda das mudanças posteriores |
 | backup da VM | cópia offline validada do escopo documentado | não existe utilitário de restauração; o conjunto precisa ser testado isoladamente |
 
@@ -177,7 +177,7 @@ utilitário exige a confirmação literal `ASSUMIR`.
 O desenho atual usa `hostdev managed='yes'`: o libvirt é a autoridade do
 detach/reattach. Se a recuperação suportada não comprovar sucesso, preserve os
 journals e reinicie o host somente com a VM desligada. Depois do reboot, repita
-`nvidia-smi`, o verificador da etapa 50 e o diagnóstico geral.
+`nvidia-smi`, o verificador da etapa 14 e o diagnóstico geral.
 
 ### Critério de sucesso
 
@@ -201,14 +201,14 @@ sudo journalctl -u libvirtd -b -e --no-pager
 sudo journalctl -t hook-qemu -b --no-pager
 ```
 
-A etapa 40 verifica identidade do usuário QEMU, modelo de segurança de `/vm`,
-QCOW2, ISOs, domínio, MAC e AppArmor. A etapa 50 verifica dispatcher, hooks,
+A etapa 12 verifica identidade do usuário QEMU, modelo de segurança de `/vm`,
+QCOW2, ISOs, domínio, MAC e AppArmor. A etapa 14 verifica dispatcher, hooks,
 marcador de instalação, GPU/áudio, grupo IOMMU, HD1 e cardinalidade dos
 `hostdev` no XML.
 
 ### Criação parcial da VM
 
-A etapa 40 não possui rollback global. Se `virt-install` deixou apenas uma
+A etapa 12 não possui rollback global. Se `virt-install` deixou apenas uma
 definição incompleta e a decisão for recriá-la, o comando indicado pela própria
 etapa é:
 
@@ -225,7 +225,7 @@ um erro de definição.
 
 ### XML ou hooks divergentes
 
-- Se a etapa 50 falhou antes do commit, deixe o bloqueio de instalação ativo,
+- Se a etapa 14 falhou antes do commit, deixe o bloqueio de instalação ativo,
   leia a saída preservada e corrija a causa antes de reexecutar.
 - Se existe state file residual depois que a VM desligou, recupere primeiro a
   GPU pela seção anterior.
@@ -244,7 +244,7 @@ host. Compare o XML inativo e repita os verificadores responsáveis.
 Não corrija `/vm` com `chmod -R`, `chown -R` ou ACL genérica. O modelo atual
 exige `/vm` real, grupo dedicado, modo e ACLs específicos; o QCOW2 precisa ser
 arquivo regular, canônico, com formato qcow2 e sem links inesperados. Rode a
-etapa 40 para obter a divergência exata.
+etapa 12 para obter a divergência exata.
 
 Se houver HD1 físico, confirme que o `/dev/disk/by-id/...` ainda representa o
 mesmo dispositivo e que nenhuma partição está montada ou sendo usada no host.
@@ -278,7 +278,7 @@ aprova isolamento DMA nem capacidade de reset.
 
 ### Como reverter a fase de boot
 
-A etapa 30 aplica boot, `/etc/modules-load.d/vfio.conf` e initramfs, solicita
+A etapa 11 aplica boot, `/etc/modules-load.d/vfio.conf` e initramfs, solicita
 reboot e só depois registra o grupo validado. Não há `--desfazer` global.
 
 Para host configurado por `kernelstub`, a própria etapa informa:
@@ -337,13 +337,13 @@ descobre UUID nem grava a montagem principal no `fstab`. O caminho precisa ser
 um diretório canônico e o mountpoint exato.
 
 Se a montagem sumiu, restaure-a pelo mecanismo externo usado pelo host e só
-depois repita a etapa 14. Não crie um diretório vazio no mesmo caminho para
+depois repita a etapa 8. Não crie um diretório vazio no mesmo caminho para
 contornar a verificação: isso pode direcionar backups e Airlock para o disco do
 sistema.
 
 ### `/vm`, QCOW2 e ISOs
 
-A etapa 40 não copia ISOs nem corrige automaticamente permissões inseguras. Os
+A etapa 12 não copia ISOs nem corrige automaticamente permissões inseguras. Os
 arquivos precisam estar diretamente no armazenamento autorizado, ser regulares,
 canônicos, sem links e legíveis pela identidade QEMU detectada.
 
@@ -368,7 +368,7 @@ conscientemente. O HD1 não entra em snapshot, backup da VM ou rollback do XML.
 
 ### TRIM/discard
 
-A etapa 70 cria backup do XML antes de aplicar `discard='unmap'`. Se a
+A etapa 20 cria backup do XML antes de aplicar `discard='unmap'`. Se a
 pós-condição falhar, tenta restaurar o XML e compara o resultado. Se o script não
 comprovar o rollback, não inicie a VM.
 
@@ -406,7 +406,7 @@ persistente e ativo, bridge virtual, reserva DHCP/MAC e NIC em `source network`.
 
 A rede libvirt `default` é separada da rede NAT dedicada deste projeto.
 
-### Falha durante a etapa 60
+### Falha durante a etapa 18
 
 Antes da primeira mutação, a etapa captura:
 
@@ -469,7 +469,7 @@ aplique Netplan. O modo NAT recusa um uplink ainda anexado a uma bridge.
 
 ### Critério de sucesso
 
-- etapa 60 retorna 0;
+- etapa 18 retorna 0;
 - uplink e rota padrão correspondem ao modo escolhido;
 - XML ativo e persistente da rede não divergem;
 - NIC da VM usa a fonte esperada pelo seu MAC;
@@ -527,7 +527,7 @@ anunciados:
 5. entrada bindfs marcada no `fstab` e montagem;
 6. conta/grupo somente se foram criados exclusivamente para o Airlock;
 7. hook e diretórios gerenciados;
-8. etapa 61 `--verificar` e teste SFTP real.
+8. etapa 19 `--verificar` e teste SFTP real.
 
 A configuração pode aplicar globalmente `PasswordAuthentication no`,
 `KbdInteractiveAuthentication no`, `PermitRootLogin no` e política UFW restrita.
@@ -552,10 +552,10 @@ virsh --connect qemu:///system vcpuinfo <VM_NAME>
 ```
 
 HugePages reservam RAM mesmo com a VM desligada. Isolamento retira CPUs do
-scheduler geral do host mesmo sem a VM. A etapa 52 mantém ao menos um core
-físico completo para o host; a etapa 53 exige a CPU 0 no housekeeping.
+scheduler geral do host mesmo sem a VM. A etapa 16 mantém ao menos um core
+físico completo para o host; a etapa 17 exige a CPU 0 no housekeeping.
 
-### Desfazer a etapa 52
+### Desfazer a etapa 16
 
 Com a VM desligada:
 
@@ -574,7 +574,7 @@ A reversão é intencionalmente inversa:
 
 Não remova apenas uma das três chaves de boot.
 
-### Desfazer a etapa 53
+### Desfazer a etapa 17
 
 ```bash
 bash etapas/53-cpu-isolation.sh --desfazer
@@ -582,8 +582,8 @@ bash etapas/53-cpu-isolation.sh --desfazer
 
 O fluxo remove conjuntamente `isolcpus`, `nohz_full` e `rcu_nocbs`, valida a
 persistência e exige reboot para comprovar o efeito. Se for necessário mudar o
-mapa de pinning enquanto existe isolamento antigo, desfaça primeiro a etapa 53,
-reinicie e só então altere a etapa 52.
+mapa de pinning enquanto existe isolamento antigo, desfaça primeiro a etapa 17,
+reinicie e só então altere a etapa 16.
 
 ### VM não inicia com HugePages
 
@@ -671,19 +671,19 @@ bash etapas/02-detectar-config.sh --verificar
 bash menu.sh --status
 ```
 
-A etapa 00 publica o inventário validado em
+A etapa 1 publica o inventário validado em
 `~/inventario-hardware/inventario-<timestamp>.txt` e troca atomicamente o link
 `ultimo-inventario.txt`. Uma coleta interrompida não substitui o último
 inventário válido.
 
 ### Redetectar hardware
 
-A execução normal da etapa 02 e `--redetectar`:
+A execução normal da etapa 3 e `--redetectar`:
 
 1. criam backup restrito em
    `backups/passthrough.conf.pre-redetectar-<timestamp>...bak`;
 2. limpam atomicamente as escolhas administradas;
-3. recomeçam a configuração em `1/8`;
+3. recomeçam a configuração em `Etapa 3.1/8`;
 4. preservam opções externas ao fluxo, como caminhos de QCOW2, nomes de bridge,
    MAC, bind e destino de backup.
 
@@ -698,7 +698,7 @@ Não existe subcomando de restauração. Para voltar:
 2. compare hardware, BDFs, discos, bootloader e uplink atuais;
 3. restaure o arquivo preservando propriedade e modo restrito;
 4. não use `source` para validá-lo;
-5. rode etapa 02 `--verificar` e depois `menu.sh --status`;
+5. rode etapa 3 `--verificar` e depois `menu.sh --status`;
 6. se o hardware mudou, não force o backup antigo: faça novo inventário e nova
    detecção.
 
@@ -742,7 +742,7 @@ Resposta esperada:
 ### NVIDIA Code 43, tela preta ou instabilidade
 
 1. preserve os logs do host e o estado do Gerenciador de Dispositivos;
-2. confirme XML/GPU com a etapa 50;
+2. confirme XML/GPU com a etapa 14;
 3. faça instalação limpa do driver NVIDIA dentro do Windows;
 4. teste uma mudança de firmware por vez;
 5. Re-Size BAR pode ser testado desabilitado como diagnóstico e restaurado se
@@ -789,7 +789,7 @@ conhecidamente funcional.
 | `/run/libvirt-gpu-passthrough/` | state file da entrega dinâmica da GPU | não remova manualmente |
 | `/run/libvirt-gpu-locks/` | locks de hooks/recuperação | estado efêmero de runtime |
 | `/etc/libvirt/hooks/qemu.d/<VM_NAME>/` | hooks gerenciados da VM | não misture scripts legados |
-| `/etc/modules-load.d/vfio.conf` | carregamento persistente de VFIO | gerenciado pela etapa 30 |
+| `/etc/modules-load.d/vfio.conf` | carregamento persistente de VFIO | gerenciado pela etapa 11 |
 | `/etc/netplan/90-vm-passthrough-bridge.yaml` | Netplan dedicado da bridge | não existe no modo NAT |
 | `/etc/ssh/sshd_config.d/10-airlock.conf` | drop-in SSH do Airlock | valide com `sshd -t` |
 | `/etc/ssh/authorized_keys/<TRANSFER_USER>` | chave SFTP restrita | root-only |
@@ -808,7 +808,7 @@ real por um exemplo sem confirmar sua origem.
 - CPU Intel;
 - sessão gráfica anterior à entrega da GPU;
 - reset físico de uma GPU travada;
-- teardown pós-commit completo das etapas 30, 40, 50, 60, 61 e 70;
+- teardown pós-commit completo das etapas 11, 12, 14, 18, 19 e 20;
 - consistência de aplicações e dados abertos dentro do Windows.
 
 Quando o mecanismo necessário não existir, pare e crie um plano específico com

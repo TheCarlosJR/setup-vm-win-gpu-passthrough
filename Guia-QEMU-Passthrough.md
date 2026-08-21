@@ -57,7 +57,7 @@ apontar para outro disco depois de um boot.
 Regras práticas:
 
 - Identifique disco sempre por **modelo, serial e tamanho**, comparando com o
-  inventário gerado na etapa 00.
+  inventário gerado na etapa 1.
 - Para o disco físico inteiro entregue à VM, use somente um caminho persistente
   `/dev/disk/by-id/...`, nunca `/dev/sdX`.
 - `WORKING_DISK_PATH` não identifica um dispositivo: é apenas um caminho
@@ -66,7 +66,7 @@ Regras práticas:
   grava uma entrada de montagem no `fstab`.
 - Antes de entregar um disco à VM, confirme que ele **não tem nada montado** no
   host: `lsblk -o NAME,SIZE,MOUNTPOINT /dev/sdX`.
-- O disco da raiz do Linux nunca vai para a VM. A etapa 02 detecta a raiz com
+- O disco da raiz do Linux nunca vai para a VM. A etapa 3 detecta a raiz com
   `findmnt -no SOURCE /` e remove esse disco da lista de candidatos.
 
 ```bash
@@ -98,7 +98,7 @@ O que preparar **antes** do primeiro teste:
 ### 2.3 Não entregar todos os recursos à VM
 
 Um host sem folga trava, e um host travado prejudica a própria VM (é o QEMU que
-roda nele). A etapa 02 impõe estes tetos automaticamente:
+roda nele). A etapa 3 impõe estes tetos automaticamente:
 
 | Recurso | Regra |
 |---|---|
@@ -106,7 +106,7 @@ roda nele). A etapa 02 impõe estes tetos automaticamente:
 | RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB) |
 | Disco | disco da raiz e qualquer disco montado/em uso ficam fora dos candidatos da VM; workingDisk não é persistido como disco físico |
 
-Cuidado específico com **HugePages** (etapa 52): a RAM reservada sai do host de
+Cuidado específico com **HugePages** (etapa 16): a RAM reservada sai do host de
 forma permanente, no boot, mesmo com a VM desligada. Reservar demais deixa o
 host sem memória para subir a sessão gráfica.
 
@@ -120,12 +120,12 @@ e, por consequência, o canal de arquivos com o host.
 
 O projeto nunca adiciona a montagem do workingDisk ao `/etc/fstab`. A única
 entrada relacionada a esse armazenamento que pode existir é a visão `bindfs`
-do airlock, gerenciada pela etapa 61; ela não monta o workingDisk. Essa etapa
+do airlock, gerenciada pela etapa 19; ela não monta o workingDisk. Essa etapa
 faz backup datado antes de editar e testa a visão antes de concluir.
 
 ### 2.6 Testar bridge de forma reversível
 
-Somente `REDE_MODO=bridge` altera a rede declarada do host. A etapa 60 grava
+Somente `REDE_MODO=bridge` altera a rede declarada do host. A etapa 18 grava
 exclusivamente `/etc/netplan/90-vm-passthrough-bridge.yaml`, sem impor renderer
 nem substituir os demais YAMLs, e usa `sudo netplan try`. Se `generate`, `try`,
 `apply` ou um passo posterior falhar, a transação restaura/remove o dedicado,
@@ -149,34 +149,43 @@ vivo e pede a senha do sudo uma única vez.
 ```bash
 bash menu.sh              # menu interativo com status por etapa
 bash menu.sh --status     # só o checklist
-bash etapas/30-iommu-vfio.sh --verificar
+bash etapas/30-iommu-vfio.sh --verificar   # etapa 11
 ```
 
-| Etapa | O que faz | Parada |
-|---|---|---|
-| 00 | publica inventário completo com nome único e atualiza `ultimo-inventario.txt` atomicamente | |
-| 01 | checklist da BIOS e verificação pelo lado do Linux | |
-| 02 | usa o último inventário, faz backup/reset e pergunta hardware e rede novamente | |
-| 10 | atualiza sistema e firmware | reboot |
-| 11 | driver NVIDIA no host | reboot |
-| 12 | pacotes utilitários (inclui `xmlstarlet`) | |
-| 13 | cria e converge somente `/vm` | |
-| 14 | preflight não destrutivo do workingDisk externo, ou confirma a dispensa | |
-| **20** | **instala QEMU/KVM/libvirt/OVMF/swtpm** | |
-| 21 | grupos do usuário e permissões de `/vm` | logout |
-| 30 | IOMMU e módulos VFIO | reboot |
-| 40 | cria a VM com `virt-install`, NAT `default` temporária e MAC persistido | |
-| 41 | instalação do Windows (interativa) | |
-| 50 | hooks da GPU e disco físico no XML | |
-| 51 | USB em passthrough (opcional) | |
-| 52 | CPU pinning e HugePages (opcional) | reboot |
-| 53 | isolamento de CPU (opcional) | reboot |
-| 60 | aplica a rede final: bridge Ethernet ou NAT libvirt dedicado | |
-| 61 | airlock: SFTP na interface/endereço do modo selecionado | |
-| 70 | TRIM/discard e pasta de backups | |
+O número da etapa é o do menu (1 a 20). O nome do arquivo em `etapas/` mantém a
+numeração histórica, que não é a mesma: use sempre o número do menu para
+conversar sobre o fluxo e a coluna `Script` para localizar o arquivo.
 
-Ordem obrigatória até a etapa 50. As etapas 51–53 são ajustes opcionais; a 61
-depende da rede finalizada pela 60. A etapa 70 pode ser executada depois da VM.
+| Etapa | Script em `etapas/` | O que faz | Parada |
+|---|---|---|---|
+| 1 | `00-inventario.sh` | publica inventário completo com nome único e atualiza `ultimo-inventario.txt` atomicamente | |
+| 2 | `01-verificar-bios.sh` | checklist da BIOS e verificação pelo lado do Linux | |
+| 3 | `02-detectar-config.sh` | usa o último inventário, faz backup/reset e pergunta hardware e rede novamente | |
+| 4 | `10-atualizar-sistema.sh` | atualiza sistema e firmware | reboot |
+| 5 | `11-driver-nvidia.sh` | driver NVIDIA no host | reboot |
+| 6 | `12-pacotes-base.sh` | pacotes utilitários (inclui `xmlstarlet`) | |
+| 7 | `13-diretorios.sh` | cria e converge somente `/vm` | |
+| 8 | `14-working-disk.sh` | preflight não destrutivo do workingDisk externo, ou confirma a dispensa | |
+| **9** | `20-virtualizacao.sh` | **instala QEMU/KVM/libvirt/OVMF/swtpm** | |
+| 10 | `21-usuario-grupos.sh` | grupos do usuário e permissões de `/vm` | logout |
+| 11 | `30-iommu-vfio.sh` | IOMMU e módulos VFIO | reboot |
+| 12 | `40-criar-vm.sh` | cria a VM com `virt-install`, NAT `default` temporária e MAC persistido | |
+| 13 | `41-instalacao-windows.sh` | instalação e pós-instalação do Windows, incluindo o driver NVIDIA no guest (interativa) | |
+| 14 | `50-hooks-gpu-hd1.sh` | hooks da GPU e disco físico no XML | |
+| 15 | `51-usb-passthrough.sh` | USB em passthrough (opcional) | |
+| 16 | `52-cpu-pinning-hugepages.sh` | CPU pinning e HugePages (opcional) | reboot |
+| 17 | `53-cpu-isolation.sh` | isolamento de CPU (opcional) | reboot |
+| 18 | `60-rede-bridge.sh` | aplica a rede final: bridge Ethernet ou NAT libvirt dedicado | |
+| 19 | `61-airlock.sh` | airlock: SFTP na interface/endereço do modo selecionado | |
+| 20 | `70-trim-discard.sh` | TRIM/discard e pasta de backups | |
+
+Ordem obrigatória até a etapa 14. As etapas 15 a 17 são ajustes opcionais; a
+etapa 19 depende da rede finalizada pela etapa 18. A etapa 20 pode ser executada
+depois da VM.
+
+Etapas com vários sub-passos os anunciam como `Etapa N.x`: a etapa 3 vai de
+`Etapa 3.1/8` a `Etapa 3.8/8`, a etapa 13 de `13.1` a `13.17`, e assim por
+diante. É por esse número que o roteiro se refere a cada bloco.
 
 ---
 
@@ -231,8 +240,9 @@ A execução normal sempre usa o alvo válido de `ultimo-inventario.txt` (ou o
 inventário legado/novo temporalmente mais recente como fallback), compara CPU/topologia, RAM,
 PCI e modelo/serial/tamanho dos discos com o estado atual e anuncia o caminho.
 Uma divergência aborta antes de alterar a configuração e exige executar a etapa
-00 novamente. Em seguida, cria backup restrito do `passthrough.conf`, limpa em
-uma única atualização as escolhas da etapa 02 e recomeça em `1/8 Identidade`.
+1 novamente. Em seguida, cria backup restrito do `passthrough.conf`, limpa em
+uma única atualização as escolhas da etapa 3 e recomeça em
+`Etapa 3.1/8 Identidade`.
 `--redetectar` é alias desse comportamento; `--verificar` é estritamente somente
 leitura. Consultas e travas ao vivo de GPU, discos, CPU, RAM e rede continuam
 sendo a autoridade.
@@ -242,7 +252,7 @@ Em Wi-Fi station, a etapa grava somente `nat`: bridge de camada 2 normalmente
 exige 4addr/WDS no adaptador e no ponto de acesso e não é suportada. A lista de
 interfaces é sempre completa e destaca explicitamente a rota IPv4 efetiva
 obtida por `ip -4 route get 1.1.1.1`, uma consulta local que não envia pacote.
-Se NAT for escolhido em outro adaptador, a etapa 02 avisa; a 60 não altera
+Se NAT for escolhido em outro adaptador, a etapa 3 avisa; a 60 não altera
 uplink/métrica e aborta antes de qualquer mutação até `INTERFACE_FISICA` ser o
 dispositivo efetivo. Trocar o uplink mantendo bridge limpa `VM_IP_FIXO` e
 `IP_FIXO_HOST`, pois eram reservas da LAN anterior.
@@ -300,7 +310,7 @@ O que cada peça faz:
 | `virt-manager` | interface gráfica e console da VM |
 | `ovmf` | firmware UEFI da VM, requisito do Windows 11 |
 | `swtpm`, `swtpm-tools` | TPM 2.0 emulado, também requisito do Windows 11 |
-| `bridge-utils` | apoio ao modo bridge Ethernet da etapa 60; o NAT libvirt não altera Netplan |
+| `bridge-utils` | apoio ao modo bridge Ethernet da etapa 18; o NAT libvirt não altera Netplan |
 
 Verificação:
 
@@ -426,9 +436,9 @@ Por que cada escolha:
 - **disco `virtio` com `cache=none`**: caminho mais rápido, sem cache duplicado
   entre host e guest.
 - **vídeo QXL no início**: dá console gráfico para instalar o Windows antes de a
-  GPU real entrar em cena. Remova depois (`--remover-video` na etapa 50).
+  GPU real entrar em cena. Remova depois (`--remover-video` na etapa 14).
 - **rede NAT `default` temporária**: garante conectividade durante a instalação em
-  qualquer escolha. A etapa 40 persiste o MAC; a 60 troca a fonte dessa mesma NIC,
+  qualquer escolha. A etapa 12 persiste o MAC; a 60 troca a fonte dessa mesma NIC,
   identificada pelo MAC (não por posição), para `br0` ou para o NAT dedicado.
 
 Regra do AppArmor, necessária porque `/vm` não é um caminho padrão do libvirt:
@@ -469,10 +479,9 @@ Depois, dentro do Windows:
   Administrador). Com ela ativa, "Desligar" faz hibernação parcial e deixa o
   NTFS marcado como em uso; depois de aplicar, desligue a VM por completo uma
   vez.
-- Mantenha o Windows Defender ativo. Não crie exclusão para a pasta de
-  transferência.
-- O driver NVIDIA dentro da VM só na próxima seção, quando a GPU real estiver em
-  passthrough.
+- O driver NVIDIA dentro da VM entra no sub-passo 13.15, depois de a etapa 14
+  colocar a GPU real em passthrough. O roteiro completo está na própria etapa 13
+  (`bash etapas/41-instalacao-windows.sh`).
 
 Verificação do host:
 
@@ -517,7 +526,7 @@ par por escrita**, no formato `vendor device` separado por espaço. Escrever
 porque a escrita é silenciada. Os hooks gerados aqui fazem uma escrita por
 dispositivo.
 
-Disco físico dedicado (só se você escolheu um na etapa 02):
+Disco físico dedicado (só se você escolheu um na etapa 3):
 
 ```xml
 <disk type='block' device='disk'>
@@ -537,9 +546,14 @@ virsh --connect qemu:///system start win11
 ```
 
 Esperado: o monitor sai do desktop Linux, fica alguns segundos sem sinal e mostra
-o boot do Windows pela GPU real. Na primeira vez, instale o driver NVIDIA dentro
-do Windows (baixado de `nvidia.com`, opção "Instalação limpa"). O Gerenciador de
+o boot do Windows pela GPU real. Na primeira vez, o Windows ainda está sem driver
+NVIDIA: siga o sub-passo 13.15 da etapa 13, que tem o roteiro completo (download
+oficial, "Instalação limpa" e as verificações). Ao final, o Gerenciador de
 Dispositivos não deve mostrar "Code 43".
+
+Lembre que, com a etapa 14 aplicada, o console SPICE do host desaparece junto com
+o gerenciador de exibição: tenha o monitor ligado na GPU da VM e teclado e mouse
+dedicados pela etapa 15 antes deste primeiro start.
 
 Desligue o Windows normalmente e confirme que o desktop Linux volta sozinho.
 
@@ -569,11 +583,11 @@ bash etapas/50-hooks-gpu-hd1.sh --anti-code43
 Aplique **um por vez** e meça antes de seguir para o próximo. Todos têm custo
 para o host.
 
-| Etapa | O que faz | Custo |
-|---|---|---|
-| 51 | USB em passthrough por vendor:product | o dispositivo fica exclusivo da VM enquanto ela roda |
-| 52 | CPU pinning, topologia real e HugePages | a RAM reservada sai do host no boot, mesmo com a VM desligada |
-| 53 | `isolcpus`: tira os núcleos da VM do escalonador | os núcleos isolados param de receber processos do host, sempre |
+| Etapa | Script em `etapas/` | O que faz | Custo |
+|---|---|---|---|
+| 15 | `51-usb-passthrough.sh` | USB em passthrough por vendor:product | o dispositivo fica exclusivo da VM enquanto ela roda |
+| 16 | `52-cpu-pinning-hugepages.sh` | CPU pinning, topologia real e HugePages | a RAM reservada sai do host no boot, mesmo com a VM desligada |
+| 17 | `53-cpu-isolation.sh` | `isolcpus`: tira os núcleos da VM do escalonador | os núcleos isolados param de receber processos do host, sempre |
 
 ```bash
 bash etapas/51-usb-passthrough.sh
@@ -581,10 +595,10 @@ bash etapas/52-cpu-pinning-hugepages.sh
 bash etapas/53-cpu-isolation.sh
 ```
 
-Dentro do Windows, o complemento da etapa 53 é ativar interrupções MSI para a
+Dentro do Windows, o complemento da etapa 17 é ativar interrupções MSI para a
 GPU: `windows/Ativar-MSI-GPU.ps1` (como administrador). Reduz microengasgos.
 
-Nunca passe o único teclado do host na etapa 51: você precisa dele para o
+Nunca passe o único teclado do host na etapa 15: você precisa dele para o
 terminal de emergência.
 
 ---
@@ -598,7 +612,7 @@ bash etapas/61-airlock.sh       # canal único de arquivos, por SFTP
 bash etapas/70-trim-discard.sh  # TRIM do Windows libera espaço real no host
 ```
 
-A escolha feita na etapa 02 controla todo o fluxo:
+A escolha feita na etapa 3 controla todo o fluxo:
 
 | Uplink | `REDE_MODO` | Backend final | Endereçamento |
 |---|---|---|---|
@@ -638,7 +652,7 @@ NAT; uma falha em Netplan ou depois restaura/remove o dedicado, executa
 No bridge, o commit lógico exige Netplan aplicado, `REDE_BRIDGE`
 administrativamente `UP`, uplink como `master` da bridge e NIC da VM apontando
 para ela. `VM_IP_FIXO` e `IP_FIXO_HOST` podem permanecer incompletos; nesse caso,
-o `--verificar` e a etapa 61 ficam pendentes.
+o `--verificar` e a etapa 19 ficam pendentes.
 
 Na migração NAT → bridge, antes de tocar Netplan, a etapa consulta com
 `virsh --connect qemu:///system list --all --name` todas as outras VMs e seus
@@ -646,7 +660,7 @@ XMLs inativos. Consumidores por `source network` ou `source bridge`, ativos ou
 não, são listados e bloqueiam a mudança. Sem consumidores, autostart é
 desabilitado e a rede é parada; no sucesso sua definição permanece inativa. Uma
 homônima sem marcador é avisada e intocada. Para bridge → NAT, restaure ou
-remova o arquivo dedicado, aplique Netplan e só então rode a etapa 60: NAT
+remova o arquivo dedicado, aplique Netplan e só então rode a etapa 18: NAT
 recusa uplink ainda escravizado a bridge.
 
 `VM_NIC_MAC` identifica a interface sem depender da posição no XML. Na migração
@@ -657,7 +671,7 @@ confere fonte da NIC, endereços, backend e também a igualdade entre uplink NAT
 rota IPv4 efetiva.
 
 O **airlock** continua sendo o único caminho de arquivos: SFTP com chroot, chave
-obrigatória, usuário sem shell e firewall. A etapa 61 trata toda regra com o
+obrigatória, usuário sem shell e firewall. A etapa 19 trata toda regra com o
 comentário `SFTP airlock - somente VM Windows` como gerenciada: falha fechado se
 alguma não puder ser parseada, remove cada ocorrência antiga sem fallback,
 confirma cardinalidade zero, adiciona a atual e exige exatamente uma regra
@@ -671,7 +685,7 @@ vazia e o workingDisk estiver configurado, o padrão é
 está dentro do workingDisk, a etapa e o hook exigem que o mountpoint-base esteja
 ativo e exato. A visão SFTP usa `noexec,nosuid,nodev`. Trate-a como zona de
 passagem, sem dados permanentes e fora do backup; nunca execute binários vindos
-dela nem crie exclusão do Defender para a pasta.
+dela.
 
 ---
 
@@ -696,7 +710,7 @@ recusa XML apontando para overlay e qualquer QCOW2 com backing file: copiar só
 a base nesse estado produziria um backup desatualizado. `BACKUPS_VM_DIR`
 explícito tem prioridade. Sem ele, o utilitário usa
 `$WORKING_DISK_PATH/backups-vm` somente com workingDisk configurado; sem destino,
-falha com orientação. A etapa 70 apenas avisa e pula a preparação do backup,
+falha com orientação. A etapa 20 apenas avisa e pula a preparação do backup,
 sem desfazer ou bloquear o TRIM. Destinos dentro do workingDisk exigem o
 mountpoint-base ativo antes de qualquer criação ou escrita.
 
@@ -741,7 +755,7 @@ gerais:
 | Hooks da GPU | `sudo rm -rf /etc/libvirt/hooks/qemu.d/<vm>` e `sudo systemctl restart libvirtd` |
 | VM inteira | `virsh --connect qemu:///system undefine <vm> --nvram` (o QCOW2 continua no disco) |
 
-A rede `default` usada na instalação não é sobrescrita pela etapa 60. Para uma
+A rede `default` usada na instalação não é sobrescrita pela etapa 18. Para uma
 reversão temporária, reative-a (`virsh --connect qemu:///system net-start
 default`, `virsh --connect qemu:///system net-autostart default`) e restaure o
 XML de backup cuja NIC apontava para `network='default'`.

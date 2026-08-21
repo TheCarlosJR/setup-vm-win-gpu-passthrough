@@ -31,33 +31,33 @@ popos-win11-passthrough/
 ├── Guia-QEMU-Passthrough.md     instalação e configuração
 ├── troubleshooting.md           diagnóstico, recuperação e rollback
 ├── passthrough.conf.example     modelo da configuração central
-├── passthrough.conf             (gerado pela etapa 02; valores do SEU hardware)
+├── passthrough.conf             (gerado pela etapa 3; valores do SEU hardware)
 ├── menu.sh                      orquestrador com status ao vivo das etapas
 ├── lib/
 │   ├── common.sh                    funções compartilhadas
 │   └── platform.sh                  detecção e perfil da plataforma
 ├── backups/                     (gerado) backups locais de XML/configuração
-├── etapas/                      uma etapa = uma fase do fluxo
-│   ├── 00-inventario.sh             inventário de hardware
-│   ├── 01-verificar-bios.sh         checklist BIOS + verificação
-│   ├── 02-detectar-config.sh        detecta hardware/uplink e configura o host
-│   ├── 10-atualizar-sistema.sh      update + fwupd                       <reboot>
-│   ├── 11-driver-nvidia.sh          driver NVIDIA no host                <reboot>
-│   ├── 12-pacotes-base.sh           utilitários (+xmlstarlet)
-│   ├── 13-diretorios.sh             prepara /vm
-│   ├── 14-working-disk.sh           preflight do workingDisk externo
-│   ├── 20-virtualizacao.sh          KVM/QEMU/libvirt/OVMF/swtpm
-│   ├── 21-usuario-grupos.sh         grupos + permissões                  <logout>
-│   ├── 30-iommu-vfio.sh             IOMMU + VFIO                         <reboot>
-│   ├── 40-criar-vm.sh               VM + NAT default temporária
-│   ├── 41-instalacao-windows.sh     instalação manual do Windows
-│   ├── 50-hooks-gpu-hd1.sh          hooks dinâmicos + HD1
-│   ├── 51-usb-passthrough.sh        USB (opcional)
-│   ├── 52-cpu-pinning-hugepages.sh  pinning + HugePages                  <reboot>
-│   ├── 53-cpu-isolation.sh          isolcpus                             <reboot>
-│   ├── 60-rede-bridge.sh            rede final: bridge Ethernet ou NAT
-│   ├── 61-airlock.sh                SFTP seguro em bridge/NAT
-│   └── 70-trim-discard.sh           TRIM/discard
+├── etapas/                      uma etapa = uma fase do fluxo (nº = etapa do menu)
+│   ├── 00-inventario.sh             1  inventário de hardware
+│   ├── 01-verificar-bios.sh         2  checklist BIOS + verificação
+│   ├── 02-detectar-config.sh        3  detecta hardware/uplink e configura o host
+│   ├── 10-atualizar-sistema.sh      4  update + fwupd                    <reboot>
+│   ├── 11-driver-nvidia.sh          5  driver NVIDIA no host             <reboot>
+│   ├── 12-pacotes-base.sh           6  utilitários (+xmlstarlet)
+│   ├── 13-diretorios.sh             7  prepara /vm
+│   ├── 14-working-disk.sh           8  preflight do workingDisk externo
+│   ├── 20-virtualizacao.sh          9  KVM/QEMU/libvirt/OVMF/swtpm
+│   ├── 21-usuario-grupos.sh         10 grupos + permissões               <logout>
+│   ├── 30-iommu-vfio.sh             11 IOMMU + VFIO                      <reboot>
+│   ├── 40-criar-vm.sh               12 VM + NAT default temporária
+│   ├── 41-instalacao-windows.sh     13 instalação e pós-instalação do Windows
+│   ├── 50-hooks-gpu-hd1.sh          14 hooks dinâmicos + HD1
+│   ├── 51-usb-passthrough.sh        15 USB (opcional)
+│   ├── 52-cpu-pinning-hugepages.sh  16 pinning + HugePages               <reboot>
+│   ├── 53-cpu-isolation.sh          17 isolcpus                          <reboot>
+│   ├── 60-rede-bridge.sh            18 rede final: bridge Ethernet ou NAT
+│   ├── 61-airlock.sh                19 SFTP seguro em bridge/NAT
+│   └── 70-trim-discard.sh           20 TRIM/discard
 ├── util/                        operação contínua e emergência
 │   ├── listar-grupos-iommu.sh       inspeciona grupos IOMMU
 │   ├── snapshot-vm.sh               cria/lista/reverte/apaga snapshots
@@ -90,7 +90,7 @@ converter para CRLF, corrija com `sed -i 's/\r$//' arquivo.sh` (ou dos2unix).
 
 ### 2. Pré-requisitos manuais (fora do alcance de script)
 
-1. **BIOS configurada** antes de tudo (etapa 01 mostra o checklist: SVM,
+1. **BIOS configurada** antes de tudo (etapa 2 mostra o checklist: SVM,
    IOMMU, Above 4G, Re-Size BAR, CSM off, Secure Boot "Other OS").
 2. **Pop!_OS já instalado** em modo UEFI, com o driver NVIDIA proprietário
    funcionando (`nvidia-smi` responde). Ver "Sistema esperado" no
@@ -100,9 +100,9 @@ converter para CRLF, corrija com `sed -i 's/\r$//' arquivo.sh` (ou dos2unix).
 4. **Conectividade física disponível**: Ethernet permite `bridge` ou `nat`;
    Wi-Fi station usa obrigatoriamente `nat`. Bridge Wi-Fi normalmente exige
    4addr/WDS dos dois lados e não é suportada. Reserva no roteador só existe no
-   modo bridge; no NAT a etapa 60 cria a reserva DHCP libvirt automaticamente.
+   modo bridge; no NAT a etapa 18 cria a reserva DHCP libvirt automaticamente.
 5. **workingDisk opcional já montado**, se for usado: o operador cria e monta
-   externamente o caminho (por exemplo, `/mnt/workingDisk`) antes da etapa 02.
+   externamente o caminho (por exemplo, `/mnt/workingDisk`) antes da etapa 3.
    O projeto apenas verifica o mountpoint; não o cria, monta, formata nem grava
    sua montagem no `fstab`.
 
@@ -128,10 +128,17 @@ em que parou.
 Também dá para rodar cada etapa direto, sem menu:
 
 ```bash
-bash etapas/30-iommu-vfio.sh              # executa
+bash etapas/30-iommu-vfio.sh              # executa a etapa 11
 bash etapas/30-iommu-vfio.sh --verificar  # só verifica (código de saída 0 = ok)
 bash menu.sh --status                     # checklist completo sem menu
 ```
+
+**Numeração.** A etapa é sempre o número do menu, de 1 a 20, e é assim que a
+documentação e as mensagens dos scripts se referem a ela. O nome do arquivo em
+`etapas/` mantém uma numeração histórica diferente (a etapa 11 é
+`30-iommu-vfio.sh`); a tabela da seção 4 e a árvore acima fazem a tradução.
+Etapas com vários blocos internos os anunciam como `Etapa N.x`, por exemplo
+`Etapa 3.1/8 Identidade` ou o sub-passo `13.15` do driver NVIDIA.
 
 ### 4. Ordem completa (com pontos de parada)
 
@@ -147,15 +154,15 @@ bash menu.sh --status                     # checklist completo sem menu
 | 8 | `14-working-disk` | preflight não destrutivo do mountpoint externo; sucesso imediato quando dispensado |
 | 9 | `20-virtualizacao` | pilha completa + `kvm-ok` |
 | 10 | `21-usuario-grupos` | **logout/login** obrigatório ao final |
-| 11 | `30-iommu-vfio` | fase A aplica parâmetros, **reboot**, rodar de novo para a fase B validar e registrar o grupo IOMMU |
+| 11 | `30-iommu-vfio` | `Etapa 11.1/2` (fase A) aplica parâmetros, **reboot**, rodar de novo para a `Etapa 11.2/2` (fase B) validar e registrar o grupo IOMMU |
 | 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
-| 13 | `41-instalacao-windows` | manual (driver `viostor\w11\amd64` na tela de discos; guest-tools ao final) |
+| 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup, driver NVIDIA no guest em `13.15`, depois da etapa 14) |
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
 | 15 | `51-usb-passthrough` | opcional |
 | 16 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
 | 17 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
 | 18 | `60-rede-bridge` | aplica o modo escolhido: bridge somente em Ethernet (`netplan try` + reservas no roteador) ou NAT dedicado Ethernet/Wi-Fi (sem Netplan, reserva libvirt automática) |
-| 19 | `61-airlock` | depende da 60; SFTP chroot + ufw na `REDE_BRIDGE` ou `REDE_BRIDGE_LIBVIRT`; chave gerada NA VM e instalada com `--instalar-chave` |
+| 19 | `61-airlock` | depende da etapa 18; SFTP chroot + ufw na `REDE_BRIDGE` ou `REDE_BRIDGE_LIBVIRT`; chave gerada NA VM e instalada com `--instalar-chave` |
 | 20 | `70-trim-discard` | discard=unmap + pasta de backups |
 
 ### 5. Configuração central
@@ -163,7 +170,7 @@ bash menu.sh --status                     # checklist completo sem menu
 Todos os valores do seu hardware moram em `passthrough.conf`. A opção 3 e a
 execução direta de `etapas/02-detectar-config.sh` sempre criam um backup restrito
 em `backups/`, limpam atomicamente as escolhas administradas pela etapa e
-recomeçam em `1/8 Identidade`; `--redetectar` é um alias compatível do mesmo
+recomeçam em `Etapa 3.1/8 Identidade`; `--redetectar` é um alias compatível do mesmo
 comportamento. `--verificar` apenas lê e não altera conteúdo nem data do arquivo.
 Opções externas ao fluxo, como `QCOW2_PATH`, nomes de bridge, `VM_NIC_MAC`,
 `AIRLOCK_BIND` e destinos de backup, são preservadas.
@@ -183,13 +190,13 @@ rede. Os campos principais são `REDE_MODO`, `INTERFACE_FISICA`, `REDE_BRIDGE`,
 `VM_IP_FIXO` é a reserva da VM nos dois modos; `IP_FIXO_HOST` é o endereço que a
 VM usa para chegar ao host (IP LAN da bridge ou gateway virtual no NAT).
 
-A etapa 02 sempre mostra **todas** as interfaces físicas elegíveis e destaca o
+A etapa 3 sempre mostra **todas** as interfaces físicas elegíveis e destaca o
 dispositivo retornado por `ip -4 route get 1.1.1.1` (consulta local: nenhum
 pacote é enviado). No NAT, `INTERFACE_FISICA` precisa ser exatamente esse uplink
-IPv4 efetivo: a etapa 02 avisa uma divergência, e a etapa 60 aborta antes de
+IPv4 efetivo: a etapa 3 avisa uma divergência, e a etapa 18 aborta antes de
 qualquer mutação — inclusive do `passthrough.conf` — até o adaptador escolhido
 virar a rota padrão ou o outro ser desconectado/ter sua métrica ajustada. Ao
-trocar o uplink mantendo bridge, a etapa 02 limpa os IPs reservados da LAN
+trocar o uplink mantendo bridge, a etapa 3 limpa os IPs reservados da LAN
 anterior.
 
 A bridge usa exclusivamente `/etc/netplan/90-vm-passthrough-bridge.yaml`, sem
@@ -224,7 +231,7 @@ consumidores, desabilita o autostart, para a rede gerenciada e, no sucesso,
 mantém sua definição inativa; o rollback restaura o estado anterior. Uma rede
 homônima sem marcador é apenas avisada e preservada. Na direção bridge → NAT,
 remova ou restaure o arquivo dedicado e rode `sudo netplan apply` antes da etapa
-60; o NAT não desfaz Netplan e recusa uplink ainda escravizado a uma bridge.
+18; o NAT não desfaz Netplan e recusa uplink ainda escravizado a uma bridge.
 
 `VM_NIC_MAC` identifica a NIC sem depender de posição. Em configurações antigas,
 a etapa conta todas as `/domain/devices/interface`: só escolhe automaticamente
@@ -232,7 +239,7 @@ se houver uma; com várias, apresenta todas e apenas marca `network=default` com
 **RECOMENDADA**. Os IPs precisam estar efetivos e coerentes, e `--verificar`
 repete inclusive a trava do uplink NAT.
 
-#### Travas de segurança da etapa 02
+#### Travas de segurança da etapa 3
 
 Escolhas que poderiam inutilizar o host são impedidas na origem, não avisadas
 depois:
@@ -342,7 +349,7 @@ Verificações chave por fase:
 ### D. Testes funcionais do Airlock
 
 1. Visão de serviço: `mount | grep airlock` (fuse.bindfs) e o teste de escrita
-   que a própria etapa 61 executa.
+   que a própria etapa 19 executa.
 2. `sudo sshd -t` sem saída e `systemctl status ssh` ativo.
 3. Transferência real pelo WinSCP: sessão abre em `/files`; arquivo enviado
    aparece em `AIRLOCK_DIR` (por padrão, `/mnt/workingDisk/airlock` quando
@@ -372,13 +379,13 @@ Consulte **[troubleshooting.md](troubleshooting.md)** antes de desfazer qualquer
 etapa. O documento organiza os procedimentos por sintoma e diferencia:
 
 - rollback automático durante uma transação;
-- `--desfazer` explícito das etapas 52 e 53;
+- `--desfazer` explícito das etapas 16 e 17;
 - restauração manual por um backup exato;
 - snapshot interno do QCOW2;
 - backup offline da VM.
 
-Essas proteções não são intercambiáveis. Em particular, as etapas 30, 40, 50,
-60, 61 e 70 não possuem teardown completo pós-commit, e snapshot não protege
+Essas proteções não são intercambiáveis. Em particular, as etapas 11, 12, 14,
+18, 19 e 20 não possuem teardown completo pós-commit, e snapshot não protege
 HD1, configuração do host, rede, NVRAM ou TPM. Se uma etapa informar rollback
 incompleto, não reinicie nem inicie a VM até comparar o estado com o backup
 anunciado.
