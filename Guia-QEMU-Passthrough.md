@@ -169,7 +169,7 @@ conversar sobre o fluxo e a coluna `Script` para localizar o arquivo.
 | **9** | `20-virtualizacao.sh` | **instala QEMU/KVM/libvirt/OVMF/swtpm** | |
 | 10 | `21-usuario-grupos.sh` | grupos do usuário e permissões de `/vm` | logout |
 | 11 | `30-iommu-vfio.sh` | IOMMU e módulos VFIO | reboot |
-| 12 | `40-criar-vm.sh` | cria a VM com `virt-install`, NAT `default` temporária e MAC persistido | |
+| 12 | `40-criar-vm.sh` | cria a VM com `virt-install`, NAT `default` temporária, MAC persistido e canal do guest agent | |
 | 13 | `41-instalacao-windows.sh` | instalação e pós-instalação do Windows, incluindo o driver NVIDIA no guest (interativa) | |
 | 14 | `50-hooks-gpu-hd1.sh` | hooks da GPU e disco físico no XML | |
 | 15 | `51-usb-passthrough.sh` | USB em passthrough (opcional) | |
@@ -466,6 +466,10 @@ Os dois pontos que costumam travar quem faz pela primeira vez:
 2. **Ao chegar na área de trabalho**, ainda com a ISO virtio anexada, execute
    `virtio-win-guest-tools.exe` (raiz da ISO) e reinicie. Isso instala o
    `qemu-guest-agent`, que habilita desligamento gracioso e snapshot consistente.
+   O lado do host já foi resolvido pela etapa 12, que declara o canal virtio
+   `org.qemu.guest_agent.0`: sem esse canal o serviço roda no Windows e o
+   `guest-ping` nunca responde. Se a VM foi criada antes disso, a própria
+   etapa 13 detecta a ausência e imprime o `attach-device` necessário.
 
 Depois, dentro do Windows:
 
@@ -498,16 +502,20 @@ virsh --connect qemu:///system qemu-agent-command win11 '{"execute":"guest-ping"
 bash etapas/50-hooks-gpu-hd1.sh
 ```
 
-O libvirt executa scripts em momentos definidos do ciclo de vida da VM. Dois
-hooks fazem a GPU trocar de dono:
+O libvirt executa scripts em momentos definidos do ciclo de vida da VM. Três
+hooks acompanham a GPU trocando de dono:
 
-- `prepare/begin/01-gpu-para-vfio.sh`: para o gerenciador de exibição, descarrega
-  os módulos NVIDIA e vincula a GPU ao `vfio-pci`.
-- `release/end/01-gpu-para-linux.sh`: caminho inverso, devolve a GPU ao driver
-  `nvidia` e religa o desktop.
+- `prepare/begin/01-gpu-preflight.sh`: valida identidade PCI, grupo IOMMU e o HD1,
+  para o gerenciador de exibição e descarrega os módulos NVIDIA. Se qualquer
+  pós-condição falhar, ele mesmo faz o rollback e religa o desktop.
+- `start/begin/01-gpu-vfio-check.sh`: confere que o libvirt já entregou a GPU (e o
+  áudio) ao `vfio-pci` e revalida o HD1 antes de liberar o QEMU.
+- `release/end/01-gpu-restore.sh`: caminho inverso, devolve a GPU ao driver
+  `nvidia`, valida `nvidia-smi` e religa o gerenciador de exibição.
 
-O script gera os dois com os IDs reais do seu `passthrough.conf`, instala o
-dispatcher `/etc/libvirt/hooks/qemu`, reinicia o `libvirtd` e anexa ao XML da VM:
+O script gera os três com os IDs reais do seu `passthrough.conf`, instala o
+dispatcher `/etc/libvirt/hooks/qemu`, reinicia o daemon libvirt resolvido pelo
+perfil (`libvirtd` ou `virtqemud`) e anexa ao XML da VM:
 
 ```xml
 <hostdev mode='subsystem' type='pci' managed='yes'>
@@ -520,11 +528,13 @@ dispatcher `/etc/libvirt/hooks/qemu`, reinicia o `libvirtd` e anexa ao XML da VM
 A função de áudio HDMI entra como um segundo `hostdev`. Se a placa não expõe essa
 função, o script segue somente com vídeo.
 
-Detalhe que costuma passar batido: o arquivo `new_id` do `vfio-pci` aceita **um
-par por escrita**, no formato `vendor device` separado por espaço. Escrever
-`10de:2504,10de:228e` de uma vez é recusado pelo kernel, e o erro fica invisível
-porque a escrita é silenciada. Os hooks gerados aqui fazem uma escrita por
-dispositivo.
+Detalhe que costuma passar batido: **quem tira a GPU do host e a devolve é o
+libvirt**, por causa do `managed='yes'` no `hostdev`. Nenhum hook deste projeto
+escreve em `bind`, `unbind` ou `new_id` do `vfio-pci`, e a etapa recusa instalar
+um hook de terceiros que tente fazer isso, porque duas autoridades disputando o
+mesmo dispositivo é a origem clássica de GPU presa em meio-caminho. Os hooks
+cuidam só do que o libvirt não faz: o gerenciador de exibição, os módulos NVIDIA
+e a verificação das pós-condições.
 
 Disco físico dedicado (só se você escolheu um na etapa 3):
 
@@ -536,8 +546,13 @@ Disco físico dedicado (só se você escolheu um na etapa 3):
 </disk>
 ```
 
-Antes de anexar, o script confere três coisas: que o disco existe, que não é o
-disco da raiz do Linux e que não tem nada montado no host.
+Antes de anexar, o script fotografa o disco duas vezes e só segue se as duas
+fotos coincidirem: o caminho tem de ser um `/dev/disk/by-id/*` (nunca `/dev/sdX`),
+resolver para um disco inteiro, não ser nenhum ancestral da raiz do Linux nem o
+disco do sistema, não ter partição montada ou em uso no host e ter WWN ou serial
+verificável. Essa identidade fica registrada e é reconferida pelos hooks a cada
+boot da VM: se o disco trocar de lugar ou for montado no host, o start é
+abortado antes do QEMU.
 
 ### 8.1 O teste que importa
 

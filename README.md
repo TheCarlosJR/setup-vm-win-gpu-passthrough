@@ -155,7 +155,7 @@ Etapas com vários blocos internos os anunciam como `Etapa N.x`, por exemplo
 | 9 | `20-virtualizacao` | pilha completa + `kvm-ok` |
 | 10 | `21-usuario-grupos` | **logout/login** obrigatório ao final |
 | 11 | `30-iommu-vfio` | `Etapa 11.1/2` (fase A) aplica parâmetros, **reboot**, rodar de novo para a `Etapa 11.2/2` (fase B) validar e registrar o grupo IOMMU |
-| 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
+| 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install, já com o canal virtio `org.qemu.guest_agent.0`; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
 | 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup, driver NVIDIA no guest em `13.15`, depois da etapa 14) |
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
 | 15 | `51-usb-passthrough` | opcional |
