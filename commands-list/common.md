@@ -191,44 +191,44 @@ As funções chamadas de `lib/common.sh` podem acrescentar comandos compartilhad
 | Arquivo | Executáveis próprios/principais |
 |---|---|
 | `menu.sh` | `bash`, `clear`, `dirname` |
-| `lib/platform.sh` | `getent`, `lscpu`, `qemu-system-x86_64`, `sudo`, `systemctl`, `update-initramfs` |
-| `lib/common.sh` | `apt-get`, `awk`, `bash`, `bootctl`, `cat`, `chmod`, `chown`, `cmp`, `cp`, `cut`, `date`, `dirname`, `findmnt`, `getent`, `getfacl`, `grep`, `id`, `kernelstub`, `ln`, `lscpu`, `lspci`, `lsblk`, `mkdir`, `mktemp`, `mountpoint`, `mv`, `paste`, `python3`, `qemu-img`, `readlink`, `reboot`, `rm`, `sed`, `setfacl`, `sleep`, `sort`, `stat`, `sudo`, `tail`, `tee`, `true`, `update-grub`, `virsh` |
+| `lib/platform.sh` | `cat`, `getent`, `lscpu`, `qemu-system-x86_64`, `stat`, `sudo`, `systemctl`, `update-initramfs` |
+| `lib/common.sh` | `apt-get`, `awk`, `basename`, `bash`, `bootctl`, `cat`, `chmod`, `chown`, `cmp`, `cp`, `cut`, `date`, `dirname`, `findmnt`, `getent`, `getfacl`, `grep`, `id`, `ip`, `kernelstub`, `ln`, `lscpu`, `lspci`, `lsblk`, `mkdir`, `mktemp`, `mountpoint`, `mv`, `paste`, `python3`, `qemu-img`, `readlink`, `reboot`, `rm`, `sed`, `setfacl`, `sleep`, `sort`, `stat`, `sudo`, `systemctl`, `tail`, `tee`, `true`, `update-grub`, `virsh` |
 
 ### Etapas
 
 | Arquivo | Executáveis próprios/principais |
 |---|---|
-| `etapas/00-inventario.sh` | `apt-get`, `date`, `dmesg`, `dmidecode`, `grep`, `ln`, `lscpu`, `lspci`, `lsblk`, `mkdir`, `mktemp`, `mv`, `readlink`, `rm`, `tee` |
+| `etapas/00-inventario.sh` | `apt-get`, `date`, `dmesg`, `dmidecode`, `grep`, `ln`, `lscpu`, `lspci`, `lsblk`, `mkdir`, `mktemp`, `mv`, `readlink`, `rm`, `sudo`, `tee` |
 | `etapas/01-verificar-bios.sh` | `awk`, `cat`, `dmesg`, `grep`, `lscpu`, `sudo` |
-| `etapas/02-detectar-config.sh` | `awk`, `basename`, `cat`, `chmod`, `cp`, `date`, `find`, `findmnt`, `grep`, `id`, `ip`, `ls`, `lscpu`, `lspci`, `lsblk`, `mkdir`, `mktemp`, `mountpoint`, `mv`, `readlink`, `rm`, `sed`, `sort`, `systemctl`, `tail`, `tr`, `wc` |
-| `etapas/10-atualizar-sistema.sh` | `apt`, `apt-get`, `awk`, `dpkg`, `fwupdmgr`, `reboot`, `sort`, `tail`, `uname` |
-| `etapas/11-driver-nvidia.sh` | `apt`, `apt-cache`, `grep`, `head`, `lspci`, `nvidia-smi`, `ubuntu-drivers` |
-| `etapas/12-pacotes-base.sh` | `apt`, `dmidecode`, `dpkg`, `head`, `lspci`, `lsusb`, `xmlstarlet` |
-| `etapas/13-diretorios.sh` | `chmod`, `chown`, `getent`, `getfacl`, `groupadd`, `ls`, `mkdir`, `sed`, `setfacl`, `usermod` |
+| `etapas/02-detectar-config.sh` | `awk`, `basename`, `cat`, `chmod`, `cp`, `date`, `find`, `findmnt`, `grep`, `head`, `id`, `ip`, `ls`, `lscpu`, `lspci`, `lsblk`, `mkdir`, `mktemp`, `mountpoint`, `mv`, `readlink`, `rm`, `sed`, `sort`, `systemctl`, `tail`, `tr`, `wc` |
+| `etapas/10-atualizar-sistema.sh` | `apt`, `apt-get`, `awk`, `dpkg`, `fwupdmgr`, `reboot`, `sort`, `sudo`, `tail`, `uname` |
+| `etapas/11-driver-nvidia.sh` | `apt`, `apt-cache`, `awk`, `grep`, `head`, `lspci`, `nvidia-smi`, `sudo`, `ubuntu-drivers` |
+| `etapas/12-pacotes-base.sh` | `apt`, `dmidecode`, `dpkg`, `head`, `lspci`, `lsusb`, `sudo`, `xmlstarlet` |
+| `etapas/13-diretorios.sh` | `chmod`, `chown`, `getent`, `getfacl`, `groupadd`, `ls`, `mkdir`, `sed`, `setfacl`, `sudo`, `usermod` |
 | `etapas/14-working-disk.sh` | `findmnt`, `mountpoint`, `readlink` |
-| `etapas/20-virtualizacao.sh` | `apt`, `dpkg`, `head`, `kvm-ok`, `ls`, `qemu-system-x86_64`, `systemctl`, `virsh` |
+| `etapas/20-virtualizacao.sh` | `apt`, `dpkg`, `head`, `kvm-ok`, `ls`, `qemu-system-x86_64`, `sudo`, `systemctl`, `virsh` |
 | `etapas/21-usuario-grupos.sh` | `chmod`, `chown`, `getent`, `getfacl`, `grep`, `groupadd`, `id`, `mktemp`, `rm`, `setfacl`, `sh`, `stat`, `sudo`, `systemctl`, `test`, `usermod`, `virsh` |
-| `etapas/30-iommu-vfio.sh` | `awk`, `bash`, `cat`, `date`, `dmesg`, `grep`, `kernelstub`, `lscpu`, `lsmod`, `lspci`, `mkdir`, `sed`, `tail`, `tee`, `update-grub`, `update-initramfs` |
+| `etapas/30-iommu-vfio.sh` | `awk`, `bash`, `cat`, `date`, `dmesg`, `grep`, `kernelstub`, `lscpu`, `lsmod`, `lspci`, `mkdir`, `sed`, `sudo`, `tail`, `tee`, `update-grub`, `update-initramfs` |
 | `etapas/40-criar-vm.sh` | `chmod`, `df`, `getfacl`, `grep`, `ln`, `mkdir`, `mktemp`, `nohup`, `nproc`, `osinfo-query`, `qemu-img`, `readlink`, `rm`, `sed`, `sh`, `stat`, `sudo`, `systemctl`, `tail`, `tee`, `test`, `touch`, `tr`, `virsh`, `virt-install`, `virt-manager`, `xmlstarlet` |
-| `etapas/41-instalacao-windows.sh` | `cat`, `nohup`, `virsh`, `virt-manager` |
-| `etapas/50-hooks-gpu-hd1.sh` | `awk`, `basename`, `bash`, `cat`, `chmod`, `cp`, `date`, `dirname`, `find`, `findmnt`, `flock`, `grep`, `install`, `lsblk`, `mkdir`, `mktemp`, `mv`, `rm`, `stat`, `sudo`, `systemctl`, `test`, `udevadm`, `virsh`, `xmlstarlet` |
-| `etapas/51-usb-passthrough.sh` | `cat`, `cut`, `grep`, `lsusb`, `mktemp`, `rm`, `sed`, `virsh`, `xmlstarlet` |
+| `etapas/41-instalacao-windows.sh` | `awk`, `cat`, `ip`, `nohup`, `systemctl`, `virsh`, `virt-manager` |
+| `etapas/50-hooks-gpu-hd1.sh` | `awk`, `basename`, `bash`, `cat`, `chmod`, `cmp`, `cp`, `date`, `dirname`, `find`, `findmnt`, `flock`, `grep`, `install`, `lsblk`, `mkdir`, `mktemp`, `mv`, `rm`, `stat`, `sudo`, `systemctl`, `test`, `udevadm`, `virsh`, `virt-xml-validate`, `xmlstarlet` |
+| `etapas/51-usb-passthrough.sh` | `awk`, `cat`, `cut`, `grep`, `lsusb`, `mktemp`, `rm`, `sed`, `virsh`, `xmlstarlet` |
 | `etapas/52-cpu-pinning-hugepages.sh` | `awk`, `grep`, `kernelstub`, `lscpu`, `mktemp`, `python3`, `reboot`, `rm`, `update-grub`, `virsh`, `virt-xml-validate` |
 | `etapas/53-cpu-isolation.sh` | `grep`, `gzip`, `kernelstub`, `lscpu`, `mktemp`, `python3`, `reboot`, `rm`, `uname`, `update-grub`, `virsh`, `virt-xml-validate` |
-| `etapas/60-rede-bridge.sh` | `awk`, `cmp`, `cp`, `date`, `grep`, `install`, `ip`, `mkdir`, `mktemp`, `netplan`, `ping`, `rm`, `sed`, `sudo`, `test`, `virsh`, `xmlstarlet` |
-| `etapas/61-airlock.sh` | `apt`, `chmod`, `chown`, `cp`, `date`, `dpkg`, `findmnt`, `getent`, `grep`, `groupadd`, `groupdel`, `id`, `install`, `ip`, `mkdir`, `mktemp`, `mount`, `mountpoint`, `mv`, `rm`, `sed`, `ssh-keygen`, `sshd`, `sudo`, `systemctl`, `tee`, `test`, `touch`, `ufw`, `umount`, `useradd`, `userdel` |
-| `etapas/70-trim-discard.sh` | `cp`, `lsblk`, `mkdir`, `mktemp`, `python3`, `rm`, `sed`, `virsh`, `virt-xml-validate`, `xmlstarlet` |
+| `etapas/60-rede-bridge.sh` | `awk`, `cat`, `cmp`, `cp`, `date`, `grep`, `install`, `ip`, `mkdir`, `mktemp`, `netplan`, `ping`, `rm`, `sed`, `sudo`, `test`, `virsh`, `virt-xml-validate`, `xmlstarlet` |
+| `etapas/61-airlock.sh` | `apt`, `basename`, `cat`, `chmod`, `chown`, `cp`, `date`, `dpkg`, `findmnt`, `getent`, `grep`, `groupadd`, `groupdel`, `id`, `install`, `ip`, `mkdir`, `mktemp`, `mount`, `mountpoint`, `mv`, `rm`, `sed`, `ssh-keygen`, `sshd`, `sudo`, `systemctl`, `tee`, `test`, `touch`, `ufw`, `umount`, `useradd`, `userdel` |
+| `etapas/70-trim-discard.sh` | `cat`, `cp`, `grep`, `lsblk`, `mkdir`, `mktemp`, `python3`, `rm`, `sed`, `sudo`, `virsh`, `virt-xml-validate`, `xmlstarlet` |
 
 ### Utilitários
 
 | Arquivo | Executáveis próprios/principais |
 |---|---|
-| `util/atualizar-host.sh` | `apt`, `bash`, `date`, `dmesg`, `grep`, `head`, `nvidia-smi`, `reboot`, `virsh` |
-| `util/backup-vm.sh` | `basename`, `chmod`, `cut`, `date`, `df`, `du`, `grep`, `head`, `install`, `mkdir`, `mktemp`, `python3`, `qemu-img`, `rm`, `rsync`, `sed`, `sleep`, `tail`, `tee`, `tr`, `virsh` |
+| `util/atualizar-host.sh` | `apt`, `awk`, `bash`, `date`, `dmesg`, `grep`, `head`, `id`, `nvidia-smi`, `reboot`, `sudo`, `virsh` |
+| `util/backup-vm.sh` | `basename`, `chmod`, `cut`, `date`, `df`, `du`, `grep`, `head`, `install`, `mkdir`, `mktemp`, `python3`, `qemu-img`, `rm`, `rsync`, `sed`, `sleep`, `sudo`, `tail`, `tee`, `test`, `tr`, `virsh` |
 | `util/diagnostico.sh` | `bash`, `cat`, `date`, `dmesg`, `findmnt`, `free`, `grep`, `journalctl`, `lspci`, `lsmod`, `mkdir`, `mount`, `nvidia-smi`, `sudo`, `tail`, `tee`, `uname`, `virsh` |
 | `util/listar-grupos-iommu.sh` | `lspci` |
-| `util/recuperar-gpu.sh` | `basename`, `cat`, `chmod`, `chown`, `flock`, `install`, `modprobe`, `nvidia-smi`, `readlink`, `rm`, `sleep`, `stat`, `systemctl`, `tee`, `test`, `touch`, `virsh` |
-| `util/snapshot-vm.sh` | `date`, `python3`, `virsh` |
+| `util/recuperar-gpu.sh` | `basename`, `cat`, `chmod`, `chown`, `flock`, `install`, `modprobe`, `nvidia-smi`, `readlink`, `rm`, `sleep`, `stat`, `sudo`, `systemctl`, `tee`, `test`, `touch`, `virsh` |
+| `util/snapshot-vm.sh` | `cat`, `date`, `python3`, `virsh` |
 
 ## Hooks gerados
 
