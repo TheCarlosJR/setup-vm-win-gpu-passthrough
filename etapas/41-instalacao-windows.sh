@@ -113,12 +113,13 @@ PÓS-INSTALAÇÃO, NA ORDEM (a VM continua na NAT default da etapa 40):
 14. Windows Defender: mantenha a proteção em tempo real ATIVA, não instale
     antivírus de terceiros e NUNCA exclua a pasta do airlock da verificação
     (é exatamente ela que recebe arquivos vindos do host).
-    
+
 15. NÃO instale o driver NVIDIA ainda. Até a etapa 50 a VM só tem a QXL
     emulada. Depois do passthrough da GPU real, baixe de nvidia.com/drivers e
     use a opção "Instalação limpa".
 
 QUANDO CADA .ps1 É USADO (não execute fora de hora):
+
   Desativar-Fast-Startup.ps1  agora, no passo 13, como Administrador.
   Ativar-MSI-GPU.ps1          etapa 53 (CPU isolation), como Administrador e
                               somente após o driver NVIDIA estar instalado.
@@ -132,7 +133,9 @@ GUIA
 printf 'Os arquivos estão no host em: %s/windows\n' "$PROJETO_DIR"
 cat <<'GUIA'
 
-Opção A, arrastar e soltar (mais simples, sem rede e sem firewall):
+Opção A
+Arrastar e soltar (mais simples, sem rede e sem firewall):
+
   Os guest tools do passo 11 instalam o spice-vdagent, que é o que habilita
   arrastar arquivos e o copiar/colar de texto entre host e VM.
   1. Reinicie a VM depois dos guest tools e abra o console gráfico
@@ -145,7 +148,9 @@ Opção A, arrastar e soltar (mais simples, sem rede e sem firewall):
   Se nada acontecer ao soltar, o vdagent não está rodando: confira o serviço
   "Spice VDAgent" em services.msc dentro do Windows, ou use a opção B.
 
-Opção B, servidor HTTP temporário na NAT default:
+Opção B
+Servidor HTTP temporário na NAT default:
+
 GUIA
 if [ -n "$HOST_NAT_IP" ]; then
     printf '  1. No host, em OUTRO terminal, suba o servidor e deixe rodando:\n'
