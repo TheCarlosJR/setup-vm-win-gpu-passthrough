@@ -38,7 +38,7 @@ info()   { echo "${C_AZUL}[info]${C_RESET} $*"; }
 ok()     { echo "${C_VERDE}[ ok ]${C_RESET} $*"; }
 aviso()  { echo "${C_AMARELO}[aviso]${C_RESET} $*"; }
 erro()   { echo "${C_VERMELHO}[erro]${C_RESET} $*" >&2; }
-titulo() { echo; echo "${C_NEGRITO}==== $* ====${C_RESET}"; }
+titulo() { echo; echo; echo "${C_NEGRITO}==== $* ====${C_RESET}"; echo; }
 falhar() { erro "$*"; exit 1; }
 
 # --- Raiz hermética opcional, exclusiva dos testes ---------------------------
