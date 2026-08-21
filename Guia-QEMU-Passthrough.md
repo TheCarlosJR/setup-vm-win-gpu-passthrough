@@ -459,8 +459,16 @@ Os dois pontos que costumam travar quem faz pela primeira vez:
 
 Depois, dentro do Windows:
 
-- Desative a Inicialização Rápida (`windows/Desativar-Fast-Startup.ps1`). Com ela
-  ativa, "Desligar" faz hibernação parcial e deixa o NTFS marcado como em uso.
+- Copie os três scripts de `windows/` para a VM antes de qualquer um deles. Com
+  os guest tools instalados, o mais simples é arrastar os `.ps1` do host para
+  dentro da janela do console (o `spice-vdagent` faz a transferência). Se o
+  arrastar não funcionar, `etapas/41-instalacao-windows.sh` imprime, já com o IP
+  e a bridge resolvidos, o comando de um servidor HTTP temporário na NAT
+  `default` e o `Invoke-WebRequest` correspondente.
+- Desative a Inicialização Rápida (`windows/Desativar-Fast-Startup.ps1`, como
+  Administrador). Com ela ativa, "Desligar" faz hibernação parcial e deixa o
+  NTFS marcado como em uso; depois de aplicar, desligue a VM por completo uma
+  vez.
 - Mantenha o Windows Defender ativo. Não crie exclusão para a pasta de
   transferência.
 - O driver NVIDIA dentro da VM só na próxima seção, quando a GPU real estiver em

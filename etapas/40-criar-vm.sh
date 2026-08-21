@@ -379,7 +379,10 @@ qemu-img info "$QCOW2_USO" | sed 's/^/  /'
 # 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 60)
 # ----------------------------------------------------------------------------
 titulo "4/5 Rede NAT default temporária"
-if ! $VIRSH net-info default 2>/dev/null | grep -q 'Active:.*yes'; then
+# LC_ALL=C mantém os rótulos de net-info em inglês: com locale pt_BR a rede
+# ativa aparece como "Ativo: sim", o filtro por "Active:.*yes" nunca casa e o
+# net-start abaixo é chamado numa rede que já está no ar.
+if ! LC_ALL=C $VIRSH net-info default 2>/dev/null | grep -q 'Active:.*yes'; then
     $VIRSH net-start default || true
     $VIRSH net-autostart default || true
 fi

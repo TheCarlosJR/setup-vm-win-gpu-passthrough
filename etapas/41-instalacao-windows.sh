@@ -63,25 +63,112 @@ cat <<'GUIA'
 11. Ao chegar na área de trabalho, ainda com a virtio-win.iso anexada:
     executar virtio-win-guest-tools.exe (raiz da ISO) e reiniciar.
 
-PÓS-INSTALAÇÃO (desenho de segurança do manual):
-  - Windows Defender: manter proteção em tempo real ATIVA; não instalar
-    antivírus de terceiros; NUNCA excluir a pasta airlock da verificação.
-  - Desativar a Inicialização Rápida (Fast Startup):
-    use windows/Desativar-Fast-Startup.ps1 (PowerShell como administrador)
-    ou Painel de Controle > Opções de Energia.
-  - O driver NVIDIA dentro da VM só é instalado APÓS a etapa 50
-    (quando a GPU real estiver em passthrough): baixar de nvidia.com/drivers,
-    opção "Instalação limpa".
+GUIA
 
-TRANSFERÊNCIA INICIAL DOS .ps1 (antes do airlock):
-  1. Depois de instalar os guest tools, mantenha a NAT default da etapa 40.
-  2. No host, em outro terminal aberto na raiz deste projeto, execute:
-       BRIDGE_NAT="$(virsh --connect qemu:///system net-info default |
-         awk '/^Bridge:/ {print $2}')"
-       HOST_NAT_IP="$(ip -4 -o addr show "$BRIDGE_NAT" |
-         awk '{split($4, campo, "/"); print campo[1]; exit}')"
-       python3 -m http.server 8000 --bind "$HOST_NAT_IP" --directory windows
-  3. No Windows, abra o PowerShell e copie os três scripts:
+# ---------------------------------------------------------------------------
+# Dados reais da NAT default, usados no roteiro de transferência dos .ps1.
+# LC_ALL=C é obrigatório: em um host com locale pt_BR o rótulo de net-info sai
+# como "Ponte:", o filtro por "Bridge:" devolve vazio e o comando manual antigo
+# terminava em 'Device "" does not exist' seguido de socket.gaierror no
+# http.server. Aqui a bridge e o IP já saem resolvidos para o usuário copiar.
+# ---------------------------------------------------------------------------
+BRIDGE_NAT="$(LC_ALL=C $VIRSH net-info default 2>/dev/null \
+    | awk '/^Bridge:/ {print $2; exit}')" || BRIDGE_NAT=""
+HOST_NAT_IP=""
+if [ -n "$BRIDGE_NAT" ]; then
+    HOST_NAT_IP="$(ip -4 -o addr show "$BRIDGE_NAT" 2>/dev/null \
+        | awk '{split($4, campo, "/"); print campo[1]; exit}')" || HOST_NAT_IP=""
+fi
+
+cat <<'GUIA'
+
+PÓS-INSTALAÇÃO, NA ORDEM (a VM continua na NAT default da etapa 40):
+
+12. Copie os três .ps1 do host para a VM (veja "COMO COPIAR OS TRÊS .ps1"
+    logo abaixo). Copiar não é executar: cada script só roda na etapa dele.
+
+13. Desative a Inicialização Rápida (Fast Startup) agora, e só ela:
+      - PowerShell como Administrador:
+        
+        .\Desativar-Fast-Startup.ps1
+        
+        OU
+        
+        powershell.exe -ExecutionPolicy Bypass -File ".\Desativar-Fast-Startup.ps1"
+        
+        OU
+
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+        .\Desativar-Fast-Startup.ps1
+
+      - ou Painel de Controle > Opções de Energia > "Escolher a função dos
+        botões de energia" > "Alterar configurações não disponíveis
+        atualmente" > desmarcar "Ligar inicialização rápida".
+
+    Por quê: com Fast Startup, "Desligar" deixa o Windows/NTFS parcialmente
+    hibernado, e a partir da etapa 50 o host não consegue tratar o HD1 como
+    desligado de verdade. Depois de aplicar, faça um desligamento completo da
+    VM pelo menos uma vez.
+
+14. Windows Defender: mantenha a proteção em tempo real ATIVA, não instale
+    antivírus de terceiros e NUNCA exclua a pasta do airlock da verificação
+    (é exatamente ela que recebe arquivos vindos do host).
+    
+15. NÃO instale o driver NVIDIA ainda. Até a etapa 50 a VM só tem a QXL
+    emulada. Depois do passthrough da GPU real, baixe de nvidia.com/drivers e
+    use a opção "Instalação limpa".
+
+QUANDO CADA .ps1 É USADO (não execute fora de hora):
+  Desativar-Fast-Startup.ps1  agora, no passo 13, como Administrador.
+  Ativar-MSI-GPU.ps1          etapa 53 (CPU isolation), como Administrador e
+                              somente após o driver NVIDIA estar instalado.
+  Gerar-Chave-Airlock.ps1     etapa 61 (airlock), com o usuário comum do
+                              Windows que vai usar o WinSCP; NÃO como
+                              Administrador, senão a chave nasce no perfil
+                              errado.
+
+COMO COPIAR OS TRÊS .ps1 DO HOST PARA A VM
+GUIA
+printf 'Os arquivos estão no host em: %s/windows\n' "$PROJETO_DIR"
+cat <<'GUIA'
+
+Opção A, arrastar e soltar (mais simples, sem rede e sem firewall):
+  Os guest tools do passo 11 instalam o spice-vdagent, que é o que habilita
+  arrastar arquivos e o copiar/colar de texto entre host e VM.
+  1. Reinicie a VM depois dos guest tools e abra o console gráfico
+     (virt-manager > a VM > Exibir > Console).
+  2. Abra a pasta windows do projeto no gerenciador de arquivos do host,
+     selecione os três .ps1 e arraste-os para dentro da janela do console.
+  3. Uma barra de progresso de transferência aparece e os arquivos chegam na
+     pasta padrão do usuário Windows (Downloads ou Área de Trabalho,
+     conforme a versão do vdagent). Mova-os para %USERPROFILE%\Scripts-VM.
+  Se nada acontecer ao soltar, o vdagent não está rodando: confira o serviço
+  "Spice VDAgent" em services.msc dentro do Windows, ou use a opção B.
+
+Opção B, servidor HTTP temporário na NAT default:
+GUIA
+if [ -n "$HOST_NAT_IP" ]; then
+    printf '  1. No host, em OUTRO terminal, suba o servidor e deixe rodando:\n'
+    printf "       python3 -m http.server 8000 --bind %s --directory '%s/windows'\n" \
+        "$HOST_NAT_IP" "$PROJETO_DIR"
+else
+    aviso "Não foi possível resolver o IP do host na rede 'default' (ela está ativa?)."
+    info  "Verifique com: LC_ALL=C $VIRSH net-info default   e   ip -4 -o addr show <bridge>"
+    printf '  1. No host, em OUTRO terminal, com <IP> = IP do host na bridge da NAT:\n'
+    printf "       python3 -m http.server 8000 --bind <IP> --directory '%s/windows'\n" \
+        "$PROJETO_DIR"
+fi
+if systemctl is-active --quiet ufw 2>/dev/null; then
+    printf '  2. O ufw está ativo neste host: libere a porta apenas na bridge da VM:\n'
+    printf '       sudo ufw allow in on %s to any port 8000 proto tcp\n' \
+        "${BRIDGE_NAT:-virbr0}"
+else
+    printf '  2. Sem ufw ativo aqui; se o download falhar, o firewall do host é o\n'
+    printf '     primeiro suspeito (a porta 8000 precisa aceitar tráfego da %s).\n' \
+        "${BRIDGE_NAT:-bridge da NAT}"
+fi
+cat <<'GUIA'
+  3. No Windows, no PowerShell (usuário comum basta):
        $HostNAT = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
          Sort-Object RouteMetric | Select-Object -First 1).NextHop
        $Destino = "$HOME\Scripts-VM"
@@ -90,9 +177,27 @@ TRANSFERÊNCIA INICIAL DOS .ps1 (antes do airlock):
          'Gerar-Chave-Airlock.ps1') | ForEach-Object {
            Invoke-WebRequest "http://${HostNAT}:8000/$_" -OutFile "$Destino\$_"
        }
-  4. Confira os arquivos, encerre o servidor no host com Ctrl+C e deixe o
-     Defender verificá-los. Execute cada .ps1 somente na etapa indicada.
+       Get-ChildItem $Destino
+GUIA
+if [ -n "$HOST_NAT_IP" ]; then
+    printf '     $HostNAT tem de imprimir %s. Se imprimir outro valor, a VM já não\n' \
+        "$HOST_NAT_IP"
+    printf '     está na NAT default: devolva a rede para "default" antes de insistir.\n'
+fi
+printf '  4. Encerre o servidor no host com Ctrl+C'
+if systemctl is-active --quiet ufw 2>/dev/null; then
+    printf ' e remova a liberação:\n'
+    printf '       sudo ufw delete allow in on %s to any port 8000 proto tcp\n' \
+        "${BRIDGE_NAT:-virbr0}"
+else
+    printf '.\n'
+fi
+cat <<'GUIA'
+  5. Deixe o Defender verificar os arquivos e leia o conteúdo de cada .ps1
+     antes de executá-lo. Nenhum deles precisa de rede para funcionar.
 
+GUIA
+cat <<'GUIA'
 O disco HD1 físico só é anexado na etapa 50, DEPOIS da instalação do Windows
 no QCOW2. Nunca selecione o HD1 físico como destino do instalador.
 
