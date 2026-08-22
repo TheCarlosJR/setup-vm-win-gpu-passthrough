@@ -17,7 +17,7 @@
 # da GPU já vai junto do passthrough da etapa 14 (mesmo grupo IOMMU).
 #
 # Uso:
-#   51-usb-passthrough.sh                        adiciona dispositivos (interativo)
+#   51-usb-passthrough.sh                        pergunta o modo (padrão do menu)
 #   51-usb-passthrough.sh --remover              remove dispositivos anexados
 #   51-usb-passthrough.sh --controladora         passa uma controladora inteira
 #   51-usb-passthrough.sh --remover-controladora devolve a controladora ao host
@@ -234,7 +234,7 @@ xml_hostdev_pci() {
 XML
 }
 
-if [ "${1:-}" = "--controladora" ]; then
+modo_controladora() {
     titulo "Etapa 15: passar uma controladora USB inteira (VM: $VM_NAME)"
     [ -z "${USB_CTRL_PCI_IDS:-}" ] \
         || falhar "Já existe controladora configurada ($USB_CTRL_PCI_IDS). Use --remover-controladora antes de trocar."
@@ -311,9 +311,9 @@ if [ "${1:-}" = "--controladora" ]; then
     info "Hotplug nativo: qualquer USB plugado nas portas dela aparece no Windows na hora."
     info "Para devolver ao host: bash etapas/51-usb-passthrough.sh --remover-controladora"
     exit 0
-fi
+}
 
-if [ "${1:-}" = "--remover-controladora" ]; then
+modo_remover_controladora() {
     titulo "Etapa 15: devolver a controladora USB ao host (VM: $VM_NAME)"
     [ -n "${USB_CTRL_PCI_IDS:-}" ] || { info "Nenhuma controladora configurada."; exit 0; }
     IFS=',' read -r -a MEMBROS <<< "$USB_CTRL_PCI_IDS"
@@ -337,7 +337,7 @@ if [ "${1:-}" = "--remover-controladora" ]; then
         USB_CTRL_IOMMU_GROUP ""
     ok "Configuração da controladora limpa (vale a partir do próximo boot da VM)."
     exit 0
-fi
+}
 
 # --- Modo dispositivos individuais ---------------------------------------------
 USB_XML_PERMITIDAS=(
@@ -368,7 +368,7 @@ listar_usb_xml() {
     done
 }
 
-if [ "${1:-}" = "--remover" ]; then
+modo_remover_dispositivos() {
     titulo "Etapa 15: remover USB passthrough da VM $VM_NAME"
     mapfile -t ATUAIS < <(listar_usb_xml | sed '/^$/d')
     [ "${#ATUAIS[@]}" -gt 0 ] || { info "Nenhum hostdev USB no XML."; exit 0; }
@@ -397,12 +397,11 @@ XML
     rm -f "$TMP"
     ok "Removido da configuração persistente: $VEND:$PROD (vale no próximo boot da VM)."
     exit 0
-fi
+}
 
-[ -z "${1:-}" ] || falhar "Opção desconhecida da etapa 15: '$1' (use --remover, --controladora, --remover-controladora ou --verificar)."
-
+modo_dispositivos() {
 titulo "Etapa 15: USB passthrough por dispositivo (VM: $VM_NAME)"
-info "Para portas inteiras com hotplug nativo, use: bash etapas/51-usb-passthrough.sh --controladora"
+info "Para portas inteiras com hotplug nativo, use o modo controladora."
 mapfile -t LINHAS < <(lsusb)
 [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
 echo
@@ -498,3 +497,34 @@ done
 echo
 info "Verificação dentro do Windows: Get-PnpDevice -Class Keyboard, Mouse, AudioEndpoint"
 ok "Etapa 15 concluída."
+}
+
+# --- Despacho: argumento explícito ou pergunta interativa (padrão do menu) ------
+case "${1:-}" in
+    --controladora) modo_controladora ;;
+    --remover-controladora) modo_remover_controladora ;;
+    --remover) modo_remover_dispositivos ;;
+    "")
+        titulo "Etapa 15: USB passthrough (VM: $VM_NAME)"
+        if [ -n "${USB_CTRL_PCI_IDS:-}" ]; then
+            info "Controladora já em passthrough: $USB_CTRL_PCI_IDS (grupo IOMMU ${USB_CTRL_IOMMU_GROUP:-?})."
+        else
+            info "Nenhuma controladora inteira em passthrough ainda."
+        fi
+        ESCOLHA_MODO="$(escolher_da_lista 'O que você quer fazer?' nao \
+            'Passar dispositivos individuais (vendor:product; ex.: Bluetooth onboard)' \
+            'Passar uma controladora USB inteira (hotplug nativo nas portas dela)' \
+            'Remover dispositivos individuais do XML' \
+            'Devolver a controladora inteira ao host')"
+        case "$ESCOLHA_MODO" in
+            1) modo_dispositivos ;;
+            2) modo_controladora ;;
+            3) modo_remover_dispositivos ;;
+            4) modo_remover_controladora ;;
+            *) cancelar_etapa ;;
+        esac
+        ;;
+    *)
+        falhar "Opção desconhecida da etapa 15: '$1' (use --remover, --controladora, --remover-controladora ou --verificar)."
+        ;;
+esac
