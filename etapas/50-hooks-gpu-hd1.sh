@@ -412,6 +412,45 @@ aguardar_dm_inativo() {
     done
     return 1
 }
+listar_ocupantes_gpu() {
+    # Diagnóstico acionável no lugar de só "module in use": lista quem ainda
+    # segura os nós da GPU no momento da desistência.
+    local dispositivo
+    local -a existentes=()
+    command -v fuser >/dev/null 2>&1 || return 0
+    for dispositivo in /dev/nvidia* /dev/dri/card* /dev/dri/renderD*; do
+        [ -e "$dispositivo" ] && existentes+=("$dispositivo")
+    done
+    [ "${#existentes[@]}" -gt 0 ] || return 0
+    echo "[hook prepare] processos ainda usando a GPU:" >&2
+    fuser -v "${existentes[@]}" 2>&1 | sed 's/^/[hook prepare]   /' >&2 || true
+}
+descarregar_modulos_nvidia() {
+    # Parar o DM encerra a sessão gráfica, mas os processos que seguram a GPU
+    # (navegador, IDE, Xwayland, captura de tela) morrem de forma assíncrona:
+    # um único modprobe -r perde essa corrida em sessões carregadas. O
+    # descarregamento é repetido por até 60 s e o erro final lista os
+    # ocupantes.
+    local i modulo restante
+    for ((i=0; i<60; i++)); do
+        restante=0
+        for modulo in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do
+            grep -q "^${modulo} " /proc/modules || continue
+            if modprobe -r "$modulo" 2>/dev/null; then
+                echo "[hook prepare] módulo $modulo descarregado."
+            else
+                restante=1
+            fi
+        done
+        [ "$restante" -eq 0 ] && return 0
+        if (( i % 10 == 0 )); then
+            echo "[hook prepare] GPU ainda em uso; aguardando a sessão liberar os módulos nvidia (${i}s)..."
+        fi
+        sleep 1
+    done
+    listar_ocupantes_gpu
+    return 1
+}
 rollback_prepare() {
     local rc=$? modulo falhas=0 i estado
     trap - ERR
@@ -479,12 +518,9 @@ if [ "$DM_WAS_ACTIVE" -eq 1 ]; then
     systemctl stop "$DM"
     aguardar_dm_inativo || falha "$DM não ficou inativo em 30 segundos"
 fi
-for modulo in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do
-    if grep -q "^${modulo} " /proc/modules; then
-        echo "[hook prepare] descarregando $modulo..."
-        modprobe -r "$modulo"
-    fi
-done
+echo "[hook prepare] descarregando os módulos nvidia (aguarda a sessão soltar a GPU; até 60 s)..."
+descarregar_modulos_nvidia \
+    || falha "módulos nvidia continuam em uso após 60 s; feche aplicativos que usam a GPU (navegador, IDE, acesso remoto) e tente novamente"
 [ "$(driver_atual "$GPU_PCI")" = sem_driver ] \
     || falha "GPU continuou vinculada após descarregar nvidia"
 trap - ERR

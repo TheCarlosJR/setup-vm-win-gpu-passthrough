@@ -134,6 +134,12 @@ QTD_PCI="$(grep -c "hostdev mode='subsystem' type='pci'" <<< "$XML_INATIVO" || t
     || falhar "A VM não tem GPU em passthrough no XML. Aplique a etapa 14 antes."
 [ -e "/etc/libvirt/hooks/qemu.d/${VM_NAME}/.vm-passthrough-required" ] \
     || falhar "Os hooks da etapa 14 não estão instalados para esta VM. Aplique a etapa 14 antes."
+# O prepare precisa da espera de liberação da GPU: sem ela, o descarregamento
+# dos módulos nvidia perde a corrida contra a morte assíncrona da sessão
+# gráfica e o start aborta com "module in use" (visto em 2026-08-22).
+grep -q 'descarregar_modulos_nvidia' \
+    "/etc/libvirt/hooks/qemu.d/${VM_NAME}/prepare/begin/01-gpu-preflight.sh" 2>/dev/null \
+    || falhar "Os hooks instalados são de uma versão antiga, sem a espera de liberação da GPU. Rode a etapa 14 novamente (ela re-renderiza os hooks) e volte a esta etapa."
 
 validar_iso_configurada "$ISO_VIRTIO" \
     || falhar "ISO virtio-win inválida (${ARMAZENAMENTO_ERRO:-sem diagnóstico}). Ela é a fonte dos guest tools."
@@ -365,6 +371,7 @@ info "2) O runner espera o qemu-guest-agent, instala os guest tools (se faltarem
 info "3) nvidia-smi confirma o driver (com um reboot de verificação da VM se necessário)."
 info "4) A VM desliga e o hook release devolve GPU e desktop sozinhos."
 info "Duração típica: 10 a 30 minutos. Acompanhe sem vídeo: journalctl -u $UNIDADE -f"
+aviso "Feche antes os aplicativos pesados que usam a GPU (navegador, IDE, acesso remoto): eles atrasam a liberação dos módulos nvidia na queda da sessão."
 aviso "NÃO force o desligamento do PC durante o processo; para abortar use, por SSH: virsh --connect qemu:///system destroy $VM_NAME"
 confirmar_digitando INSTALAR "Ao confirmar, o VÍDEO DO HOST SERÁ PERDIDO durante a instalação automática; ele volta sozinho ao final." \
     || cancelar_etapa

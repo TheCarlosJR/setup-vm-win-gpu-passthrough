@@ -139,6 +139,14 @@ automática via qemu-guest-agent, sem monitor nem teclado dedicados). O
 andamento da etapa 15 é acompanhável sem vídeo com
 `journalctl -u vm-passthrough-driver-<vm> -f`.
 
+Variante rápida do sintoma: a tela cai e o desktop VOLTA em poucos segundos
+(parece só um logoff). Isso é o preflight dos hooks recusando o start e
+revertendo; veja `journalctl -u libvirtd -e`. A causa comum é a sessão ainda
+segurando os módulos nvidia no instante do descarregamento: o hook prepare
+espera até 60 s e, se desistir, lista no journal os processos que ocupam a
+GPU. Feche navegador, IDE e acesso remoto antes de iniciar a VM e tente de
+novo.
+
 ### Sintomas
 
 - monitor permanece sem sinal depois que o Windows foi desligado;
