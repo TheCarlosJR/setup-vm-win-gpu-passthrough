@@ -20,6 +20,7 @@
 # Recuperar a GPU no host não desfaz a configuração persistente; após sucesso,
 # a reversão exige restaurar os backups de XML/hooks em janela de manutenção.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
@@ -112,6 +113,13 @@ verificar() {
     verificar_hook "$prep" "Hook prepare/begin"
     verificar_hook "$inicio" "Hook start/begin"
     verificar_hook "$release" "Hook release/end"
+    if [ -f "$release" ] && [ -r "$release" ]; then
+        if grep -q '^HOOK_LOG_DIR=' "$release" 2>/dev/null; then
+            v_ok "Hooks com log persistente de retomada em /var/log/vm-passthrough/hooks.log."
+        else
+            v_falta "Hooks instalados são de geração antiga (sem log persistente nem retomada reforçada do desktop); reexecute a etapa 14 para atualizá-los."
+        fi
+    fi
     [ -f "$obrigatorio" ] \
         && v_ok "Marcador fail-closed do gate presente." \
         || v_falta "Marcador fail-closed do gate ausente: $obrigatorio"
@@ -193,6 +201,40 @@ validar_config_hooks() {
     fi
 }
 
+emitir_hook_log_fn() {
+    # Insere nos hooks gerados o log persistente de ações do HOST em
+    # /var/log/vm-passthrough/hooks.log. O libvirt engole o stdout dos hooks
+    # que terminam bem e o journal pode perder os últimos segundos num
+    # travamento; este arquivo é a linha do tempo que sobrevive para o
+    # diagnóstico. Privacidade por contrato: registra apenas eventos do lado
+    # do host (drivers, DM, systemd); nunca conteúdo, tela, teclado ou
+    # tráfego da VM.
+    local rotulo="$1"
+    printf 'HOOK_ROTULO=%q\n' "$rotulo"
+    printf 'HOOK_VERSAO=%q\n' "$SCRIPT_VERSION"
+    cat <<'HOOKLOG'
+HOOK_LOG_DIR=/var/log/vm-passthrough
+HOOK_LOG_ARQUIVO="$HOOK_LOG_DIR/hooks.log"
+hook_log() {
+    # Best-effort: falha de log nunca altera o resultado do hook. O sync
+    # persiste a linha mesmo que o host trave logo em seguida.
+    {
+        [ -d "$HOOK_LOG_DIR" ] || mkdir -p -- "$HOOK_LOG_DIR"
+        if [ ! -f "$HOOK_LOG_ARQUIVO" ]; then
+            : > "$HOOK_LOG_ARQUIVO"
+            chgrp adm "$HOOK_LOG_ARQUIVO" 2>/dev/null || true
+            chmod 0640 "$HOOK_LOG_ARQUIVO" 2>/dev/null || true
+        elif [ "$(stat -c %s -- "$HOOK_LOG_ARQUIVO")" -ge 1048576 ] 2>/dev/null; then
+            mv -f -- "$HOOK_LOG_ARQUIVO" "$HOOK_LOG_ARQUIVO.1"
+        fi
+        printf '%s [%s] [hook %s v%s] %s\n' \
+            "$(date '+%F %T')" "${VM_NAME:-?}" "$HOOK_ROTULO" "$HOOK_VERSAO" "$*" >> "$HOOK_LOG_ARQUIVO"
+        sync -d -- "$HOOK_LOG_ARQUIVO" 2>/dev/null || sync 2>/dev/null
+    } 2>/dev/null || true
+}
+HOOKLOG
+}
+
 gerar_dispatcher() {
     local destino="$1" legado="$2"
     {
@@ -204,11 +246,13 @@ set -u -o pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CAB
         printf 'LEGACY_HOOK=%q\n' "$legado"
+        emitir_hook_log_fn dispatcher
         cat <<'CORPO'
 [ "$#" -ge 3 ] || { echo "[hook dispatcher] argumentos insuficientes" >&2; exit 64; }
 VM_NAME="$1"
 EVENTO="$2"
 SUBEVENTO="$3"
+hook_log "evento $EVENTO/$SUBEVENTO recebido (args: ${4:-} ${5:-})"
 segmento_seguro() {
     [ -n "$1" ] && [ "$1" != . ] && [ "$1" != .. ] \
         && [[ "$1" != */* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
@@ -233,6 +277,7 @@ executar_hook() {
     "$alvo" "$@" < "$ENTRADA" || {
         rc=$?
         echo "[hook dispatcher] $alvo falhou com status $rc" >&2
+        hook_log "ERRO: $alvo falhou com status $rc"
         return "$rc"
     }
 }
@@ -262,6 +307,7 @@ fi
 if [ -n "$LEGACY_HOOK" ] && [ -x "$LEGACY_HOOK" ]; then
     executar_hook "$LEGACY_HOOK" "$@" || exit $?
 fi
+hook_log "evento $EVENTO/$SUBEVENTO concluído"
 exit 0
 CORPO
     } > "$destino"
@@ -288,12 +334,14 @@ CAB
         printf 'HD1_BY_ID=%q\n' "${HD1_BY_ID_PATH:-}"
         printf 'DISCO_SISTEMA=%q\n' "${NVME_DEVICE:-}"
         printf 'HD1_IDENTIDADE=%q\n' "${HD1_IDENTIDADE:-}"
+        emitir_hook_log_fn prepare
         cat <<'CORPO'
 STATE_DIR=/run/libvirt-gpu-passthrough
 STATE_FILE="$STATE_DIR/${VM_NAME}.state"
 DM_WAS_ACTIVE=0
 
-falha() { echo "[hook prepare] ERRO: $*" >&2; return 1; }
+falha() { echo "[hook prepare] ERRO: $*" >&2; hook_log "ERRO: $*"; return 1; }
+dizer() { echo "[hook prepare] $*"; hook_log "$*"; }
 LOCK_DIR=/run/libvirt-gpu-locks
 LOCK_FILE="$LOCK_DIR/${VM_NAME}.lock"
 install -d -o root -g root -m 0755 "$LOCK_DIR"
@@ -482,6 +530,7 @@ rollback_prepare() {
     trap - ERR
     set +e
     echo "[hook prepare] revertendo liberação do desktop após falha..." >&2
+    hook_log "rollback iniciado (status $rc): recarregando drivers e desktop"
     for modulo in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
         modprobe "$modulo" || { echo "[hook prepare] rollback: modprobe $modulo falhou" >&2; falhas=1; }
     done
@@ -509,12 +558,15 @@ rollback_prepare() {
     fi
     if [ "$falhas" -eq 0 ]; then
         rm -f -- "$STATE_FILE"
+        hook_log "rollback concluído: GPU e desktop de volta ao baseline"
     else
         echo "[hook prepare] rollback incompleto; estado preservado em $STATE_FILE" >&2
+        hook_log "ERRO: rollback incompleto; estado preservado em $STATE_FILE"
     fi
     exit "$rc"
 }
 
+hook_log "preflight iniciado; driver atual da GPU $GPU_PCI: $(driver_atual "$GPU_PCI")"
 validar_pci_iommu
 preflight_hd1
 [ "$(driver_atual "$GPU_PCI")" = nvidia ] \
@@ -537,20 +589,22 @@ printf 'DM_WAS_ACTIVE=%s\nGPU_DRIVER=nvidia\nAUDIO_DRIVER=%s\nHD1_ALVO=%s\nHD1_D
     "$DM_WAS_ACTIVE" "${GPU_AUDIO_PCI:+snd_hda_intel}" \
     "${SNAP_ALVO:-}" "${SNAP_DEVNO:-}" "${SNAP_IDENTIDADE:-}" > "$STATE_TMP"
 mv -f -- "$STATE_TMP" "$STATE_FILE"
+hook_log "estado registrado em $STATE_FILE (DM_WAS_ACTIVE=$DM_WAS_ACTIVE)"
 trap rollback_prepare ERR
 
 if [ "$DM_WAS_ACTIVE" -eq 1 ]; then
-    echo "[hook prepare] parando $DM..."
+    dizer "parando $DM..."
     systemctl stop "$DM"
     aguardar_dm_inativo || falha "$DM não ficou inativo em 30 segundos"
+    hook_log "$DM parado e confirmado inativo"
 fi
-echo "[hook prepare] descarregando os módulos nvidia (aguarda a sessão soltar a GPU; até 60 s)..."
+dizer "descarregando os módulos nvidia (aguarda a sessão soltar a GPU; até 60 s)..."
 descarregar_modulos_nvidia \
     || falha "módulos nvidia continuam em uso após 60 s; feche aplicativos que usam a GPU (navegador, IDE, acesso remoto) e tente novamente"
 [ "$(driver_atual "$GPU_PCI")" = sem_driver ] \
     || falha "GPU continuou vinculada após descarregar nvidia"
 trap - ERR
-echo "[hook prepare] preflight aprovado e desktop liberado; detach PCI será feito pelo libvirt."
+dizer "preflight aprovado e desktop liberado; detach PCI será feito pelo libvirt."
 CORPO
     } > "$destino"
 }
@@ -570,9 +624,11 @@ CAB
         printf 'GPU_AUDIO_PCI=%q\n' "$audio_pci"
         printf 'HD1_BY_ID=%q\n' "${HD1_BY_ID_PATH:-}"
         printf 'HD1_IDENTIDADE=%q\n' "${HD1_IDENTIDADE:-}"
+        emitir_hook_log_fn start
         cat <<'CORPO'
 STATE_FILE="/run/libvirt-gpu-passthrough/${VM_NAME}.state"
-[ -f "$STATE_FILE" ] || { echo "[hook start] estado prepare ausente" >&2; exit 1; }
+[ -f "$STATE_FILE" ] \
+    || { echo "[hook start] estado prepare ausente" >&2; hook_log "ERRO: estado prepare ausente"; exit 1; }
 HD1_ALVO_ESTADO=""
 HD1_DEVNO_ESTADO=""
 HD1_IDENTIDADE_ESTADO=""
@@ -609,7 +665,7 @@ validar_hd1_antes_qemu() {
     ! awk 'NF>1 && $2!="" {achou=1} END {exit !achou}' <<< "$saida"
 }
 validar_hd1_antes_qemu \
-    || { echo "[hook start] HD1 mudou ou foi montado depois do prepare; abortando QEMU" >&2; exit 1; }
+    || { echo "[hook start] HD1 mudou ou foi montado depois do prepare; abortando QEMU" >&2; hook_log "ERRO: HD1 mudou ou foi montado depois do prepare; QEMU abortado"; exit 1; }
 driver_atual() {
     [ -L "/sys/bus/pci/devices/$1/driver" ] \
         && basename -- "$(readlink -f -- "/sys/bus/pci/devices/$1/driver")" \
@@ -622,11 +678,13 @@ aguardar_vfio() {
         sleep 1
     done
     echo "[hook start] $bdf não foi entregue ao vfio-pci pelo libvirt" >&2
+    hook_log "ERRO: $bdf não foi entregue ao vfio-pci pelo libvirt (driver atual: $(driver_atual "$bdf"))"
     return 1
 }
 aguardar_vfio "$GPU_PCI"
 [ -z "$GPU_AUDIO_PCI" ] || aguardar_vfio "$GPU_AUDIO_PCI"
 echo "[hook start] hostdev managed='yes' confirmado em vfio-pci."
+hook_log "hostdev managed='yes' confirmado em vfio-pci; QEMU liberado"
 CORPO
     } > "$destino"
 }
@@ -645,19 +703,22 @@ CAB
         printf 'GPU_PCI=%q\n' "${GPU_PCI_ID,,}"
         printf 'GPU_AUDIO_PCI=%q\n' "$audio_pci"
         printf 'DM=%q\n' "$DM_SERVICE"
+        emitir_hook_log_fn release
         cat <<'CORPO'
 STATE_FILE="/run/libvirt-gpu-passthrough/${VM_NAME}.state"
 LOCK_DIR=/run/libvirt-gpu-locks
 LOCK_FILE="$LOCK_DIR/${VM_NAME}.lock"
+dizer() { echo "[hook release] $*"; hook_log "$*"; }
+dizer_erro() { echo "[hook release] $*" >&2; hook_log "ERRO: $*"; }
 install -d -o root -g root -m 0755 "$LOCK_DIR"
-[ ! -L "$LOCK_FILE" ] || { echo "[hook release] lock inseguro" >&2; exit 1; }
+[ ! -L "$LOCK_FILE" ] || { dizer_erro "lock inseguro"; exit 1; }
 touch "$LOCK_FILE"
 chown root:root "$LOCK_FILE"
 chmod 0666 "$LOCK_FILE"
 [ -f "$LOCK_FILE" ] && [ "$(stat -c %u "$LOCK_FILE")" -eq 0 ] \
-    || { echo "[hook release] lock inseguro" >&2; exit 1; }
+    || { dizer_erro "lock inseguro"; exit 1; }
 exec 9>"$LOCK_FILE"
-flock -w 60 9 || { echo "[hook release] lock de GPU ocupado por mais de 60 s" >&2; exit 1; }
+flock -w 60 9 || { dizer_erro "lock de GPU ocupado por mais de 60 s"; exit 1; }
 driver_atual() {
     [ -L "/sys/bus/pci/devices/$1/driver" ] \
         && basename -- "$(readlink -f -- "/sys/bus/pci/devices/$1/driver")" \
@@ -669,11 +730,42 @@ aguardar_driver() {
         [ "$(driver_atual "$bdf")" = "$esperado" ] && return 0
         sleep 1
     done
-    echo "[hook release] $bdf não retornou ao driver $esperado (atual: $(driver_atual "$bdf"))" >&2
+    dizer_erro "$bdf não retornou ao driver $esperado (atual: $(driver_atual "$bdf"))"
     return 1
 }
+aguardar_drm_gpu() {
+    # Um DM que sobe antes de a GPU expor o nó DRM abre a sessão sem saída de
+    # vídeo real: monitor sem sinal com o host vivo. Espera até 15 s.
+    local i
+    for ((i=0; i<15; i++)); do
+        if compgen -G "/sys/bus/pci/devices/$GPU_PCI/drm/card*" >/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+desligamento_em_andamento() {
+    # Com poweroff/reboot na fila, o systemd recusa iniciar o DM ("transaction
+    # is destructive"); religar o desktop é impossível e desnecessário.
+    systemctl list-jobs --no-legend 2>/dev/null \
+        | grep -Eq '(shutdown|poweroff|reboot|halt)\.target'
+}
+iniciar_dm() {
+    local tentativa
+    for ((tentativa=1; tentativa<=3; tentativa++)); do
+        dizer "iniciando $DM (tentativa $tentativa/3)..."
+        if systemctl start "$DM" && systemctl is-active --quiet "$DM"; then
+            return 0
+        fi
+        dizer_erro "$DM não ficou ativo na tentativa $tentativa"
+        sleep 3
+    done
+    return 1
+}
+hook_log "release iniciado; driver atual da GPU $GPU_PCI: $(driver_atual "$GPU_PCI")"
 if [ ! -f "$STATE_FILE" ]; then
-    echo "[hook release] estado ausente; não é possível provar o baseline do driver/DM. Use util/recuperar-gpu.sh." >&2
+    dizer_erro "estado ausente; não é possível provar o baseline do driver/DM. Use util/recuperar-gpu.sh."
     exit 1
 fi
 DM_WAS_ACTIVE=""
@@ -685,59 +777,69 @@ while IFS='=' read -r chave valor; do
         GPU_DRIVER) GPU_DRIVER="$valor" ;;
         AUDIO_DRIVER) AUDIO_DRIVER="$valor" ;;
         HD1_ALVO|HD1_DEVNO|HD1_IDENTIDADE) : ;;
-        *) echo "[hook release] chave de estado desconhecida: $chave" >&2; exit 1 ;;
+        *) dizer_erro "chave de estado desconhecida: $chave"; exit 1 ;;
     esac
 done < "$STATE_FILE"
-[[ "$DM_WAS_ACTIVE" =~ ^[01]$ ]] || { echo "[hook release] estado DM inválido" >&2; exit 1; }
-[ "$GPU_DRIVER" = nvidia ] || { echo "[hook release] driver GPU de estado inválido" >&2; exit 1; }
-[[ "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]] || { echo "[hook release] driver de áudio inválido" >&2; exit 1; }
+[[ "$DM_WAS_ACTIVE" =~ ^[01]$ ]] || { dizer_erro "estado DM inválido"; exit 1; }
+[ "$GPU_DRIVER" = nvidia ] || { dizer_erro "driver GPU de estado inválido"; exit 1; }
+[[ "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]] || { dizer_erro "driver de áudio inválido"; exit 1; }
 
 FALHAS=0
 for modulo in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
-    echo "[hook release] carregando $modulo..."
+    dizer "carregando $modulo..."
     if ! modprobe "$modulo"; then
-        echo "[hook release] modprobe $modulo falhou" >&2
+        dizer_erro "modprobe $modulo falhou"
         FALHAS=$((FALHAS + 1))
     fi
 done
 if [ -n "$AUDIO_DRIVER" ] && ! modprobe "$AUDIO_DRIVER"; then
-    echo "[hook release] modprobe $AUDIO_DRIVER falhou" >&2
+    dizer_erro "modprobe $AUDIO_DRIVER falhou"
     FALHAS=$((FALHAS + 1))
 fi
-if ! aguardar_driver "$GPU_PCI" "$GPU_DRIVER"; then
+if aguardar_driver "$GPU_PCI" "$GPU_DRIVER"; then
+    hook_log "GPU $GPU_PCI confirmada no driver $GPU_DRIVER"
+else
     FALHAS=$((FALHAS + 1))
 fi
 if [ -n "$GPU_AUDIO_PCI" ] && ! aguardar_driver "$GPU_AUDIO_PCI" "$AUDIO_DRIVER"; then
     FALHAS=$((FALHAS + 1))
 fi
-if ! nvidia-smi >/dev/null; then
-    echo "[hook release] nvidia-smi não respondeu" >&2
+if aguardar_drm_gpu; then
+    hook_log "nó DRM da GPU presente; saída de vídeo disponível para o DM"
+else
+    dizer_erro "nó DRM da GPU não apareceu em 15 s; o desktop pode subir sem sinal de vídeo"
+    FALHAS=$((FALHAS + 1))
+fi
+if ! timeout 30 nvidia-smi >/dev/null; then
+    dizer_erro "nvidia-smi não respondeu"
     FALHAS=$((FALHAS + 1))
 fi
 if [ "$DM_WAS_ACTIVE" -eq 1 ]; then
-    if ! systemctl start "$DM"; then
-        echo "[hook release] não foi possível iniciar $DM" >&2
-        FALHAS=$((FALHAS + 1))
-    elif ! systemctl is-active --quiet "$DM"; then
-        echo "[hook release] $DM não ficou ativo" >&2
+    if desligamento_em_andamento; then
+        dizer "host em desligamento/reinício; $DM não será iniciado agora."
+    elif iniciar_dm; then
+        hook_log "$DM ativo; desktop restaurado"
+    else
+        dizer_erro "não foi possível iniciar $DM"
         FALHAS=$((FALHAS + 1))
     fi
 else
     if ! DM_ESTADO_FINAL="$(systemctl show -p ActiveState --value "$DM")"; then
-        echo "[hook release] não foi possível consultar o estado final de $DM" >&2
+        dizer_erro "não foi possível consultar o estado final de $DM"
         FALHAS=$((FALHAS + 1))
     elif [ "$DM_ESTADO_FINAL" != inactive ]; then
-        echo "[hook release] $DM estava inativo antes, mas mudou para $DM_ESTADO_FINAL" >&2
+        dizer_erro "$DM estava inativo antes, mas mudou para $DM_ESTADO_FINAL"
         FALHAS=$((FALHAS + 1))
     fi
 fi
 if [ "$FALHAS" -ne 0 ]; then
-    echo "[hook release] restauração incompleta ($FALHAS falha(s)); estado preservado em $STATE_FILE" >&2
+    dizer_erro "restauração incompleta ($FALHAS falha(s)); estado preservado em $STATE_FILE"
+    dizer_erro "recupere por TTY/SSH com util/recuperar-gpu.sh; linha do tempo em $HOOK_LOG_ARQUIVO"
     exit 1
 fi
 rm -f -- "$STATE_FILE" \
-    || { echo "[hook release] pós-condições aprovadas, mas o estado não pôde ser removido: $STATE_FILE" >&2; exit 1; }
-echo "[hook release] GPU e desktop restaurados com pós-condições verificadas."
+    || { dizer_erro "pós-condições aprovadas, mas o estado não pôde ser removido: $STATE_FILE"; exit 1; }
+dizer "GPU e desktop restaurados com pós-condições verificadas."
 CORPO
     } > "$destino"
 }
