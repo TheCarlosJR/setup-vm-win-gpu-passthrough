@@ -8,7 +8,9 @@
 # O HD1 físico é opcional: HD1_DISPENSADO=sim mantém a VM somente no QCOW2.
 #
 # Uso:
-#   50-hooks-gpu-hd1.sh                         instala/atualiza hooks e XML
+#   50-hooks-gpu-hd1.sh                         instala/atualiza hooks e XML;
+#       com TTY, GPU já no XML e vídeo virtual QXL/SPICE ainda presente,
+#       oferece a remoção interativamente (padrão do menu)
 #   50-hooks-gpu-hd1.sh --verificar             verifica sem alterar
 #   50-hooks-gpu-hd1.sh --renderizar-hooks DIR_EXISTENTE  renderiza/valida
 #   50-hooks-gpu-hd1.sh [--remover-video] [--anti-code43]
@@ -72,6 +74,20 @@ disco_estado_xml() {
     DISCO_XML_VDB="$DISCOXML_TARGET_COUNT"
 }
 
+estado_video_virtual() {
+    # 0 = vídeo virtual QXL/SPICE ainda presente; 1 = já removido;
+    # 2 = indeterminado. Escreve apenas em temporários; não toca o domínio.
+    local origem candidato rc=2
+    origem="$(mktemp)" || return 2
+    candidato="$(mktemp)" || { rm -f -- "$origem"; return 2; }
+    if $VIRSH dumpxml --inactive "$VM_NAME" > "$origem" 2>/dev/null \
+            && xml_candidato_sem_video "$origem" "$candidato"; then
+        if [ "$XML_CANDIDATO_MUDOU" = 1 ]; then rc=0; else rc=1; fi
+    fi
+    rm -f -- "$origem" "$candidato"
+    return "$rc"
+}
+
 verificar_hook() {
     local arquivo="$1" descricao="$2"
     if [ -x "$arquivo" ] && bash -n "$arquivo" 2>/dev/null; then
@@ -106,11 +122,21 @@ verificar() {
     fi
 
     if vm_existe "$VM_NAME"; then
+        local gpu_no_xml=0 video_estado=2
         if [ -n "${GPU_PCI_ID:-}" ] && hostdev_estado_xml "$GPU_PCI_ID" \
            && [ "$HOSTDEV_TOTAL" = 1 ] && [ "$HOSTDEV_EXATO" = 1 ]; then
             v_ok "GPU $GPU_PCI_ID anexada exatamente uma vez com managed='yes'."
+            gpu_no_xml=1
         else
             v_falta "GPU ausente, duplicada ou sem managed='yes' no XML."
+        fi
+        if [ "$gpu_no_xml" -eq 1 ]; then
+            if estado_video_virtual; then video_estado=0; else video_estado=$?; fi
+            case "$video_estado" in
+                0) v_falta "Vídeo virtual QXL/SPICE ainda presente: ele é o monitor primário invisível do Windows (janelas abrem fora da tela física). Após validar um boot com a GPU, rode a etapa 14 e confirme a remoção." ;;
+                1) v_ok "Vídeo virtual QXL/SPICE removido; a GPU real é a única saída gráfica." ;;
+                *) v_indeterminado "Não foi possível avaliar o vídeo virtual no XML." ;;
+            esac
         fi
         if [ -z "${GPU_AUDIO_PCI_ID:-}" ]; then
             v_ok "GPU sem função de áudio configurada."
@@ -819,6 +845,36 @@ if [ -n "${HD1_BY_ID_PATH:-}" ]; then
     fi
 fi
 
+# --- Vídeo virtual: decisão ativa no fluxo interativo --------------------------
+# A remoção do QXL/SPICE não fica mais escondida atrás de --remover-video: no
+# fluxo padrão do menu (sem flags, com TTY), quando a GPU real já está no XML e
+# o vídeo virtual persiste, a pendência é exposta e o usuário decide. Sem TTY
+# (testes, automação) nada muda. A confirmação final digitando REMOVER continua
+# dentro da transação, como sempre.
+oferecer_remocao_video_interativa() {
+    local escolha video_estado=2
+    [ "$PEDIU_REMOVER_VIDEO" -eq 0 ] || return 0
+    [ -t 0 ] || return 0
+    vm_existe "$VM_NAME" || return 0
+    hostdev_estado_xml "$GPU_PCI_ID" || return 0
+    [ "$HOSTDEV_TOTAL" = 1 ] && [ "$HOSTDEV_EXATO" = 1 ] || return 0
+    if estado_video_virtual; then video_estado=0; else video_estado=$?; fi
+    [ "$video_estado" -eq 0 ] || return 0
+    echo
+    aviso "O vídeo virtual QXL/SPICE ainda está no XML. Com a GPU real anexada, ele é o monitor PRIMÁRIO invisível do Windows: menu Iniciar e janelas novas abrem fora da tela física."
+    info "Remova somente depois de validar um boot completo com passthrough: até lá, o console SPICE é o único display de socorro da VM."
+    escolha="$(escolher_da_lista 'O que fazer com o vídeo virtual?' nao \
+        'Manter o vídeo virtual por enquanto' \
+        'Remover o vídeo virtual QXL/SPICE nesta execução')"
+    if [ "$escolha" = 2 ]; then
+        PEDIU_REMOVER_VIDEO=1
+        info "Remoção do vídeo virtual incluída nesta transação (confirmação final digitando REMOVER adiante)."
+    else
+        aviso "Vídeo virtual mantido. Para remover depois: rode a etapa 14 de novo (menu) ou bash etapas/50-hooks-gpu-hd1.sh --remover-video."
+    fi
+}
+oferecer_remocao_video_interativa
+
 # --- Convergência: segunda execução precisa ser no-op exato -------------------
 # D-HOOKS-IDEMPOTENCE: antes, uma execução sobre estado já convergido ainda
 # criava backups, republicava arquivos e reiniciava o daemon. Aqui o estado
@@ -1334,7 +1390,8 @@ if [ "$PEDIU_REMOVER_VIDEO" -eq 1 ]; then
         OPCOES_XML+=(remove-video)
         OPCOES_DESCRICAO+=("remoção do vídeo virtual")
     else
-        aviso "Remoção do vídeo virtual recusada; a transação continua sem essa alteração."
+        aviso "Resposta diferente de REMOVER: a remoção do vídeo virtual NÃO será aplicada nesta execução."
+        aviso "A transação continua sem essa alteração; para remover depois, rode a etapa 14 de novo (menu) ou bash etapas/50-hooks-gpu-hd1.sh --remover-video."
     fi
 fi
 if [ "$PEDIU_ANTI_CODE43" -eq 1 ]; then

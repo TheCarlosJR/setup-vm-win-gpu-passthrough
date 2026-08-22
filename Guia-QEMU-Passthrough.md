@@ -438,7 +438,8 @@ Por que cada escolha:
 - **disco `virtio` com `cache=none`**: caminho mais rápido, sem cache duplicado
   entre host e guest.
 - **vídeo QXL no início**: dá console gráfico para instalar o Windows antes de a
-  GPU real entrar em cena. Remova depois (`--remover-video` na etapa 14).
+  GPU real entrar em cena. Remova depois: a etapa 14 rodando pelo menu oferece a
+  remoção quando a GPU já está no XML (ou use `--remover-video`).
 - **rede NAT `default` temporária**: garante conectividade durante a instalação em
   qualquer escolha. A etapa 12 persiste o MAC; a 60 troca a fonte dessa mesma NIC,
   identificada pelo MAC (não por posição), para `br0` ou para o NAT dedicado.
@@ -585,11 +586,17 @@ Se o vídeo não voltar com a VM já desligada: por SSH (ou `Ctrl+Alt+F3`, se o
 console local responder), login e `bash util/recuperar-gpu.sh`.
 
 Com o passthrough validado, remova o vídeo virtual para a saída ficar
-exclusivamente na GPU real:
+exclusivamente na GPU real. A etapa 14 rodando pelo menu detecta a pendência e
+oferece a remoção; o equivalente direto é:
 
 ```bash
 bash etapas/50-hooks-gpu-hd1.sh --remover-video
 ```
+
+Enquanto o vídeo virtual existir junto com a GPU real, ele é o monitor primário
+INVISÍVEL do Windows: menu Iniciar e janelas novas abrem fora da tela física.
+Após a remoção, o XML mantém `<audio type='none'/>`: é o estado que o libvirt
+persiste ao definir o domínio sem som, e não um resíduo.
 
 Se aparecer "Code 43" no Windows, o caminho conhecido é ocultar o hypervisor:
 
