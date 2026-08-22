@@ -456,8 +456,19 @@ falhar_runner() {
     exit 1
 }
 
-agent_cmd() { LC_ALL=C $VIRSH qemu-agent-command "$VM_NAME" "$1" 2>/dev/null; }
-guest_ping() { agent_cmd '{"execute":"guest-ping"}' >/dev/null; }
+# O timeout padrão do canal do agente no libvirt é 5 s: suficiente para ping e
+# PowerShell, curto demais para spawns grandes (o antivírus do Windows escaneia
+# o binário inteiro antes de liberar o CreateProcess). Cada chamada declara o
+# próprio limite e o último stderr do virsh fica disponível para diagnóstico.
+AGENT_ERRO_ARQ="$(mktemp /run/vm-passthrough-driver-agent.XXXXXX)" || exit 1
+trap 'rm -f -- "$AGENT_ERRO_ARQ"' EXIT
+agent_cmd() {
+    local tempo="${2:-30}"
+    LC_ALL=C $VIRSH qemu-agent-command "$VM_NAME" --timeout "$tempo" "$1" \
+        2>"$AGENT_ERRO_ARQ"
+}
+agent_erro() { tr '\n' ' ' < "$AGENT_ERRO_ARQ" 2>/dev/null || true; }
+guest_ping() { agent_cmd '{"execute":"guest-ping"}' 10 >/dev/null; }
 
 json_get() {
     # json_get caminho.pontuado <<< json  (parser mínimo local: o runner não
@@ -491,8 +502,9 @@ aguardar_agente() {
 }
 
 guest_exec() {
+    # guest_exec JSON [timeout-do-canal]
     local saida pid
-    saida="$(agent_cmd "$1")" || return 1
+    saida="$(agent_cmd "$1" "${2:-30}")" || return 1
     pid="$(json_get return.pid <<< "$saida" 2>/dev/null)" || return 1
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     printf '%s\n' "$pid"
@@ -522,7 +534,7 @@ powershell_exec() {
     # powershell_exec 'comando-sem-aspas-duplas' timeout
     local comando="$1" limite="$2" json pid
     json='{"execute":"guest-exec","arguments":{"path":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","arg":["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command","'"$comando"'"],"capture-output":true}}'
-    pid="$(guest_exec "$json")" || return 1
+    pid="$(guest_exec "$json" 60)" || return 1
     guest_exec_aguardar "$pid" "$limite"
 }
 
@@ -575,7 +587,7 @@ instalar_guest_tools() {
 
 verificar_smi() {
     local pid versao
-    pid="$(guest_exec '{"execute":"guest-exec","arguments":{"path":"C:\\Windows\\System32\\nvidia-smi.exe","capture-output":true}}')" \
+    pid="$(guest_exec '{"execute":"guest-exec","arguments":{"path":"C:\\Windows\\System32\\nvidia-smi.exe","capture-output":true}}' 60)" \
         || return 1
     guest_exec_aguardar "$pid" 120 || return 1
     [ "${EXEC_EXITCODE:-1}" = "0" ] || return 1
@@ -604,15 +616,49 @@ fase driver
 LETRA_PAYLOAD="$(letra_volume "$PAYLOAD_ROTULO")" \
     || falhar_runner "a ISO de payload ($PAYLOAD_ROTULO) não apareceu como volume no Windows"
 echo "[driver-vm] executando ${LETRA_PAYLOAD}:\\NvidiaDriver.exe -s -noreboot (instalação silenciosa)..."
-PID_DRIVER="$(guest_exec "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"${LETRA_PAYLOAD}:\\\\NvidiaDriver.exe\",\"arg\":[\"-s\",\"-noreboot\"],\"capture-output\":true}}")" \
-    || falhar_runner "não foi possível iniciar o instalador NVIDIA dentro do Windows"
-guest_exec_aguardar "$PID_DRIVER" 2400 \
-    || falhar_runner "o instalador NVIDIA não terminou em 40 minutos"
-R_SETUP_EXIT="${EXEC_EXITCODE:-}"
-case "$R_SETUP_EXIT" in
-    0|1) echo "[driver-vm] instalador NVIDIA terminou com código $R_SETUP_EXIT." ;;
-    *) falhar_runner "o instalador NVIDIA terminou com código ${R_SETUP_EXIT:-desconhecido}" ;;
-esac
+echo "[driver-vm] o spawn pode demorar: o antivírus do Windows escaneia o instalador inteiro antes de liberar."
+JSON_INSTALADOR="{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"${LETRA_PAYLOAD}:\\\\NvidiaDriver.exe\",\"arg\":[\"-s\",\"-noreboot\"],\"capture-output\":true}}"
+instalador_rodando() {
+    # 1 quando existe processo do instalador no Windows; nunca dispara nada.
+    powershell_exec "(Get-Process | Where-Object { \$_.Name -like '*NvidiaDriver*' -or \$_.Name -like '*setup*' } | Measure-Object).Count" 60 \
+        || return 1
+    [ "$(printf '%s' "$EXEC_SAIDA" | tr -d '[:space:]')" != "0" ] \
+        && [ -n "$(printf '%s' "$EXEC_SAIDA" | tr -d '[:space:]')" ]
+}
+if PID_DRIVER="$(guest_exec "$JSON_INSTALADOR" 600)"; then
+    guest_exec_aguardar "$PID_DRIVER" 2400 \
+        || falhar_runner "o instalador NVIDIA não terminou em 40 minutos"
+    R_SETUP_EXIT="${EXEC_EXITCODE:-}"
+    case "$R_SETUP_EXIT" in
+        0|1) echo "[driver-vm] instalador NVIDIA terminou com código $R_SETUP_EXIT." ;;
+        *) falhar_runner "o instalador NVIDIA terminou com código ${R_SETUP_EXIT:-desconhecido}" ;;
+    esac
+else
+    # A resposta do spawn se perdeu (canal do agente). Nunca dispare de novo às
+    # cegas: se o instalador já estiver rodando, acompanhe pelo processo.
+    echo "[driver-vm] resposta do spawn perdida ($(agent_erro)); conferindo se o instalador está rodando..." >&2
+    aguardar_agente 180 \
+        || falhar_runner "o agente não voltou após o spawn do instalador: $(agent_erro)"
+    instalador_rodando \
+        || falhar_runner "não foi possível iniciar o instalador NVIDIA dentro do Windows: $(agent_erro)"
+    echo "[driver-vm] instalador em execução sem rastreio por pid; aguardando o processo terminar..."
+    R_SETUP_EXIT=desconhecido
+    CONCLUIU=0
+    for ((i=0; i<2400; i+=20)); do
+        sleep 20
+        guest_ping || continue
+        if ! instalador_rodando; then
+            CONCLUIU=1
+            break
+        fi
+        if (( i % 300 == 0 )); then
+            echo "[driver-vm] instalador NVIDIA ainda em execução (${i}s)..."
+        fi
+    done
+    [ "$CONCLUIU" -eq 1 ] \
+        || falhar_runner "o instalador NVIDIA não terminou em 40 minutos"
+    echo "[driver-vm] processo do instalador terminou; a confirmação fica com o nvidia-smi."
+fi
 
 fase verificacao
 if verificar_smi; then
