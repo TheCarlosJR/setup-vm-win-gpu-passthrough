@@ -134,9 +134,9 @@ Recuperação correta, nesta ordem:
 3. NUNCA force o desligamento do host: ele interrompe a restauração no meio e
    mascara o diagnóstico.
 
-Prevenção: instale o driver NVIDIA pela etapa 15 do menu (instalação
+Prevenção: instale o driver NVIDIA pela etapa 16 do menu (instalação
 automática via qemu-guest-agent, sem monitor nem teclado dedicados). O
-andamento da etapa 15 é acompanhável sem vídeo com
+andamento da etapa 16 é acompanhável sem vídeo com
 `journalctl -u vm-passthrough-driver-<vm> -f`.
 
 Variante rápida do sintoma: a tela cai e o desktop VOLTA em poucos segundos

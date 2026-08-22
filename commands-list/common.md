@@ -2,7 +2,7 @@
 
 **Estado:** inventário do código atual Ubuntu/Pop!_OS.
 
-Este arquivo cobre `menu.sh`, `lib/*.sh`, `etapas/*.sh`, `util/*.sh` e os hooks escritos pelas etapas 14 e 20, além do runner gerado pela etapa 15. Os arquivos de distro explicam quais itens são específicos de cada provedor.
+Este arquivo cobre `menu.sh`, `lib/*.sh`, `etapas/*.sh`, `util/*.sh` e os hooks escritos pelas etapas 14 e 20, além do runner gerado pela etapa 16. Os arquivos de distro explicam quais itens são específicos de cada provedor.
 
 ## Critério de inclusão
 

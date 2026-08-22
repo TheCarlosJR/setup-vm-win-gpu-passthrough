@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/55-driver-nvidia-vm.sh - Etapa 15: instalar o driver NVIDIA dentro
+# etapas/55-driver-nvidia-vm.sh - Etapa 16: instalar o driver NVIDIA dentro
 # da VM, de ponta a ponta e sem depender de vídeo
 # ============================================================================
 # A etapa 14 entrega a GPU ao vfio-pci e derruba o desktop a cada start da VM,
@@ -109,7 +109,7 @@ UNIDADE="$(unidade_driver "$VM_NAME")"
 RESULTADO="$(resultado_driver "$VM_NAME")"
 RUNNER_DESTINO="/run/vm-passthrough-driver-${VM_NAME}.sh"
 
-titulo "Etapa 15: instalar o driver NVIDIA dentro da VM (automático)"
+titulo "Etapa 16: instalar o driver NVIDIA dentro da VM (automático)"
 titulo "Antes de continuar"
 info "Finalidade: instalar o driver NVIDIA no Windows da VM sem monitor nem teclado dedicados, usando o qemu-guest-agent e a instalação silenciosa oficial (setup -s -noreboot)."
 info "Pré-requisitos: Windows instalado no QCOW2 (etapa 13 essencial), hooks aplicados (etapa 14), VM desligada e internet para o download do driver."
@@ -380,7 +380,7 @@ TMP_RUNNER="$(mktemp)"
 {
     cat <<'CAB'
 #!/bin/bash
-# Runner transiente da etapa 15: instala o driver NVIDIA dentro da VM via
+# Runner transiente da etapa 16: instala o driver NVIDIA dentro da VM via
 # qemu-guest-agent. Renderizado por etapas/55-driver-nvidia-vm.sh e autônomo
 # de propósito: o repositório pode estar em montagem ilegível ao root.
 set -uo pipefail
@@ -711,7 +711,7 @@ rm -f "$TMP_RUNNER"
 
 sudo systemctl reset-failed "$UNIDADE" >/dev/null 2>&1 || true
 sudo systemd-run --unit="${UNIDADE%.service}" \
-    --description="Instalação automática do driver NVIDIA na VM $VM_NAME (etapa 15)" \
+    --description="Instalação automática do driver NVIDIA na VM $VM_NAME (etapa 16)" \
     "$RUNNER_DESTINO" \
     || falhar "Não foi possível disparar a unidade transiente $UNIDADE."
 

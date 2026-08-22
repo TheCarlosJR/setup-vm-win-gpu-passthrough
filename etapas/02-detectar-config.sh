@@ -364,7 +364,7 @@ else
     else
         aviso "Não encontrei função de áudio HDMI em ${BASE}.x."
         aviso "Sem ela, o som do Windows não sai pelo cabo HDMI/DP do monitor"
-        aviso "(use um dispositivo USB em passthrough na etapa 16, se precisar)."
+        aviso "(use um dispositivo USB em passthrough na etapa 15, se precisar)."
         confirmar "Seguir com passthrough somente de vídeo?" \
             || falhar "Cancelado. Confira 'lspci -nn | grep -i audio' e rode de novo."
     fi

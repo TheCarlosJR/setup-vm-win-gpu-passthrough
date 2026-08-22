@@ -52,8 +52,8 @@ popos-win11-passthrough/
 │   ├── 40-criar-vm.sh               12 VM + NAT default temporária
 │   ├── 41-instalacao-windows.sh     13 instalação e pós-instalação do Windows
 │   ├── 50-hooks-gpu-hd1.sh          14 hooks dinâmicos + HD1
-│   ├── 55-driver-nvidia-vm.sh       15 driver NVIDIA na VM (automático)
-│   ├── 51-usb-passthrough.sh        16 USB (opcional)
+│   ├── 51-usb-passthrough.sh        15 USB: dispositivos ou controladora (opcional)
+│   ├── 55-driver-nvidia-vm.sh       16 driver NVIDIA na VM (automático)
 │   ├── 52-cpu-pinning-hugepages.sh  17 pinning + HugePages               <reboot>
 │   ├── 53-cpu-isolation.sh          18 isolcpus                          <reboot>
 │   ├── 60-rede-bridge.sh            19 rede final: bridge Ethernet ou NAT
@@ -157,10 +157,10 @@ Etapas com vários blocos internos os anunciam como `Etapa N.x`, por exemplo
 | 10 | `21-usuario-grupos` | **logout/login** obrigatório ao final |
 | 11 | `30-iommu-vfio` | `Etapa 11.1/2` (fase A) aplica parâmetros, **reboot**, rodar de novo para a `Etapa 11.2/2` (fase B) validar e registrar o grupo IOMMU |
 | 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install, já com o canal virtio `org.qemu.guest_agent.0`; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
-| 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup; o driver NVIDIA do `13.15` tem caminho automático na etapa 15, depois da etapa 14) |
+| 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup; o driver NVIDIA do `13.15` tem caminho automático na etapa 16, depois da etapa 14) |
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
-| 15 | `55-driver-nvidia-vm` | instala o driver NVIDIA dentro do Windows sem monitor dedicado: baixa o pacote oficial, injeta o `qemu-guest-agent` no QCOW2 se faltar, dispara unidade systemd que liga a VM, instala silenciosamente (`-s -noreboot` via guest-exec), confirma com `nvidia-smi` e desliga |
-| 16 | `51-usb-passthrough` | opcional |
+| 15 | `51-usb-passthrough` | opcional; dispositivos individuais (vendor:product, inclui adaptadores Bluetooth) ou uma controladora USB PCI inteira com hotplug nativo nas portas dela |
+| 16 | `55-driver-nvidia-vm` | instala o driver NVIDIA dentro do Windows sem monitor dedicado: baixa o pacote oficial, injeta o `qemu-guest-agent` no QCOW2 se faltar, dispara unidade systemd que liga a VM, instala silenciosamente (`-s -noreboot` via guest-exec), confirma no convidado e desliga |
 | 17 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
 | 18 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
 | 19 | `60-rede-bridge` | aplica o modo escolhido: bridge somente em Ethernet (`netplan try` + reservas no roteador) ou NAT dedicado Ethernet/Wi-Fi (sem Netplan, reserva libvirt automática) |

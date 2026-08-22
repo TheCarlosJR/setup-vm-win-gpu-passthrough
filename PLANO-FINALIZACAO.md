@@ -16,8 +16,8 @@ igual ao que `menu.sh` mostra e ao que os scripts imprimem. O nome do arquivo em
 
 | Etapa | Script | Etapa | Script | Etapa | Script |
 |---|---|---|---|---|---|
-| 1 | `00-inventario.sh` | 8 | `14-working-disk.sh` | 15 | `55-driver-nvidia-vm.sh` |
-| 2 | `01-verificar-bios.sh` | 9 | `20-virtualizacao.sh` | 16 | `51-usb-passthrough.sh` |
+| 1 | `00-inventario.sh` | 8 | `14-working-disk.sh` | 15 | `51-usb-passthrough.sh` |
+| 2 | `01-verificar-bios.sh` | 9 | `20-virtualizacao.sh` | 16 | `55-driver-nvidia-vm.sh` |
 | 3 | `02-detectar-config.sh` | 10 | `21-usuario-grupos.sh` | 17 | `52-cpu-pinning-hugepages.sh` |
 | 4 | `10-atualizar-sistema.sh` | 11 | `30-iommu-vfio.sh` | 18 | `53-cpu-isolation.sh` |
 | 5 | `11-driver-nvidia.sh` | 12 | `40-criar-vm.sh` | 19 | `60-rede-bridge.sh` |
@@ -517,7 +517,7 @@ Capturar e persistir identidade estável do workingDisk, preferindo WWN, serial 
 
 ### REQ-USB-IDENTITY: seleção USB não ambígua (P1)
 
-**Fases:** I6, integração de domínio I3 quando necessária (feita). Estado: `PARCIAL`. Em I3 a enumeração de hostdev USB passou a exigir discriminador (vendor/product ou endereço físico) e a informar quantos pares VID:PID estão duplicados; a etapa 16 recusa a remoção quando há ambiguidade em vez de escolher pela ordem. Serial/porta persistidos e a revalidação antes do attach continuam em I6.
+**Fases:** I6, integração de domínio I3 quando necessária (feita). Estado: `PARCIAL`. Em I3 a enumeração de hostdev USB passou a exigir discriminador (vendor/product ou endereço físico) e a informar quantos pares VID:PID estão duplicados; a etapa 15 recusa a remoção quando há ambiguidade em vez de escolher pela ordem. Serial/porta persistidos e a revalidação antes do attach continuam em I6.
 
 Usar VID:PID apenas quando único. Persistir serial quando disponível; sem serial, usar porta/caminho físico estável. Exibir candidatos e atributos; revalidar discriminador antes de anexar; duplicidade ou ambiguidade deve recusar, nunca escolher arbitrariamente.
 
@@ -640,7 +640,7 @@ Aprovado. O que ficou comprovado hermeticamente, sem tocar o host:
 - **Idempotência exata da etapa 14 (D-HOOKS-IDEMPOTENCE):** sobre estado convergido a etapa termina com **zero efeitos** e manifesto de conteúdo e de metadados/mtime idênticos (o oráculo de I0 media 31 efeitos e manifesto diferente). A convergência compara byte a byte o conjunto renderizado com o instalado, mais dono e modo, e recusa marcador de transação interrompida ou hook antigo pendente.
 - **REQ-LIBVIRT-BACKEND:** `libvirt_backend_resolver`/`libvirt_backend_reiniciar` são a única resolução autoritativa, e `ativar_unidade_systemd` passou a ter uma única definição (estava duplicada nas etapas 9 e 10). A etapa 14 não conhece mais `libvirtd`: no perfil modular ela reinicia `virtqemud.service`, sem unidade disponível recusa antes de qualquer efeito, e um daemon que não fica ativo depois do restart derruba a transação com restauração comprovada.
 - **REQ-WINDOWS-STATE (preparação):** metadata namespaced `vmpass:windows-install` vinculada ao digest do QCOW2, com leitura e gravação idempotentes, preservação de metadata de terceiros e recusa de digest/data/origem inválidos. Nada foi ligado ao fluxo da etapa 13: instalação, power e agent continuam separados para I4/I9.
-- **REQ-USB-IDENTITY e REQ-DISK-IDENTITY (integração mínima):** a enumeração USB exige discriminador (vendor/product ou endereço físico) e informa quantos pares VID:PID estão duplicados; a etapa 16 recusa remoção quando há ambiguidade, em vez de escolher por ordem. A projeção de disco block passou a expor identidade física (`wwn`/`serial`) para o fluxo completo de I6.
+- **REQ-USB-IDENTITY e REQ-DISK-IDENTITY (integração mínima):** a enumeração USB exige discriminador (vendor/product ou endereço físico) e informa quantos pares VID:PID estão duplicados; a etapa 15 recusa remoção quando há ambiguidade, em vez de escolher por ordem. A projeção de disco block passou a expor identidade física (`wwn`/`serial`) para o fluxo completo de I6.
 - **Higiene de temporários:** a raiz privada da ponte é recolhida assim que fica vazia, então um consumidor com trap próprio não deixa resíduo em `TMPDIR`; as quatro etapas transacionais também chamam `python_core_temporarios_limpar` no trap, cobrindo a janela de sinal.
 - **Teste com dentes:** oito mutações injetadas em cópia isolada de `lib/` e `libexec/` (cardinalidade dois aceita como um, estado de discard sempre ativo, candidato que não altera o disco, comparação sempre igual, payload em `argv`, allowlist permissiva, leitura aceitando symlink e candidato não publicado) foram todas reprovadas.
 
@@ -1438,7 +1438,7 @@ Uma fase só termina quando:
 - [~] REQ-VERIFY-FAILCLOSED não possui falso sucesso conhecido (o caso `atualizar-host --validar` foi corrigido em I1; auditoria completa pendente em I9).
 - [x] REQ-WAIVERS tem efeito real ou foi removido com migração (I4: duas mantidas com efeito testado, duas removidas por migração segura).
 - [ ] REQ-DISK-IDENTITY impede workingDisk igual a HD1 físico.
-- [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (a etapa 16 já recusa VID:PID duplicado em vez de escolher por ordem; serial/porta e revalidação antes do attach são de I6).
+- [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (a etapa 15 já recusa VID:PID duplicado em vez de escolher por ordem; serial/porta e revalidação antes do attach são de I6).
 - [ ] REQ-NET-TX não deixa estado parcial e prova recuperação.
 
 ### Arquitetura híbrida

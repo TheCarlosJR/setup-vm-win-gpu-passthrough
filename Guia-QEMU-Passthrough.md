@@ -172,15 +172,16 @@ conversar sobre o fluxo e a coluna `Script` para localizar o arquivo.
 | 12 | `40-criar-vm.sh` | cria a VM com `virt-install`, NAT `default` temporária, MAC persistido e canal do guest agent | |
 | 13 | `41-instalacao-windows.sh` | instalação e pós-instalação do Windows (interativa) | |
 | 14 | `50-hooks-gpu-hd1.sh` | hooks da GPU e disco físico no XML | |
-| 15 | `55-driver-nvidia-vm.sh` | driver NVIDIA dentro da VM, automático via qemu-guest-agent (download oficial, instalação silenciosa, confirmação por nvidia-smi) | |
-| 16 | `51-usb-passthrough.sh` | USB em passthrough (opcional) | |
+| 15 | `51-usb-passthrough.sh` | USB em passthrough: dispositivos individuais ou controladora inteira (opcional) | |
+| 16 | `55-driver-nvidia-vm.sh` | driver NVIDIA dentro da VM, automático via qemu-guest-agent (download oficial, instalação silenciosa, confirmação no convidado) | |
 | 17 | `52-cpu-pinning-hugepages.sh` | CPU pinning e HugePages (opcional) | reboot |
 | 18 | `53-cpu-isolation.sh` | isolamento de CPU (opcional) | reboot |
 | 19 | `60-rede-bridge.sh` | aplica a rede final: bridge Ethernet ou NAT libvirt dedicado | |
 | 20 | `61-airlock.sh` | airlock: SFTP na interface/endereço do modo selecionado | |
 | 21 | `70-trim-discard.sh` | TRIM/discard e pasta de backups | |
 
-Ordem obrigatória até a etapa 15. As etapas 16 a 18 são ajustes opcionais; a
+Ordem obrigatória até a etapa 16 (a 15, USB, é opcional e recomendada antes
+dela). As etapas 17 e 18 são ajustes opcionais; a
 etapa 20 depende da rede finalizada pela etapa 19. A etapa 21 pode ser executada
 depois da VM.
 
@@ -567,11 +568,11 @@ convidado ainda é a QXL emulada, visível só pelo console SPICE, que morre jun
 com a sessão gráfica do host. Não force o desligamento; encerre por SSH com
 `virsh --connect qemu:///system shutdown win11` e o desktop volta sozinho.
 
-Por isso o primeiro start com GPU deve ser o da etapa 15 (Instalar driver
+Por isso o primeiro start com GPU deve ser o da etapa 16 (Instalar driver
 NVIDIA na VM): ela conduz esse ciclo inteiro sem vídeo, via qemu-guest-agent,
 e confirma o driver com `nvidia-smi`. O roteiro manual do 13.15 continua
 disponível como fallback, mas exige monitor na GPU e teclado e mouse dedicados
-pela etapa 16 antes do start. Ao final, o Gerenciador de Dispositivos não deve
+pela etapa 15 antes do start. Ao final, o Gerenciador de Dispositivos não deve
 mostrar "Code 43".
 
 Desligue o Windows normalmente e confirme que o desktop Linux volta sozinho.
@@ -605,9 +606,9 @@ para o host.
 
 | Etapa | Script em `etapas/` | O que faz | Custo |
 |---|---|---|---|
-| 15 | `51-usb-passthrough.sh` | USB em passthrough por vendor:product | o dispositivo fica exclusivo da VM enquanto ela roda |
-| 16 | `52-cpu-pinning-hugepages.sh` | CPU pinning, topologia real e HugePages | a RAM reservada sai do host no boot, mesmo com a VM desligada |
-| 17 | `53-cpu-isolation.sh` | `isolcpus`: tira os núcleos da VM do escalonador | os núcleos isolados param de receber processos do host, sempre |
+| 15 | `51-usb-passthrough.sh` | USB em passthrough: dispositivo por vendor:product ou controladora inteira | o que for passado fica exclusivo da VM enquanto ela roda |
+| 17 | `52-cpu-pinning-hugepages.sh` | CPU pinning, topologia real e HugePages | a RAM reservada sai do host no boot, mesmo com a VM desligada |
+| 18 | `53-cpu-isolation.sh` | `isolcpus`: tira os núcleos da VM do escalonador | os núcleos isolados param de receber processos do host, sempre |
 
 ```bash
 bash etapas/51-usb-passthrough.sh
@@ -618,7 +619,7 @@ bash etapas/53-cpu-isolation.sh
 Dentro do Windows, o complemento da etapa 18 é ativar interrupções MSI para a
 GPU: `windows/Ativar-MSI-GPU.ps1` (como administrador). Reduz microengasgos.
 
-Nunca passe o único teclado do host na etapa 16: você precisa dele para o
+Nunca passe o único teclado do host na etapa 15: você precisa dele para o
 terminal de emergência.
 
 ---

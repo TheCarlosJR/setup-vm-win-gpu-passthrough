@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/51-usb-passthrough.sh - Etapa 16: USB Passthrough (opcional)
+# etapas/51-usb-passthrough.sh - Etapa 15: USB Passthrough (opcional)
 # ============================================================================
 # Passthrough de dispositivos USB individuais (teclado, mouse, headset) por
 # vendor:product, método recomendado pelo manual. O áudio HDMI da GPU já vai
@@ -81,7 +81,7 @@ listar_usb_xml() {
 }
 
 if [ "${1:-}" = "--remover" ]; then
-    titulo "Etapa 16: remover USB passthrough da VM $VM_NAME"
+    titulo "Etapa 15: remover USB passthrough da VM $VM_NAME"
     mapfile -t ATUAIS < <(listar_usb_xml | sed '/^$/d')
     [ "${#ATUAIS[@]}" -gt 0 ] || { info "Nenhum hostdev USB no XML."; exit 0; }
     # REQ-USB-IDENTITY começa aqui: um par VID:PID duplicado no XML não pode ser
@@ -111,7 +111,7 @@ XML
     exit 0
 fi
 
-titulo "Etapa 16: USB passthrough (VM: $VM_NAME)"
+titulo "Etapa 15: USB passthrough (VM: $VM_NAME)"
 mapfile -t LINHAS < <(lsusb)
 [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
 echo
@@ -155,4 +155,4 @@ done
 
 echo
 info "Verificação dentro do Windows: Get-PnpDevice -Class Keyboard, Mouse, AudioEndpoint"
-ok "Etapa 16 concluída."
+ok "Etapa 15 concluída."
