@@ -631,6 +631,7 @@ class CandidateOtherTests(unittest.TestCase):
                 "xml": fx.domain(
                     graphics="<graphics type='spice'/><video><model type='qxl'/></video>"
                     "<sound model='ich9'/><redirdev bus='usb' type='spicevmc'/>"
+                    "<audio id='1' type='spice'/>"
                     + canal
                     + canal_agente
                 ),
@@ -641,7 +642,8 @@ class CandidateOtherTests(unittest.TestCase):
         raiz = xmlutil.parse_document(candidato, "domain")
         dispositivos = xmlutil.exactly_one(raiz, "devices", "ctx")
         nomes = [filho.tag for filho in xmlutil.elements(dispositivos)]
-        for proibido in ("graphics", "video", "sound", "redirdev"):
+        # O backend de áudio spice é gráfico por dependência e também sai.
+        for proibido in ("graphics", "video", "sound", "redirdev", "audio"):
             self.assertNotIn(proibido, nomes)
         # O canal do guest agent não é gráfico e precisa sobreviver.
         canais = xmlutil.direct(dispositivos, "channel")
@@ -651,6 +653,37 @@ class CandidateOtherTests(unittest.TestCase):
     def test_remove_video_idempotente(self) -> None:
         dados, _candidato = domain_xml.build_candidate(
             {"xml": fx.domain(graphics=""), "operations": [{"op": "remove-video"}]}
+        )
+        self.assertEqual(dados["changed"], 0)
+
+    def test_remove_video_preserva_audio_none(self) -> None:
+        # O libvirt (12) renormaliza o domínio ao definir e persiste
+        # <audio type='none'/> mesmo sem som; a operação precisa preservá-lo
+        # para que a prova de releitura pós-define convirja.
+        dados, candidato = domain_xml.build_candidate(
+            {
+                "xml": fx.domain(
+                    graphics="<graphics type='spice'/><video><model type='qxl'/></video>"
+                    "<audio id='1' type='none'/>"
+                ),
+                "operations": [{"op": "remove-video"}],
+            }
+        )
+        self.assertEqual(dados["changed"], 1)
+        raiz = xmlutil.parse_document(candidato, "domain")
+        dispositivos = xmlutil.exactly_one(raiz, "devices", "ctx")
+        audios = xmlutil.direct(dispositivos, "audio")
+        self.assertEqual(len(audios), 1)
+        self.assertEqual(audios[0].get("type"), "none")
+
+    def test_remove_video_idempotente_pos_define_libvirt(self) -> None:
+        # Estado exato que o libvirt 12 devolve após definir o candidato sem
+        # vídeo: nenhum elemento gráfico e o backend de áudio explícito none.
+        dados, _candidato = domain_xml.build_candidate(
+            {
+                "xml": fx.domain(graphics="<audio id='1' type='none'/>"),
+                "operations": [{"op": "remove-video"}],
+            }
         )
         self.assertEqual(dados["changed"], 0)
 

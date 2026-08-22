@@ -1131,17 +1131,25 @@ def _operation_remove_hugepages(root: ET.Element, options: Mapping[str, Any]) ->
     return xmlutil.fingerprint(root) != before
 
 
-_VIDEO_TAGS = ("graphics", "video", "redirdev", "sound", "audio")
+_VIDEO_TAGS = ("graphics", "video", "redirdev", "sound")
 
 
 def _operation_remove_video(root: ET.Element, options: Mapping[str, Any]) -> bool:
-    """Remove a saída gráfica virtual, incluindo o canal spicevmc."""
+    """Remove a saída gráfica virtual, incluindo o canal spicevmc.
+
+    O backend `<audio type="none"/>` é preservado: o libvirt (observado no 12)
+    renormaliza o domínio ao definir e persiste esse elemento mesmo sem som,
+    então tratá-lo como resíduo faria a prova de releitura divergir em todo
+    define e a transação reverteria uma remoção correta.
+    """
     if options:
         raise DataError("a operação remove-video não aceita opções.")
     devices = _devices(root)
     before = xmlutil.fingerprint(root)
     for child in list(devices):
         if child.tag in _VIDEO_TAGS:
+            devices.remove(child)
+        elif child.tag == "audio" and child.get("type") != "none":
             devices.remove(child)
         elif child.tag == "channel" and child.get("type") == "spicevmc":
             devices.remove(child)
