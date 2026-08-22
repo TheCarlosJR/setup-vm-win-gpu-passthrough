@@ -64,6 +64,11 @@ HUGEPAGES_1G=""                 # derivado exatamente de VM_RAM_MB/1024
 ISO_WINDOWS=""                   # caminho local da ISO do Windows 11
 ISO_VIRTIO=""                    # caminho local da virtio-win.iso
 
+# --- Driver NVIDIA da VM (etapa 15) -------------------------------------------
+# Preenchido automaticamente pela etapa 15 após o download oficial (ou pelo
+# caminho manual informado). Sempre um filho direto de /vm, extensão .exe.
+NVIDIA_DRIVER_EXE=""
+
 # --- Rede (Capítulos 23 e 24) ------------------------------------------------
 # A etapa 02 enumera interfaces físicas pelo sysfs (não pelo nome), exige a
 # escolha do uplink e grava o modo. Wi-Fi station aceita somente NAT.

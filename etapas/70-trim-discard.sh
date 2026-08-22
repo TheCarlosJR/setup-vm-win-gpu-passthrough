@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/70-trim-discard.sh - Etapa 20: TRIM/discard
+# etapas/70-trim-discard.sh - Etapa 21: TRIM/discard
 # ============================================================================
 # Habilita discard='unmap' exclusivamente no disco device='disk' cujo
 # source/@file é exatamente QCOW2_PATH, exigindo cardinalidade um.
@@ -93,7 +93,7 @@ python_core_disponivel \
     || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 caminho_absoluto_seguro "$QCOW2_PATH" || falhar "QCOW2_PATH inválido: '$QCOW2_PATH'."
 
-titulo "Etapa 20.1/2 TRIM/discard no XML da VM"
+titulo "Etapa 21.1/2 TRIM/discard no XML da VM"
 
 cat <<ORIENTACAO
 Finalidade: habilitar discard somente no disco cujo source/@file seja
@@ -251,7 +251,7 @@ else
     ok "discard='unmap' aplicado exclusivamente ao disco $QCOW2_PATH."
 fi
 
-titulo "Etapa 20.2/2 Pasta de backups"
+titulo "Etapa 21.2/2 Pasta de backups"
 BACKUP_DESTINO_RESOLVIDO=0
 if resolver_destino_backups; then
     BACKUP_DESTINO_RESOLVIDO=1
@@ -273,10 +273,10 @@ fi
 
 echo
 cat <<'DICAS'
-Operação contínua (etapa 20):
+Operação contínua (etapa 21):
   - Dentro do Windows, "Otimizar Unidades" deve listar o C: como SSD.
   - Compare qemu-img info antes/depois; redução imediata não é garantida.
   - Snapshots rápidos: util/snapshot-vm.sh criar|listar|reverter|apagar
   - Backup real: util/backup-vm.sh em outro disco físico.
 DICAS
-info "Fim da etapa 20: TRIM e disponibilidade do destino de backup são estados independentes."
+info "Fim da etapa 21: TRIM e disponibilidade do destino de backup são estados independentes."

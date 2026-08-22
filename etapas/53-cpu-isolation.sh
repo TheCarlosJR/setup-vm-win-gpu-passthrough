@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# etapas/53-cpu-isolation.sh - Etapa 17: isolamento opcional de CPUs da VM
+# etapas/53-cpu-isolation.sh - Etapa 18: isolamento opcional de CPUs da VM
 # ============================================================================
 # Aplica isolcpus, nohz_full e rcu_nocbs somente depois de provar que a VM está
 # pinada exatamente em CPUS_VM e que VM/host formam uma partição de cores
@@ -170,13 +170,13 @@ desfazer() {
     exigir_conf BOOTLOADER
     exigir_bootloader_coerente
     exigir_sudo
-    titulo "Etapa 17: reverter isolamento opcional de CPU"
+    titulo "Etapa 18: reverter isolamento opcional de CPU"
     if kernel_param_chaves_persistentes_ausentes "$CHAVES_ISOLAMENTO"; then
         ok "isolcpus, nohz_full e rcu_nocbs já estão ausentes da configuração de boot."
         if cmdline_possui_alguma_chave "$CHAVES_ISOLAMENTO"; then
             pedir_reboot
         else
-            info "A reversão da etapa 17 já está completa."
+            info "A reversão da etapa 18 já está completa."
         fi
         return 0
     fi
@@ -210,18 +210,18 @@ main() {
     exigir_vm_desligada "$VM_NAME"
     validar_layout_configurado || falhar "$CPU_LAYOUT_ERRO"
     validar_suporte_isolamento || falhar "$SUPORTE_ISOLAMENTO_ERRO"
-    validar_pinning_vm || falhar "A etapa 17 só pode isolar CPUs já pinadas exatamente no XML: $XML_CPU_ERRO"
+    validar_pinning_vm || falhar "A etapa 18 só pode isolar CPUs já pinadas exatamente no XML: $XML_CPU_ERRO"
 
     local params
     params="$(param_isolamento)"
-    titulo "Etapa 17: isolamento opcional de CPU"
+    titulo "Etapa 18: isolamento opcional de CPU"
     aviso "Otimização opcional: aplique somente após medir um baseline e comprovar gargalo de latência/CPU."
-    info "A opção 3 da etapa 3 apenas registra o plano; a etapa 16 aplica o pinning, e esta etapa só isola CPUs já pinadas."
+    info "A opção 3 da etapa 3 apenas registra o plano; a etapa 17 aplica o pinning, e esta etapa só isola CPUs já pinadas."
     info "Fase 1: gravar isolcpus/nohz_full/rcu_nocbs, reiniciar o host e executar esta etapa novamente."
     info "Fase 2: comprovar o isolamento; não exige novo reboot do host."
     info "CPUs online=[$CPU_LAYOUT_ONLINE] VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
     aviso "Com isolamento ativo, CPUS_VM deixa de atender processos comuns do host mesmo com a VM desligada."
-    aviso "Na etapa 16, HugePages também podem manter RAM indisponível ao host com a VM desligada."
+    aviso "Na etapa 17, HugePages também podem manter RAM indisponível ao host com a VM desligada."
 
     if ! kernel_parametros_persistentes_exatos "$params"; then
         aviso "Persistência atual divergente/duplicada: ${KERNEL_PERSISTENCIA_ERRO:-estado não exato}."
@@ -248,7 +248,7 @@ main() {
     info "Reversão: bash etapas/53-cpu-isolation.sh --desfazer"
 
     echo
-    titulo "Etapa 17: parte no Windows (MSI)"
+    titulo "Etapa 18: parte no Windows (MSI)"
     aviso "windows/Ativar-MSI-GPU.ps1 altera o Registro do Windows; salve o trabalho antes de executá-lo."
     info "Dentro da VM, execute o script como administrador e reinicie a VM para a alteração produzir efeito."
 }

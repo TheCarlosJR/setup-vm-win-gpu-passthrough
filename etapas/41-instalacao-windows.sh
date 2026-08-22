@@ -8,8 +8,9 @@
 # final a comunicação com o qemu-guest-agent.
 #
 # Os sub-passos 13.1 a 13.11 são a instalação; 13.12 a 13.17 são a
-# pós-instalação, incluindo o driver NVIDIA dentro da VM, que só entra depois
-# de a etapa 14 (hooks da GPU) estar aplicada.
+# pós-instalação. O driver NVIDIA dentro da VM só entra depois de a etapa 14
+# (hooks da GPU) estar aplicada, e o caminho recomendado para ele é a etapa 15
+# do menu (instalação automática via qemu-guest-agent, sem monitor dedicado).
 # ============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
@@ -131,15 +132,28 @@ cat <<'GUIA'
        NÃO existe GPU real para instalar driver: pular direto ao 13.15 instala
        um driver sem hardware correspondente.
 
-       Prepare também como você vai ver e controlar a VM a partir daqui: o
-       hook da etapa 14 para o gerenciador de login do host (DM_SERVICE) e
-       entrega a GPU ao vfio-pci, então o console SPICE do virt-manager deixa
-       de existir junto com a sessão gráfica do host. Antes do primeiro boot
-       com a GPU passada, garanta um monitor ligado na GPU da VM e teclado e
-       mouse dedicados via etapa 15 (USB passthrough); sem isso você fica sem
-       imagem e sem teclado dentro do Windows.
+       ATENÇÃO ao que muda a partir daqui: o hook da etapa 14 para o
+       gerenciador de login do host (DM_SERVICE) e entrega a GPU ao vfio-pci
+       a CADA start da VM. O console SPICE do virt-manager morre junto com a
+       sessão gráfica do host, e o monitor físico fica PRETO até o Windows ter
+       o driver NVIDIA: a saída emulada QXL continua sendo a primária. Iniciar
+       a VM neste estado, sem preparação, deixa você sem imagem e sem teclado.
 
-13.15. Instale o driver NVIDIA DENTRO da VM (somente com a etapa 14 aplicada):
+       Rota de recuperação (guarde antes do primeiro start com GPU): de outro
+       dispositivo, por SSH, rode
+         virsh --connect qemu:///system shutdown <vm>
+       e o hook release devolve GPU e desktop sozinho. Se o desktop não
+       voltar, use o utilitário u6 do menu (recuperar GPU). NUNCA force o
+       desligamento do host: ele interrompe a restauração no meio.
+
+13.15. Instale o driver NVIDIA DENTRO da VM. Caminho recomendado: a etapa 15
+       do menu (Instalar driver NVIDIA na VM), que faz tudo sem monitor nem
+       teclado dedicados: baixa o instalador oficial, injeta/usa o
+       qemu-guest-agent, instala em modo silencioso via guest-exec, confirma
+       com nvidia-smi e desliga a VM devolvendo o desktop.
+
+       Caminho manual (fallback, exige monitor na GPU e teclado/mouse da
+       etapa 16):
 
        a) Desligue a VM completamente pelo próprio Windows (não use "reiniciar"
           nem force reset) e inicie-a novamente para que a GPU real entre.
@@ -158,7 +172,7 @@ cat <<'GUIA'
             - a saída de vídeo pelo monitor ligado na GPU passada;
             - no PowerShell: nvidia-smi   (deve listar a GPU e o driver).
        f) Só depois de o driver estar funcionando é que o Ativar-MSI-GPU.ps1
-          faz sentido: ele é o passo da etapa 17 (CPU isolation).
+          faz sentido: ele é o passo da etapa 18 (CPU isolation).
 
        Se o "Código 43" persistir depois do driver, o problema é do lado do
        host (vinculação ao vfio-pci, ROM/UEFI da GPU ou o Fast Startup do
@@ -169,17 +183,17 @@ cat <<'GUIA'
        que o desktop volta sozinho (é o hook release/end da etapa 14 devolvendo
        a GPU e religando o gerenciador de login).
 
-13.17. Só então prossiga para as etapas 15 a 20 pelo menu. O
-       Gerar-Chave-Airlock.ps1 é o passo da etapa 19 (airlock) e não deve ser
+13.17. Só então prossiga para as etapas 16 a 21 pelo menu. O
+       Gerar-Chave-Airlock.ps1 é o passo da etapa 20 (airlock) e não deve ser
        executado antes dela.
 
 QUANDO CADA .ps1 É USADO (não execute fora de hora):
 
   Desativar-Fast-Startup.ps1  agora, no 13.13, como Administrador.
-  Ativar-MSI-GPU.ps1          etapa 17 (CPU isolation), como Administrador e
+  Ativar-MSI-GPU.ps1          etapa 18 (CPU isolation), como Administrador e
                               somente após o driver NVIDIA do 13.15 estar
                               instalado e funcionando.
-  Gerar-Chave-Airlock.ps1     etapa 19 (airlock), com o usuário comum do
+  Gerar-Chave-Airlock.ps1     etapa 20 (airlock), com o usuário comum do
                               Windows que vai usar o WinSCP; NÃO como
                               Administrador, senão a chave nasce no perfil
                               errado.
@@ -279,9 +293,12 @@ titulo "Verificação (quando o Windows + guest tools estiverem instalados)"
 if $VIRSH qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' >/dev/null 2>&1; then
     ok "guest-agent OK: {\"return\":{}}"
     info "Dentro do Windows, confirme também: Get-Disk  e  Get-Service QEMU-GA"
+    aviso "Pós-instalação pendente mais importante: o driver NVIDIA dentro da VM."
+    info "Use a etapa 15 do menu (Instalar driver NVIDIA na VM): ela instala tudo automaticamente, sem monitor nem teclado dedicados."
 else
     info "guest-agent ainda sem resposta. Normal antes de instalar o virtio-win-guest-tools."
     info "Rode 'bash etapas/41-instalacao-windows.sh --verificar' (etapa 13) depois da instalação."
+    info "Atalho: a etapa 15 do menu (driver NVIDIA automático) sabe injetar o qemu-guest-agent no QCOW2 com a VM desligada, sem precisar de tela."
     # O canal virtio é pré-requisito do lado do host: sem ele, o serviço QEMU-GA
     # roda no Windows e o guest-ping nunca responde. VMs criadas antes de a
     # etapa 12 passar a declarar o canal precisam recebê-lo uma única vez.

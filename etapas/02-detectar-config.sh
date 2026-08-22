@@ -131,7 +131,7 @@ verificar() {
     if [ -n "$rota" ]; then
         v_ok "Rota IPv4 efetiva para 1.1.1.1: dispositivo $rota (nenhum pacote enviado)."
         if [ "${REDE_MODO:-}" = "nat" ] && [ "${INTERFACE_FISICA:-}" != "$rota" ]; then
-            aviso "NAT está selecionado em ${INTERFACE_FISICA:-vazio}, mas a rota IPv4 efetiva usa $rota; ajuste a rota/métrica antes da etapa 18."
+            aviso "NAT está selecionado em ${INTERFACE_FISICA:-vazio}, mas a rota IPv4 efetiva usa $rota; ajuste a rota/métrica antes da etapa 19."
         fi
     else
         aviso "Rota IPv4 efetiva indisponível para destacar."
@@ -364,7 +364,7 @@ else
     else
         aviso "Não encontrei função de áudio HDMI em ${BASE}.x."
         aviso "Sem ela, o som do Windows não sai pelo cabo HDMI/DP do monitor"
-        aviso "(use um dispositivo USB em passthrough na etapa 15, se precisar)."
+        aviso "(use um dispositivo USB em passthrough na etapa 16, se precisar)."
         confirmar "Seguir com passthrough somente de vídeo?" \
             || falhar "Cancelado. Confira 'lspci -nn | grep -i audio' e rode de novo."
     fi
@@ -577,10 +577,10 @@ EXPLICA_HD1
 fi
 
 # ----------------------------------------------------------------------------
-# 6. CPU: topologia e plano de pinning (aplicado pela etapa 16)
+# 6. CPU: topologia e plano de pinning (aplicado pela etapa 17)
 # ----------------------------------------------------------------------------
 titulo "Etapa 3.6/8 CPU: plano de pinning por socket/core"
-info "Esta seção apenas calcula e grava o plano; o pinning será aplicado pela etapa 16."
+info "Esta seção apenas calcula e grava o plano; o pinning será aplicado pela etapa 17."
 # I5.3: o planner é o core Python. O shell continua sondando o host (lscpu),
 # mostrando o mapa, perguntando e confirmando; o cálculo determinístico do
 # recorte por core físico e a validação relacional têm uma implementação só.
@@ -646,7 +646,7 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 7. Memória da VM e HugePages (aplicadas pela etapa 16)
+# 7. Memória da VM e HugePages (aplicadas pela etapa 17)
 # ----------------------------------------------------------------------------
 titulo "Etapa 3.7/8 Memória da VM"
 RAM_TOTAL_MB="$(ram_total_mib)"
@@ -668,7 +668,7 @@ else
     PADRAO_GIB=16
     [ "$PADRAO_GIB" -gt "$MAX_GIB" ] && PADRAO_GIB="$MAX_GIB"
     aviso "Teto para a VM: ${MAX_GIB} GiB. O restante NÃO é negociável: fica com o host."
-    info "A etapa 16 (HugePages) reserva essa RAM no boot, tirando-a do host mesmo com a VM desligada."
+    info "A etapa 17 (HugePages) reserva essa RAM no boot, tirando-a do host mesmo com a VM desligada."
     RAM_GIB="$(perguntar_inteiro 'RAM da VM em GiB' "$PADRAO_GIB" 4 "$MAX_GIB")"
     NOVA_RAM_MB=$((RAM_GIB * 1024))
     salvar_conf_lote \
@@ -776,7 +776,7 @@ salvar_conf REDE_BRIDGE "${REDE_BRIDGE:-br0}"
 salvar_conf REDE_LIBVIRT "${REDE_LIBVIRT:-passthrough-nat}"
 salvar_conf REDE_BRIDGE_LIBVIRT "${REDE_BRIDGE_LIBVIRT:-virbr-vmnat}"
 if [ -n "$MODO_ANTERIOR" ] && [ "$MODO_ANTERIOR" != "$REDE_MODO" ]; then
-    aviso "Modo de rede mudou de '$MODO_ANTERIOR' para '$REDE_MODO'; os IPs serão recalculados na etapa 18."
+    aviso "Modo de rede mudou de '$MODO_ANTERIOR' para '$REDE_MODO'; os IPs serão recalculados na etapa 19."
     salvar_conf VM_IP_FIXO ""
     salvar_conf IP_FIXO_HOST ""
 elif [ -n "$INTERFACE_ANTERIOR" ] \
@@ -788,11 +788,11 @@ elif [ -n "$INTERFACE_ANTERIOR" ] \
 fi
 if [ "$REDE_MODO" = "nat" ]; then
     if [ -z "$UPLINK_IPV4_EFETIVO" ]; then
-        aviso "NAT escolhido, mas a rota IPv4 efetiva não pôde ser determinada; a etapa 18 recusará mutações enquanto isso persistir."
+        aviso "NAT escolhido, mas a rota IPv4 efetiva não pôde ser determinada; a etapa 19 recusará mutações enquanto isso persistir."
     elif [ "$INTERFACE_FISICA" != "$UPLINK_IPV4_EFETIVO" ]; then
         aviso "NAT foi escolhido em INTERFACE_FISICA=$INTERFACE_FISICA, mas a rota IPv4 efetiva usa $UPLINK_IPV4_EFETIVO."
         aviso "Torne $INTERFACE_FISICA a rota padrão ou desconecte/ajuste a métrica do outro adaptador."
-        aviso "Depois execute novamente esta etapa e a etapa 18."
+        aviso "Depois execute novamente esta etapa e a etapa 19."
     else
         ok "NAT selecionado no uplink IPv4 efetivo: $INTERFACE_FISICA."
     fi
@@ -808,7 +808,7 @@ if ! ja_definido TRANSFER_USER; then
         || falhar "Cinco tentativas sem um usuário de transferência válido."
     salvar_conf TRANSFER_USER "$PERGUNTA_VALIDADA"
 fi
-info "Airlock é o canal previsto e recomendado para troca de arquivos entre host e VM (etapa 19)."
+info "Airlock é o canal previsto e recomendado para troca de arquivos entre host e VM (etapa 20)."
 info "É uma zona de trânsito: nada permanente, fora do backup e montada sem execução."
 aviso "Essa é uma política recomendada, não uma garantia técnica de que outros canais sejam impossíveis."
 if ja_definido AIRLOCK_DIR; then
@@ -844,4 +844,4 @@ ok "Comparação prévia: CPU, RAM, PCI e discos correspondem ao inventário sel
 grep -vE '^\s*(#|$)' "$CONF_ARQUIVO" | sed 's/^/  /'
 echo
 ok "Detecção concluída. Revise o resumo acima antes de seguir para as próximas etapas."
-info "Na etapa 18: bridge solicitará reservas no roteador; NAT criará a reserva e o gateway automaticamente."
+info "Na etapa 19: bridge solicitará reservas no roteador; NAT criará a reserva e o gateway automaticamente."

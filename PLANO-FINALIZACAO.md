@@ -16,13 +16,13 @@ igual ao que `menu.sh` mostra e ao que os scripts imprimem. O nome do arquivo em
 
 | Etapa | Script | Etapa | Script | Etapa | Script |
 |---|---|---|---|---|---|
-| 1 | `00-inventario.sh` | 8 | `14-working-disk.sh` | 15 | `51-usb-passthrough.sh` |
-| 2 | `01-verificar-bios.sh` | 9 | `20-virtualizacao.sh` | 16 | `52-cpu-pinning-hugepages.sh` |
-| 3 | `02-detectar-config.sh` | 10 | `21-usuario-grupos.sh` | 17 | `53-cpu-isolation.sh` |
-| 4 | `10-atualizar-sistema.sh` | 11 | `30-iommu-vfio.sh` | 18 | `60-rede-bridge.sh` |
-| 5 | `11-driver-nvidia.sh` | 12 | `40-criar-vm.sh` | 19 | `61-airlock.sh` |
-| 6 | `12-pacotes-base.sh` | 13 | `41-instalacao-windows.sh` | 20 | `70-trim-discard.sh` |
-| 7 | `13-diretorios.sh` | 14 | `50-hooks-gpu-hd1.sh` | | |
+| 1 | `00-inventario.sh` | 8 | `14-working-disk.sh` | 15 | `55-driver-nvidia-vm.sh` |
+| 2 | `01-verificar-bios.sh` | 9 | `20-virtualizacao.sh` | 16 | `51-usb-passthrough.sh` |
+| 3 | `02-detectar-config.sh` | 10 | `21-usuario-grupos.sh` | 17 | `52-cpu-pinning-hugepages.sh` |
+| 4 | `10-atualizar-sistema.sh` | 11 | `30-iommu-vfio.sh` | 18 | `53-cpu-isolation.sh` |
+| 5 | `11-driver-nvidia.sh` | 12 | `40-criar-vm.sh` | 19 | `60-rede-bridge.sh` |
+| 6 | `12-pacotes-base.sh` | 13 | `41-instalacao-windows.sh` | 20 | `61-airlock.sh` |
+| 7 | `13-diretorios.sh` | 14 | `50-hooks-gpu-hd1.sh` | 21 | `70-trim-discard.sh` |
 
 Caminhos de arquivo (`etapas/40-criar-vm.sh`, `tests/i0/...`) continuam literais.
 
@@ -97,19 +97,19 @@ Esta auditoria reexecutou a verificação completa no host de desenvolvimento e 
 |---|---|
 | `bash -n` em todos os `.sh` (menu, lib, etapas, util, tests) | aprovado, sem falhas |
 | CRLF em `*.sh` | nenhum |
-| Placeholders `<MAIUSCULAS>` residuais | nenhum (exceto o fallback intencional `<IP_FIXO_HOST>` na etapa 19) |
+| Placeholders `<MAIUSCULAS>` residuais | nenhum (exceto o fallback intencional `<IP_FIXO_HOST>` na etapa 20) |
 | Suíte hermética completa (12 testes `tests/test-*.sh`) | **12/12 aprovados** (total aproximado de 62 s; maior: `test-i1-safety-envelope.sh` com 43 s) |
 | Gate canônico `bash tests/run-gate-i1.sh` (manifesto, envelope I1, validador, campanha I0 integral `full` sem skips, suíte, sintaxe, whitespace) | resultado registrado na seção 12 (registro de execução) |
 | Manifesto de fase | 52 arquivos untracked correspondem exatamente à união de `i0-files.txt` + `i1-files.txt` |
 | `passthrough.conf` | ignorado pelo Git e fora do índice (correto); cópia local preservada |
-| `guard_mutation` | definida em `lib/common.sh`, aplicada em todos os entrypoints mutantes antes de `sudo` (conferido por amostragem nas etapas 18 e 19; somente os read-only 2, 8 e `listar-grupos-iommu.sh` não a usam, por desenho) |
+| `guard_mutation` | definida em `lib/common.sh`, aplicada em todos os entrypoints mutantes antes de `sudo` (conferido por amostragem nas etapas 19 e 20; somente os read-only 2, 8 e `listar-grupos-iommu.sh` não a usam, por desenho) |
 | Bloqueadores do antigo `PLANO-CORRECOES-AUDITORIA.md` | amostrados no código: recuperação recusa VM ligada; snapshot exige VM desligada; estratégia única de driver NVIDIA por perfil; `rsync` nas dependências; migração NTFS removida do escopo (workingDisk é montado externamente pelo operador). As lacunas restantes estão TODAS catalogadas em `tests/i0/deltas.tsv` (32 deltas) e no catálogo da seção 4 |
 
 ### 1.3 Estado real DESTE host Ubuntu (`bash menu.sh --status`, rc=3)
 
 O código está saudável, mas a configuração local veio de outra máquina (host Pop!_OS anterior). Bloqueios operacionais reais encontrados:
 
-1. `passthrough.conf` registra `USUARIO_LINUX="charles"`, mas o usuário deste host é `charloso` (a conta `charles` não existe no NSS). Isso contamina as etapas 3, 7, 10, 12 e 19.
+1. `passthrough.conf` registra `USUARIO_LINUX="charles"`, mas o usuário deste host é `charloso` (a conta `charles` não existe no NSS). Isso contamina as etapas 3, 7, 10, 12 e 20.
 2. `BOOTLOADER="kernelstub"` no conf, mas o boot efetivo deste host é `grub`. A etapa 11 bloqueia corretamente até a migração pela etapa 3.
 3. Diretório de inventários `~/inventario-hardware` inexistente (etapa 1 pendente).
 4. `CPUS_VM`, `CPUS_HOST`, `VM_VCPUS`, `VM_CORES`, `VM_THREADS`, `VM_RAM_MB`, `HUGEPAGES_1G`, `REDE_MODO`, `ISO_WINDOWS` e `ISO_VIRTIO` indefinidos.
@@ -117,7 +117,7 @@ O código está saudável, mas a configuração local veio de outra máquina (ho
 6. Uplink: somente `wlp5s0` (Wi-Fi) tem IPv4; `enp6s0` (Ethernet) está sem IPv4. Enquanto isso valer, o modo de rede obrigatório é `nat` (bridge exige Ethernet).
 7. Hardware detectado corretamente: GPU `0000:07:00.0` (`10de:2504`, RTX 3060) + áudio `0000:07:00.1`, CPU AMD (`AuthenticAMD`), `DM_SERVICE=gdm3`.
 
-**Roteiro operacional para destravar este host (executar pelo usuário, na ordem do menu):** etapa 1 (inventário), etapa 3 (reinicia a configuração, corrige usuário e migra `kernelstub` para `grub` com backup), etapa 4 (reboot), etapa 5 (valida driver), etapas 6 a 10, etapa 11 (fase A, reboot, fase B), etapas 12 a 20. Este roteiro usa o código já existente; não depende das fases I2+.
+**Roteiro operacional para destravar este host (executar pelo usuário, na ordem do menu):** etapa 1 (inventário), etapa 3 (reinicia a configuração, corrige usuário e migra `kernelstub` para `grub` com backup), etapa 4 (reboot), etapa 5 (valida driver), etapas 6 a 10, etapa 11 (fase A, reboot, fase B), etapas 12 a 21. Este roteiro usa o código já existente; não depende das fases I2+.
 
 **Atualização de 2026-08-16 23:19:** o usuário executou as etapas 1 e 3 com sucesso. `menu.sh --status` agora mostra as etapas 1, 2, 3, 5 e 8 concluídas; o conf está correto para este host (`USUARIO_LINUX=charloso`, `VM_NAME=vwin11`, `BOOTLOADER=grub`, `REDE_MODO=nat` em `wlp5s0`, `WORKING_DISK_PATH=/mnt/docs4` montado, 12 vCPUs, 22 GiB de RAM, `HUGEPAGES_1G=22`). Restam as etapas 4 em diante, na ordem do menu. Itens 1 a 5 acima estão resolvidos; o item 6 (NAT obrigatório) permanece válido.
 
@@ -407,7 +407,7 @@ A migração deve ocorrer **antes** do parser estrito normal:
 
 **Testes:** sucesso; falha pré-publicação e imediatamente após define; falha de releitura/validação; `INT`, `TERM` e `EXIT` em cada janela mutante, sem falso commit; rollback que retorna zero mas diverge; estado final e idempotência.
 
-**Aceite de código:** confirmação só após prova semântica, com restauração comprovada antes do commit. **Aprovado em I3:** `etapas/70-trim-discard.sh` mantém os cinco estados, arma traps antes do primeiro `define`, valida o candidato pelo schema antes da primeira mutação e relê o domínio depois de cada restauração; a matriz de falhas/sinais/rollback está em `tests/test-i0-mutators.sh` (bloco da etapa 20).
+**Aceite de código:** confirmação só após prova semântica, com restauração comprovada antes do commit. **Aprovado em I3:** `etapas/70-trim-discard.sh` mantém os cinco estados, arma traps antes do primeiro `define`, valida o candidato pelo schema antes da primeira mutação e relê o domínio depois de cada restauração; a matriz de falhas/sinais/rollback está em `tests/test-i0-mutators.sh` (bloco da etapa 21).
 **Aceite operacional:** medir blocos/alocação no storage real em I13; XML sozinho não qualifica TRIM. Continua `[H]`.
 
 ### REQ-IOMMU-TX: convergência persistente IOMMU/VFIO (P0)
@@ -517,7 +517,7 @@ Capturar e persistir identidade estável do workingDisk, preferindo WWN, serial 
 
 ### REQ-USB-IDENTITY: seleção USB não ambígua (P1)
 
-**Fases:** I6, integração de domínio I3 quando necessária (feita). Estado: `PARCIAL`. Em I3 a enumeração de hostdev USB passou a exigir discriminador (vendor/product ou endereço físico) e a informar quantos pares VID:PID estão duplicados; a etapa 15 recusa a remoção quando há ambiguidade em vez de escolher pela ordem. Serial/porta persistidos e a revalidação antes do attach continuam em I6.
+**Fases:** I6, integração de domínio I3 quando necessária (feita). Estado: `PARCIAL`. Em I3 a enumeração de hostdev USB passou a exigir discriminador (vendor/product ou endereço físico) e a informar quantos pares VID:PID estão duplicados; a etapa 16 recusa a remoção quando há ambiguidade em vez de escolher pela ordem. Serial/porta persistidos e a revalidação antes do attach continuam em I6.
 
 Usar VID:PID apenas quando único. Persistir serial quando disponível; sem serial, usar porta/caminho físico estável. Exibir candidatos e atributos; revalidar discriminador antes de anexar; duplicidade ou ambiguidade deve recusar, nunca escolher arbitrariamente.
 
@@ -527,7 +527,7 @@ Usar VID:PID apenas quando único. Persistir serial quando disponível; sem seri
 
 ### REQ-NET-TX: bridge/NAT transacional (P1)
 
-**Fases:** harness I0 (feito); inspeção de XML migrada em I3; implementação I7. Estado: `PARCIAL` (deltas D-NET-* seguem abertos). Em I3 a etapa 18 passou a analisar XML de rede e de domínio pelo core, com marcador comparado explicitamente e cardinalidade exigida em `<forward>`, `<bridge>`, blocos `<ip>` e reservas DHCP; a transação, os fingerprints de aplicação/restauração e o `recovery_id` são de I7.
+**Fases:** harness I0 (feito); inspeção de XML migrada em I3; implementação I7. Estado: `PARCIAL` (deltas D-NET-* seguem abertos). Em I3 a etapa 19 passou a analisar XML de rede e de domínio pelo core, com marcador comparado explicitamente e cardinalidade exigida em `<forward>`, `<bridge>`, blocos `<ip>` e reservas DHCP; a transação, os fingerprints de aplicação/restauração e o `recovery_id` são de I7.
 
 Validar candidato e snapshots; armar traps antes da primeira alteração; publicar/ativar/provar bridge, libvirt e conectividade; commit só após todas as pós-condições. Rollback restaura arquivos e estado ativo, relê e compara semanticamente. Mudança concorrente de qualquer fingerprint causa conflito, não sobrescrita.
 
@@ -613,7 +613,7 @@ Desempenho medido nesta fase (não substitui I10.4): carregar `lib/python-core.s
 - [x] **I3.3:** implementar comparação semântica, diff gerenciado e fingerprints para conflito externo.
 - [x] **I3.4:** implementar `network_xml.py`: marcador, forward, bridge, CIDR, DHCP, MAC, consumidores e estados inválidos.
 - [x] **I3.5:** implementar parser de JSON `qemu-img` e backing chain sem executar `qemu-img`; validar tipos, formato, campos obrigatórios/ausentes e valores inválidos com erros tipados e fail-closed.
-- [x] **I3.6:** migrar consumidores em `common.sh`, etapas 14, 16, 18 (apenas XML), 20, snapshot e backup, além dos achados de `tests/i0/traceability.tsv` (11 heredocs Python de produção inventariados); todos os XML/JSON/snapshots usam stdin ou arquivo `0600`, nunca `argv`, com testes de quoting, canários e limpeza.
+- [x] **I3.6:** migrar consumidores em `common.sh`, etapas 14, 17, 19 (apenas XML), 21, snapshot e backup, além dos achados de `tests/i0/traceability.tsv` (11 heredocs Python de produção inventariados); todos os XML/JSON/snapshots usam stdin ou arquivo `0600`, nunca `argv`, com testes de quoting, canários e limpeza.
 - [x] **I3.7:** implementar integralmente REQ-TRIM-TX.
 - [x] **I3.8:** implementar REQ-LIBVIRT-BACKEND, eliminando backend hardcoded na etapa 14.
 - [x] **I3.9:** implementar REQ-HOOKS-TX, incluindo opções XML antes do commit.
@@ -635,12 +635,12 @@ Aprovado. O que ficou comprovado hermeticamente, sem tocar o host:
 - **Bash não constrói JSON:** o protocolo ganhou o canal de entrada `chave\0valor\0` (`--payload-format=pairs`), simétrico ao de resposta. XML com aspas, barra invertida, `&`, acentos e metacaracteres trafega byte a byte sem escape manual. O envelope JSON continua válido e testado.
 - **Transporte fora de `argv`:** um shim de `python3` provou que `argv` recebe somente flags de isolamento, subcomando, opções fixas e os localizadores aleatórios dos arquivos controlados; `QCOW2_PATH`, XML e JSON nunca aparecem. Os arquivos de payload e de candidato estão em `0600`, `nlink=1` e com o dono correto.
 - **Candidatos escritos pelo core, publicados pelo Bash:** `domain-candidate` grava somente no temporário controlado (a exceção autorizada pela seção 2.2) e devolve medidas (`changed`, fingerprints antes/depois, `bytes_written`, `sha256`); o XML não passa por stdout. Destino relativo, não canônico, inexistente, simbólico, com dois links, com modo permissivo, sob raiz permissiva e diretório são todos recusados. Candidato recusado nunca toca o destino.
-- **REQ-TRIM-TX:** a etapa 20 passou a ter estados explícitos (`PREPARED/APPLIED/VERIFIED/COMMITTED/ROLLING_BACK`), fingerprint do original, candidato validado pelo schema antes da primeira mutação e traps `EXIT/INT/TERM` armados antes do primeiro `define`. Falha antes do define, falha depois do define, falha de releitura, `INT`, `TERM` e `EXIT` agora restauram o original e provam a restauração por releitura semântica. Rollback com `define` retornando zero sem aplicar virou erro grave com evidência preservada; falha explícita do define de rollback também. `130` e `143` continuam preservados.
+- **REQ-TRIM-TX:** a etapa 21 passou a ter estados explícitos (`PREPARED/APPLIED/VERIFIED/COMMITTED/ROLLING_BACK`), fingerprint do original, candidato validado pelo schema antes da primeira mutação e traps `EXIT/INT/TERM` armados antes do primeiro `define`. Falha antes do define, falha depois do define, falha de releitura, `INT`, `TERM` e `EXIT` agora restauram o original e provam a restauração por releitura semântica. Rollback com `define` retornando zero sem aplicar virou erro grave com evidência preservada; falha explícita do define de rollback também. `130` e `143` continuam preservados.
 - **REQ-HOOKS-TX:** `--remover-video` e `--anti-code43` saíram do pós-commit e entraram na transação como um único candidato validado, definido uma vez e comprovado por releitura. Falha e sinal nessa janela restauram hooks, serviço e XML. O `define` de restauração passou a ser relido e comparado semanticamente, então rollback divergente é erro grave.
 - **Idempotência exata da etapa 14 (D-HOOKS-IDEMPOTENCE):** sobre estado convergido a etapa termina com **zero efeitos** e manifesto de conteúdo e de metadados/mtime idênticos (o oráculo de I0 media 31 efeitos e manifesto diferente). A convergência compara byte a byte o conjunto renderizado com o instalado, mais dono e modo, e recusa marcador de transação interrompida ou hook antigo pendente.
 - **REQ-LIBVIRT-BACKEND:** `libvirt_backend_resolver`/`libvirt_backend_reiniciar` são a única resolução autoritativa, e `ativar_unidade_systemd` passou a ter uma única definição (estava duplicada nas etapas 9 e 10). A etapa 14 não conhece mais `libvirtd`: no perfil modular ela reinicia `virtqemud.service`, sem unidade disponível recusa antes de qualquer efeito, e um daemon que não fica ativo depois do restart derruba a transação com restauração comprovada.
 - **REQ-WINDOWS-STATE (preparação):** metadata namespaced `vmpass:windows-install` vinculada ao digest do QCOW2, com leitura e gravação idempotentes, preservação de metadata de terceiros e recusa de digest/data/origem inválidos. Nada foi ligado ao fluxo da etapa 13: instalação, power e agent continuam separados para I4/I9.
-- **REQ-USB-IDENTITY e REQ-DISK-IDENTITY (integração mínima):** a enumeração USB exige discriminador (vendor/product ou endereço físico) e informa quantos pares VID:PID estão duplicados; a etapa 15 recusa remoção quando há ambiguidade, em vez de escolher por ordem. A projeção de disco block passou a expor identidade física (`wwn`/`serial`) para o fluxo completo de I6.
+- **REQ-USB-IDENTITY e REQ-DISK-IDENTITY (integração mínima):** a enumeração USB exige discriminador (vendor/product ou endereço físico) e informa quantos pares VID:PID estão duplicados; a etapa 16 recusa remoção quando há ambiguidade, em vez de escolher por ordem. A projeção de disco block passou a expor identidade física (`wwn`/`serial`) para o fluxo completo de I6.
 - **Higiene de temporários:** a raiz privada da ponte é recolhida assim que fica vazia, então um consumidor com trap próprio não deixa resíduo em `TMPDIR`; as quatro etapas transacionais também chamam `python_core_temporarios_limpar` no trap, cobrindo a janela de sinal.
 - **Teste com dentes:** oito mutações injetadas em cópia isolada de `lib/` e `libexec/` (cardinalidade dois aceita como um, estado de discard sempre ativo, candidato que não altera o disco, comparação sempre igual, payload em `argv`, allowlist permissiva, leitura aceitando symlink e candidato não publicado) foram todas reprovadas.
 
@@ -648,7 +648,7 @@ Aprovado. O que ficou comprovado hermeticamente, sem tocar o host:
 
 1. `util/snapshot-vm.sh` sondava o core antes de `guard_mutation` (a guarda desse utilitário fica dentro de cada ação), criando um temporário antes do primeiro ponto de recusa. A sondagem foi removida: a ponte já é fail-closed. Regra derivada: nenhum entrypoint mutante consulta o core antes da guarda.
 2. A pós-condição das opções da etapa 14 comparava o XML persistido com o candidato por igualdade semântica total, o que produziria falso negativo em host real, onde o libvirt normaliza o domínio ao definir. Passou a ser prova por idempotência: gerar o mesmo candidato sobre o estado persistido tem de resultar em "nada a mudar".
-3. `network-overlap` existia testado e sem consumidor. Foi ligado à detecção de colisão de sub-rede da etapa 18, para não deixar subcomando morto no core nem duas aritméticas de CIDR conviverem.
+3. `network-overlap` existia testado e sem consumidor. Foi ligado à detecção de colisão de sub-rede da etapa 19, para não deixar subcomando morto no core nem duas aritméticas de CIDR conviverem.
 4. `_require_bool` em `domain_xml.py` ficou sem uso depois da coerção local em `qemu_image.py` e foi removido.
 
 Limitações registradas:
@@ -699,12 +699,12 @@ Aprovado. O que ficou comprovado hermeticamente, sem tocar o host:
 - **D-CONF-DURABILITY fechado:** `fsync` do arquivo e do diretório passaram a existir, e o lote é todo-ou-nada com validação completa antes de qualquer escrita (chave desconhecida, repetida, valor fora do tipo e paridade ímpar não publicam nada).
 - **Convergência exata:** gravar o mesmo valor duas vezes não altera conteúdo, metadados nem mtime.
 - **REQ-CONF-ISO fechado (P0):** o classificador pré-parser lê apenas atribuições literais de uma allowlist mínima e classifica cada ISO como ausente, vazia, válida, inválida ou duplicada **sem abrir, resolver, montar, copiar, testar existência ou privilegiar** o caminho legado, que nunca é reaproveitado nem publicado em diagnóstico. A migração cria backup `0600`, pergunta o novo caminho com a política explicada, e publica todas as chaves pendentes em um único `renameat`, com tolerância válida **somente** para as chaves declaradas e exigindo novo valor para cada uma. Configuração já válida é no-op exato, sem backup novo. A etapa 3 roda a migração antes de `carregar_conf`; `--verificar` continua estritamente somente leitura.
-- **REQ-WAIVERS decidido e implementado (D-WAIVERS):** `WORKING_DISK_DISPENSADO` e `HD1_DISPENSADO` **permanecem**, porque não são dispensa de etapa e sim escolha entre montagens mutuamente exclusivas, com efeito real e testado nas etapas 3, 7, 8, 14, 19 e 20; nenhuma delas faz um verificador relatar conclusão sem execução. `AIRLOCK_DISPENSADO` e `BACKUP_DISPENSADO` foram **removidas por migração**, na segunda alternativa que o próprio requisito autoriza: elas eram aceitas e não alteravam pré-requisito, status, execução nem resumo, e o menu não tem matriz de pré-requisitos para elas dispensarem. A depreciação é segura: o parser continua aceitando as linhas sem expor o valor, a carga avisa que a flag não tem efeito, a etapa 3 remove as linhas em publicação idempotente, e o exemplo versionado documenta o motivo. Com isso, toda flag aceita altera comportamento documentado e testado.
+- **REQ-WAIVERS decidido e implementado (D-WAIVERS):** `WORKING_DISK_DISPENSADO` e `HD1_DISPENSADO` **permanecem**, porque não são dispensa de etapa e sim escolha entre montagens mutuamente exclusivas, com efeito real e testado nas etapas 3, 7, 8, 14, 20 e 21; nenhuma delas faz um verificador relatar conclusão sem execução. `AIRLOCK_DISPENSADO` e `BACKUP_DISPENSADO` foram **removidas por migração**, na segunda alternativa que o próprio requisito autoriza: elas eram aceitas e não alteravam pré-requisito, status, execução nem resumo, e o menu não tem matriz de pré-requisitos para elas dispensarem. A depreciação é segura: o parser continua aceitando as linhas sem expor o valor, a carga avisa que a flag não tem efeito, a etapa 3 remove as linhas em publicação idempotente, e o exemplo versionado documenta o motivo. Com isso, toda flag aceita altera comportamento documentado e testado.
 - **Relação entre chaves reportada:** caminho definido junto com a dispensa correspondente em `sim` é conflito, reportado em toda carga. As etapas que possuem a relação continuam com o diagnóstico específico delas, que explica como corrigir.
 - **I4.9:** apenas `passthrough.conf.example` está rastreado; a configuração local está ignorada, fora do índice e ausente de todo o histórico (`git log --all`). Duas correções saíram desta auditoria: o exemplo versionado deixou de citar identificadores concretos (`0000:0c:00.0`, `10de:2504`, `/dev/nvme0n1`), que violavam a regra 8.1 de clone limpo, e a carga passou a avisar quando o `passthrough.conf` está legível por outros usuários, com a publicação convergindo o modo (grupo perde escrita, terceiros perdem tudo) sem nunca afrouxá-lo.
 - **Teste com dentes:** cinco mutações injetadas em cópia isolada (gravação que não persiste, hardlink aceito no arquivo sensível, comentários descartados na reescrita, classificação legada que nunca acha pendência e descritor apontando para o diretório errado) foram todas reprovadas.
-- **Cobertura preservada nos harnesses, não reduzida:** a publicação deixou de ser um `mv` interceptável por `PATH`, então o harness I0 passou a modelar `config-publish` como efeito sintético registrado por `mutator-effect-exec`, que substitui o próprio processo pelo interpretador. Isso importa porque a injeção de sinal envia INT/TERM ao processo pai: com uma camada extra de shell no meio, o sinal atingiria o wrapper e o shell da etapa veria apenas um filho morto, sem disparar trap. Com a correção, os 63 cenários de sinal da etapa 18 (11 efeitos em NAT e 10 em bridge, para INT, TERM e EXIT) voltaram a exigir 130/143, rollback completo e ausência de falso commit, e a injeção de falha por efeito continua valendo dentro da janela de publicação.
-- **Dois oráculos de I0 invertidos pela convergência:** a segunda execução das etapas 11 (fase B) e 18 (NAT e bridge) virou **no-op exato**, porque valor igual não gera mais rename, não toca metadados e não toca mtime. O oráculo anterior exigia manifesto exato diferente e está citado no comentário `I4:` de cada asserção. A contagem de efeitos foi mantida (1 na etapa 11, 7 em NAT e 6 em bridge) com uma asserção nova de que os efeitos restantes são apenas tentativas de publicação convergentes: o harness conta a tentativa, não a mutação, porque não pode saber de antemão se o core vai convergir e é nessa janela que a injeção precisa continuar existindo.
+- **Cobertura preservada nos harnesses, não reduzida:** a publicação deixou de ser um `mv` interceptável por `PATH`, então o harness I0 passou a modelar `config-publish` como efeito sintético registrado por `mutator-effect-exec`, que substitui o próprio processo pelo interpretador. Isso importa porque a injeção de sinal envia INT/TERM ao processo pai: com uma camada extra de shell no meio, o sinal atingiria o wrapper e o shell da etapa veria apenas um filho morto, sem disparar trap. Com a correção, os 63 cenários de sinal da etapa 19 (11 efeitos em NAT e 10 em bridge, para INT, TERM e EXIT) voltaram a exigir 130/143, rollback completo e ausência de falso commit, e a injeção de falha por efeito continua valendo dentro da janela de publicação.
+- **Dois oráculos de I0 invertidos pela convergência:** a segunda execução das etapas 11 (fase B) e 19 (NAT e bridge) virou **no-op exato**, porque valor igual não gera mais rename, não toca metadados e não toca mtime. O oráculo anterior exigia manifesto exato diferente e está citado no comentário `I4:` de cada asserção. A contagem de efeitos foi mantida (1 na etapa 11, 7 em NAT e 6 em bridge) com uma asserção nova de que os efeitos restantes são apenas tentativas de publicação convergentes: o harness conta a tentativa, não a mutação, porque não pode saber de antemão se o core vai convergir e é nessa janela que a injeção precisa continuar existindo.
 
 **Revisão semântica do checkpoint I4: APPROVE, bloqueadores 0.** Três achados corrigidos dentro da fase:
 
@@ -731,7 +731,7 @@ Limitações registradas:
 - [x] **I5.1:** modelar snapshot de topologia CPU/NUMA/online e canonicalização determinística.
 - [x] **I5.2:** validar conjuntos, disjunção, cobertura, CPU offline, core/SMT dividido e reserva mínima do host com mensagens compatíveis.
 - [x] **I5.3:** migrar planner da etapa 3; UI/confirmação ficam em Bash; revalidar snapshot antes de persistir.
-- [x] **I5.4:** nas etapas 16/17, Python produz intenção/candidato; Bash confirma, altera kernel/XML/reboot, verifica e desfaz; conflito TOCTOU bloqueia.
+- [x] **I5.4:** nas etapas 17/18, Python produz intenção/candidato; Bash confirma, altera kernel/XML/reboot, verifica e desfaz; conflito TOCTOU bloqueia.
 - [x] **I5.5:** cobrir reconfiguração de RAM/CPU/HugePages/parâmetros, XML com hotplug e elementos/atributos externos não gerenciados, idempotência e reversão; nenhum cutover pode remover ou reordenar semanticamente conteúdo externo.
 - [x] **I5.6:** criar e fazer o cutover de `lib/shell/boot.sh` nesta fase, preservando wrappers públicos, e implementar nele integralmente REQ-IOMMU-TX; manter AMD-only. Não manter implementação mutante paralela em `common.sh`/etapas após o cutover.
 
@@ -745,9 +745,9 @@ Aprovado. O que ficou comprovado hermeticamente, sem tocar o host:
 
 - **Cálculo de CPU com uma implementação só:** `validar_layout_cpu` deixou de ter algoritmo em Bash e passou a ser fachada sobre `cpu-layout`. As mensagens continuam idênticas às anteriores, porque são API operacional (seção 3.1), e os oráculos de I0 (`tests/test-i0-characterization.sh`) e da tarefa 5 (`tests/test-cpu-hugepages.sh`) continuam valendo sem alteração de expectativa.
 - **Snapshot canônico e fingerprint:** reordenar as linhas do `lscpu` não muda o fingerprint; colocar uma CPU offline, mudar o agrupamento de siblings ou a contagem muda. É esse fingerprint que sustenta a recusa por conflito.
-- **Conflito TOCTOU bloqueia (I5.4):** a etapa 3 recalcula a topologia entre a confirmação e o `salvar_conf_lote`, e as etapas 16 e 17 revalidam antes de gravar chaves de boot e antes de definir o XML. Topologia alterada no meio do caminho aborta sem gravar nem aplicar. Sem fingerprint capturado, a mutação também é recusada, em vez de seguir com o plano antigo.
+- **Conflito TOCTOU bloqueia (I5.4):** a etapa 3 recalcula a topologia entre a confirmação e o `salvar_conf_lote`, e as etapas 17 e 18 revalidam antes de gravar chaves de boot e antes de definir o XML. Topologia alterada no meio do caminho aborta sem gravar nem aplicar. Sem fingerprint capturado, a mutação também é recusada, em vez de seguir com o plano antigo.
 - **Planner determinístico:** o recorte por core físico saiu da etapa 3 para `cpu-plan`, que devolve teto, padrão, core de housekeeping e a proposta já aprovada pelo próprio validador. A proposta é idêntica para qualquer ordem de linhas do `lscpu`, o core da CPU 0 nunca vai para a VM e o host mantém um core inteiro (dois quando há seis ou mais).
-- **Aritmética de memória unificada:** reserva do host, teto da VM e a relação `VM_RAM_MB`/`HUGEPAGES_1G` passaram a existir só em `cpu-memory`. As etapas 3, 12 e 16 consomem o mesmo resultado, e `ram_reserva_host_mib`/`ram_max_vm_mib` viraram projeções do plano.
+- **Aritmética de memória unificada:** reserva do host, teto da VM e a relação `VM_RAM_MB`/`HUGEPAGES_1G` passaram a existir só em `cpu-memory`. As etapas 3, 12 e 17 consomem o mesmo resultado, e `ram_reserva_host_mib`/`ram_max_vm_mib` viraram projeções do plano.
 - **REQ-IOMMU-TX fechado no código:** a etapa 11 tem uma transação com estados explícitos, traps armados antes da primeira mutação, candidatos gerados e validados antes de qualquer efeito e commit somente após reler boot e `vfio.conf`. O initramfs é regenerado por último e, no rollback, é regenerado de novo para não deixar configuração e initramfs em versões incompatíveis.
 - **D-IOMMU-ACTIVE-PERSISTENT fechado hermeticamente:** "ativo neste boot" e "persistido para o próximo" são medidos separadamente e reportados separadamente por `--verificar`. A fase A converge o persistente mesmo quando a cmdline atual já tem os parâmetros, e a fase B só começa quando o kernel em execução prova os dois. No harness, o único caminho pelo qual a cmdline ativa muda é o reboot simulado.
 - **D-IOMMU-PARTIALITY fechado:** o oráculo de I0 media a parcialidade que sobrava depois de falha ou sinal (cmdline, `vfio.conf` e/ou initramfs já aplicados). Agora a matriz percorre as oito janelas mutantes em `before`/`after` e os três sinais, e exige em cada uma que os três recursos persistentes voltem ao conteúdo original byte a byte, sem resíduo de temporário, preservando `130`/`143`.
@@ -771,7 +771,7 @@ Limitações registradas:
 - `expandir_lista_cpus`, `lista_cpus_valida` e `normalizar_conjunto_cpus` continuam em Bash, pela mesma razão registrada em I4: validam entrada interativa e dado de runtime (`/sys/devices/system/cpu/isolated`), não schema. A equivalência com o core é provada por fixtures dos dois lados;
 - o parsing e a escrita de texto de cmdline/GRUB continuam em Bash, dentro de `lib/shell/boot.sh`. A árvore-alvo da seção 2.3 não prevê um `boot.py`, e separar o parsing do backend que o aplica criaria um segundo caminho para o mesmo estado persistente. Esta é a justificativa registrada exigida pela seção 2.3;
 - `FSTAB` continua sem passar por `caminho_sistema`: apenas os recursos de boot e `vfio.conf` foram roteados nesta fase, porque são os que a transação de I5 precisa exercitar de verdade. O restante é escopo de I9;
-- a etapa 11 `--verificar` passou a devolver `2` (indeterminado) quando a persistência de boot não pode ser lida sem privilégio já autorizado, onde antes devolvia `1`. É a mesma política que as etapas 16 e 17 já usavam e é exigida por REQ-VERIFY-FAILCLOSED: estado não comprovado nunca é pendência silenciosa;
+- a etapa 11 `--verificar` passou a devolver `2` (indeterminado) quando a persistência de boot não pode ser lida sem privilégio já autorizado, onde antes devolvia `1`. É a mesma política que as etapas 17 e 18 já usavam e é exigida por REQ-VERIFY-FAILCLOSED: estado não comprovado nunca é pendência silenciosa;
 - o bloco gerenciado muda o formato de `vfio.conf` de hosts que já rodaram a etapa 11 antes desta fase. A migração é automática, idempotente e preserva o que não é nosso, mas o texto de reversão da etapa mudou junto e está documentado nela.
 
 ## I6: Inventário e identidades físicas
@@ -793,9 +793,9 @@ Legado continua legível; reordenação não gera falso positivo; mudança real 
 
 ## I7: Rede transacional e planner backend-neutral
 
-**Pré-condição:** harness da etapa 18 de I0 aprovado (já existe: `tests/test-i0-mutators.sh`).
+**Pré-condição:** harness da etapa 19 de I0 aprovado (já existe: `tests/test-i0-mutators.sh`).
 
-**Objetivo:** convergir a transação existente da etapa 18 sem perder seus snapshots/traps já corretos.
+**Objetivo:** convergir a transação existente da etapa 19 sem perder seus snapshots/traps já corretos.
 
 ### Tarefas
 
@@ -861,7 +861,7 @@ Mesmas operações para Ubuntu/Pop; fixtures não promovem suporte; malícia ine
 - [ ] **I10.4:** agrupar chamadas para reduzir overhead e repetir, nas mesmas fixtures/ambiente/locale/condição de cache da baseline I0, três execuções do runner hermético completo e três de `menu.sh --status`; comparar amostras e medianas por alvo.
 - [ ] **I10.5:** cumprir orçamento `max(2x, +2 s)` por alvo ou registrar exceção explícita aceita; não introduzir daemon/cache persistente.
 - [ ] **I10.6:** completar CI: suíte não interativa, Python, ShellCheck, validação XML/libvirt por fixtures, guardas/perfis recusados, logs transacionais e versões controladas; nunca mascarar status.
-- [ ] **I10.7:** garantir cobertura completa das etapas 11/14/18/19/20: sucesso, falha pré-mudança e após cada publicação, `INT`/`TERM`/`EXIT`, rollback correto, explicitamente falho e zero-divergente, falha antes/depois de cada passo de restauração quando aplicável, estado final, metadados, idempotência e plataforma recusada.
+- [ ] **I10.7:** garantir cobertura completa das etapas 11/14/19/20/21: sucesso, falha pré-mudança e após cada publicação, `INT`/`TERM`/`EXIT`, rollback correto, explicitamente falho e zero-divergente, falha antes/depois de cada passo de restauração quando aplicável, estado final, metadados, idempotência e plataforma recusada.
 
 ### Gate I10
 
@@ -948,7 +948,7 @@ Tudo automatizável comprovado; host intacto; nenhuma distro promovida; nenhum t
 ### Campanha independente para cada distro
 
 - [ ] **I13.1:** registrar distro, kernel, firmware, bootloader, QEMU, libvirt, OVMF, NVIDIA, hardware, topologia e hashes/versões relevantes.
-- [ ] **I13.2:** executar instalação limpa das etapas 1 a 20.
+- [ ] **I13.2:** executar instalação limpa das etapas 1 a 21.
 - [ ] **I13.3:** executar dois reboots e provar persistência IOMMU/VFIO, módulos e binding de todas as funções da GPU.
 - [ ] **I13.4:** após cada reboot, provar estado persistido e ativo de CPU sets/isolamento, topologia e HugePages de 1 GiB por nó NUMA; validar pinning/NUMA no XML e no processo QEMU; iniciar a VM, comprovar alocação/consumo e, após desligá-la, liberação esperada; testar rollback e registrar evidências.
 - [ ] **I13.5:** instalar Windows real com OVMF, TPM, VirtIO e agent; validar metadata durável e estados independentes.
@@ -1239,9 +1239,9 @@ README, guia, o índice `commands-list.md`, os documentos `commands-list/*.md`, 
 | plataforma/os-release | `platform.py` | I8 |
 | etapa 3 | config/cpu/inventory | I4/I5/I6 |
 | etapa 14 | domain XML + libvirt shell (XML e backend feitos) | I3/I9 |
-| etapa 16 | CPU/domain XML + boot shell | I3/I5 |
-| etapa 18 | network XML/planner + network-effects shell (XML feito) | I3/I7 |
-| etapa 20 | domain XML + transação shell (feito) | I3 |
+| etapa 17 | CPU/domain XML + boot shell | I3/I5 |
+| etapa 19 | network XML/planner + network-effects shell (XML feito) | I3/I7 |
+| etapa 21 | domain XML + transação shell (feito) | I3 |
 | snapshot/backup | domain XML/qemu image (feito) | I3 |
 | UI/sudo/status | módulos shell | I9 |
 | probes/efeitos | probes e módulos de efeito shell | I9 |
@@ -1343,9 +1343,9 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I3 | 2026-08-17 | `8b34a4c` + working tree | `libexec/passthrough_core/{xmlutil,domain_xml,network_xml,qemu_image}.py`, `libexec/passthrough_core/{cli,protocol}.py`, `lib/python-core.sh`, `lib/common.sh`, `etapas/{12,20,21,40,41,50,51,52,60,70}`, `util/{backup-vm,snapshot-vm}.sh`, `tests/python/{fixtures_i3,test_xmlutil,test_domain_xml,test_network_xml,test_qemu_image,test_cli_domain}.py`, `tests/test-i3-domain-transactions.sh`, `tests/{test-i0-mutators,test-audit-safety,test-ubuntu-audit-regressions,test-python-core}.sh`, `tests/lib/{mutator-harness.sh,mutator-dispatch.py,i1-guard-harness.sh}`, `tests/manifests/i3-files.txt`, `tests/run-gate-i1.sh`, este plano | baseline `bash tests/run-gate-i1.sh` = 0 antes da primeira mudança; `python3 -I -S -B tests/python/run_tests.py` = 360 casos; `bash tests/test-i3-domain-transactions.sh` (10 grupos, 8 mutações reprovadas); campanha I0 `full` sem skips com os oráculos das etapas 14 e 20 atualizados para o comportamento transacional; gate canônico completo aprovado (rc=0): manifesto I3 com 77 arquivos nominais, campanha I0 `full` com 40 grupos de cenários, 13 testes da suíte, `bash -n` em 50 arquivos, `compileall` em 2 árvores mais `py_compile` em 22 arquivos sem bytecode residual, whitespace de 77 arquivos untracked | APROVADO | TRIM físico, ciclo real de hooks/GPU e libvirt real seguem `[H]` em I13; `D-NET-*` seguem abertos para I7; a busca por comandos externos no core virou AST mas continua provisória até `tests/check-python-boundary.py` (I10.2); `virsh attach-device --config` continua sendo o caminho de anexo sob `managed='yes'`; ShellCheck continua ausente neste host (a CI versionada o provisiona e o exige); a segunda execução consecutiva do gate global é requisito de I12.1, não de I3 | seção 5 (fase I3, resultado do gate), `scratchpad/gate-i3-A.log` | executar I4 |
 | I4 (tentativa A) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | o envelope I1 barrava `python3`, `mktemp` e `rm` de forma absoluta, incompatível com a carga de configuração pela ponte antes da guarda. Corrigido com wrappers restritos à raiz do harness, log próprio (`I1_SCOPED_LOG`) e parada dura mantida para `config-publish`, que é o efeito real | `scratchpad/gate-i4-A.log` | ensinar o envelope e reexecutar |
 | I4 (tentativa B) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | `tests/test-atualizar-host-validation.sh` (caso `config-ilegivel`) esperava diagnóstico de permissão que o core não emitia. Corrigido com ramo dedicado de `PermissionError` com mensagem acionável, e o teste passou a aceitá-la com comentário `I4:` | `scratchpad/gate-i4-B.log` | separar erro de permissão e reexecutar |
-| I4 (tentativa C) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | a etapa 18 em NAT caiu de 11 para 4 efeitos porque a publicação deixou de ser um `mv` interceptável por `PATH`. Corrigido modelando `config-publish` como efeito sintético do harness, o que restaurou a contagem, a ordem e a injeção de falha/sinal naquela janela | `scratchpad/gate-i4-C.log` | modelar o efeito e reexecutar |
+| I4 (tentativa C) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | a etapa 19 em NAT caiu de 11 para 4 efeitos porque a publicação deixou de ser um `mv` interceptável por `PATH`. Corrigido modelando `config-publish` como efeito sintético do harness, o que restaurou a contagem, a ordem e a injeção de falha/sinal naquela janela | `scratchpad/gate-i4-C.log` | modelar o efeito e reexecutar |
 | I4 (tentativa D) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | `INT nat/1` devolveu 1 em vez de 130: o efeito sintético era registrado por um processo neto, então `os.kill(getppid())` atingia o wrapper intermediário e o shell da etapa nunca recebia o sinal nem disparava o trap. Corrigido com `mutator-effect-exec`, que registra o efeito e substitui o próprio processo pelo interpretador, mantendo-o filho direto do shell da etapa | `scratchpad/gate-i4-D.log` | corrigir a árvore de processos e reexecutar |
-| I4 (tentativa E) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | o oráculo de I0 exigia manifesto exato diferente na segunda execução da etapa 18, porque cada `salvar_conf` reescrevia o arquivo e mexia no mtime. Com a publicação convergente do core, os dois modos passaram a ser no-op exato; o oráculo foi invertido com comentário `I4:` citando o anterior, e a contagem de efeitos foi mantida com asserção nova de que os efeitos restantes são apenas publicações convergentes | `scratchpad/gate-i4-E.log` | inverter o oráculo e reexecutar |
+| I4 (tentativa E) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | o oráculo de I0 exigia manifesto exato diferente na segunda execução da etapa 19, porque cada `salvar_conf` reescrevia o arquivo e mexia no mtime. Com a publicação convergente do core, os dois modos passaram a ser no-op exato; o oráculo foi invertido com comentário `I4:` citando o anterior, e a contagem de efeitos foi mantida com asserção nova de que os efeitos restantes são apenas publicações convergentes | `scratchpad/gate-i4-E.log` | inverter o oráculo e reexecutar |
 | I4 | 2026-08-17 | `8b34a4c` + working tree | `libexec/passthrough_core/config.py`, `libexec/passthrough_core/cli.py`, `lib/python-core.sh`, `lib/common.sh`, `etapas/02-detectar-config.sh`, `passthrough.conf.example`, `tests/python/test_config.py`, `tests/test-i4-config.sh`, `tests/test-i0-characterization.sh`, `tests/test-i0-mutators.sh`, `tests/test-atualizar-host-validation.sh`, `tests/lib/{mutator-harness.sh,mutator-dispatch.py,mutator-safe-command.sh,i1-guard-harness.sh}`, `tests/manifests/i4-files.txt`, `tests/run-gate-i1.sh`, este plano | `python3 -I -S -B tests/python/run_tests.py` = 462 casos; `bash tests/test-i4-config.sh` (10 grupos, 5 mutações reprovadas); campanha I0 `full` sem skips; gate canônico completo aprovado (rc=0) com manifesto I4 de 81 arquivos nominais | APROVADO; revisão semântica APPROVE, bloqueadores 0 | validadores primitivos seguem duplicados em Bash por serem de entrada interativa, com equivalência provada por fixtures; nomes passaram a usar classes ASCII explícitas; `recovery_id` e bundles de recuperação pertencem a I7; `backup_e_resetar_config_etapa02` continua copiando o exemplo versionado com `cp` por desenho | seção 5 (fase I4, resultado do gate), `scratchpad/gate-i4-F.log` | executar I5 |
 | I5 (tentativa 1) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | quatro testes que montam projeto mínimo copiavam só `common.sh`, `platform.sh` e `python-core.sh`, e a fachada passou a carregar `lib/shell/boot.sh` de forma incondicional. Corrigido acrescentando o módulo aos cinco pontos de staging, sem tornar o `source` condicional (mesma decisão de I2) | logs da sessão | corrigir staging e reexecutar |
 | I5 (tentativa 2) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | campanha I0 `full` | **REPROVADO (rc=1)** | `falha etapa 11 before/8 deveria retornar não zero`: `iommu_vfio_transacao` é chamada em lista `||`, o que suspende o `errexit` em todo o corpo da função, e a regeneração do initramfs era o único comando mutante sem verificação explícita. Corrigido com `|| falhar` em cada comando mutante da transação e o motivo registrado em comentário | logs da sessão | verificar explicitamente e reexecutar |
@@ -1438,7 +1438,7 @@ Uma fase só termina quando:
 - [~] REQ-VERIFY-FAILCLOSED não possui falso sucesso conhecido (o caso `atualizar-host --validar` foi corrigido em I1; auditoria completa pendente em I9).
 - [x] REQ-WAIVERS tem efeito real ou foi removido com migração (I4: duas mantidas com efeito testado, duas removidas por migração segura).
 - [ ] REQ-DISK-IDENTITY impede workingDisk igual a HD1 físico.
-- [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (a etapa 15 já recusa VID:PID duplicado em vez de escolher por ordem; serial/porta e revalidação antes do attach são de I6).
+- [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (a etapa 16 já recusa VID:PID duplicado em vez de escolher por ordem; serial/porta e revalidação antes do attach são de I6).
 - [ ] REQ-NET-TX não deixa estado parcial e prova recuperação.
 
 ### Arquitetura híbrida

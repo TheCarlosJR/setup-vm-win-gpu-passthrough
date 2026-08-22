@@ -79,6 +79,7 @@ Duas execuções no mesmo minuto podem usar o mesmo nome.
 
 | Sintoma | Seção |
 |---|---|
+| tela preta com a VM AINDA LIGADA (Windows sem driver NVIDIA) | seção 4, primeiro bloco |
 | monitor não volta ao Linux depois de desligar a VM | seção 4, GPU não retorna ao host |
 | `virsh start` falha ou o hook bloqueia a inicialização | seção 5, VM não inicia |
 | host não inicia, IOMMU/VFIO não aparece ou grupo mudou | seção 6, Boot, IOMMU e VFIO |
@@ -103,11 +104,11 @@ Antes de agir, identifique a proteção disponível para a etapa responsável.
 | etapa 11, IOMMU/VFIO | mutações individuais tentam rollback e verificam pós-condições | não existe `--desfazer` global; boot, `vfio.conf` e initramfs são revertidos separadamente |
 | etapa 12, criação da VM | restaura apenas o selo temporário de `/vm` | não existe rollback global; definição, QCOW2, NVRAM e AppArmor exigem revisão separada |
 | etapa 14, hooks/GPU/HD1 | hooks e XML são transacionais antes do commit | não existe teardown automático pós-commit; use os backups anunciados |
-| etapa 16, pinning/HugePages | backup e rollback semântico do XML | possui `--desfazer`, em ordem inversa e possivelmente em duas execuções |
-| etapa 17, isolamento | valida persistência e efeito no kernel | possui `--desfazer` para as três chaves de isolamento |
-| etapa 18, bridge/NAT | restaura Netplan, rede libvirt, XML e configuração antes do commit; bridge usa `netplan try` | não possui `--desfazer`; restauração pós-commit é manual |
-| etapa 19, Airlock | restaura arquivos, conta/grupo, mount, SSH e UFW dentro da transação | não possui teardown completo; pacotes instalados antes da transação não são removidos |
-| etapa 20, TRIM | faz backup do XML e tenta restaurá-lo se a pós-condição falhar | não possui `--desfazer`; a pasta de backup é independente do XML |
+| etapa 17, pinning/HugePages | backup e rollback semântico do XML | possui `--desfazer`, em ordem inversa e possivelmente em duas execuções |
+| etapa 18, isolamento | valida persistência e efeito no kernel | possui `--desfazer` para as três chaves de isolamento |
+| etapa 19, bridge/NAT | restaura Netplan, rede libvirt, XML e configuração antes do commit; bridge usa `netplan try` | não possui `--desfazer`; restauração pós-commit é manual |
+| etapa 20, Airlock | restaura arquivos, conta/grupo, mount, SSH e UFW dentro da transação | não possui teardown completo; pacotes instalados antes da transação não são removidos |
+| etapa 21, TRIM | faz backup do XML e tenta restaurá-lo se a pós-condição falhar | não possui `--desfazer`; a pasta de backup é independente do XML |
 | snapshot | ponto interno no QCOW2 principal | pode ser revertido pelo utilitário, com perda das mudanças posteriores |
 | backup da VM | cópia offline validada do escopo documentado | não existe utilitário de restauração; o conjunto precisa ser testado isoladamente |
 
@@ -115,6 +116,28 @@ Se uma etapa informar que o rollback não foi comprovado, pare. Não reinicie o
 host nem inicie a VM até comparar o estado atual com o backup indicado.
 
 ## 4. GPU não retorna ao host
+
+### Antes de tudo: tela preta com a VM AINDA LIGADA não é defeito
+
+Com GPU única, todo start da VM derruba o desktop por projeto (hook prepare da
+etapa 14). Enquanto o Windows não tem o driver NVIDIA, o monitor físico fica
+preto mesmo com a VM rodando: a saída primária do convidado é a QXL emulada,
+visível só pelo console SPICE, que morreu junto com a sessão gráfica do host.
+
+Recuperação correta, nesta ordem:
+
+1. De outro dispositivo, por SSH:
+   `virsh --connect qemu:///system shutdown <vm>` (o hook release devolve GPU
+   e desktop sozinho ao final do desligamento);
+2. se o desligamento gracioso não anda, `virsh destroy <vm>` e, se o desktop
+   não voltar, utilitário u6 do menu (recuperar GPU);
+3. NUNCA force o desligamento do host: ele interrompe a restauração no meio e
+   mascara o diagnóstico.
+
+Prevenção: instale o driver NVIDIA pela etapa 15 do menu (instalação
+automática via qemu-guest-agent, sem monitor nem teclado dedicados). O
+andamento da etapa 15 é acompanhável sem vídeo com
+`journalctl -u vm-passthrough-driver-<vm> -f`.
 
 ### Sintomas
 
@@ -368,7 +391,7 @@ conscientemente. O HD1 não entra em snapshot, backup da VM ou rollback do XML.
 
 ### TRIM/discard
 
-A etapa 20 cria backup do XML antes de aplicar `discard='unmap'`. Se a
+A etapa 21 cria backup do XML antes de aplicar `discard='unmap'`. Se a
 pós-condição falhar, tenta restaurar o XML e compara o resultado. Se o script não
 comprovar o rollback, não inicie a VM.
 
@@ -406,7 +429,7 @@ persistente e ativo, bridge virtual, reserva DHCP/MAC e NIC em `source network`.
 
 A rede libvirt `default` é separada da rede NAT dedicada deste projeto.
 
-### Falha durante a etapa 18
+### Falha durante a etapa 19
 
 Antes da primeira mutação, a etapa captura:
 
@@ -469,7 +492,7 @@ aplique Netplan. O modo NAT recusa um uplink ainda anexado a uma bridge.
 
 ### Critério de sucesso
 
-- etapa 18 retorna 0;
+- etapa 19 retorna 0;
 - uplink e rota padrão correspondem ao modo escolhido;
 - XML ativo e persistente da rede não divergem;
 - NIC da VM usa a fonte esperada pelo seu MAC;
@@ -527,7 +550,7 @@ anunciados:
 5. entrada bindfs marcada no `fstab` e montagem;
 6. conta/grupo somente se foram criados exclusivamente para o Airlock;
 7. hook e diretórios gerenciados;
-8. etapa 19 `--verificar` e teste SFTP real.
+8. etapa 20 `--verificar` e teste SFTP real.
 
 A configuração pode aplicar globalmente `PasswordAuthentication no`,
 `KbdInteractiveAuthentication no`, `PermitRootLogin no` e política UFW restrita.
@@ -552,10 +575,10 @@ virsh --connect qemu:///system vcpuinfo <VM_NAME>
 ```
 
 HugePages reservam RAM mesmo com a VM desligada. Isolamento retira CPUs do
-scheduler geral do host mesmo sem a VM. A etapa 16 mantém ao menos um core
-físico completo para o host; a etapa 17 exige a CPU 0 no housekeeping.
+scheduler geral do host mesmo sem a VM. A etapa 17 mantém ao menos um core
+físico completo para o host; a etapa 18 exige a CPU 0 no housekeeping.
 
-### Desfazer a etapa 16
+### Desfazer a etapa 17
 
 Com a VM desligada:
 
@@ -574,7 +597,7 @@ A reversão é intencionalmente inversa:
 
 Não remova apenas uma das três chaves de boot.
 
-### Desfazer a etapa 17
+### Desfazer a etapa 18
 
 ```bash
 bash etapas/53-cpu-isolation.sh --desfazer
@@ -582,8 +605,8 @@ bash etapas/53-cpu-isolation.sh --desfazer
 
 O fluxo remove conjuntamente `isolcpus`, `nohz_full` e `rcu_nocbs`, valida a
 persistência e exige reboot para comprovar o efeito. Se for necessário mudar o
-mapa de pinning enquanto existe isolamento antigo, desfaça primeiro a etapa 17,
-reinicie e só então altere a etapa 16.
+mapa de pinning enquanto existe isolamento antigo, desfaça primeiro a etapa 18,
+reinicie e só então altere a etapa 17.
 
 ### VM não inicia com HugePages
 
@@ -808,7 +831,7 @@ real por um exemplo sem confirmar sua origem.
 - CPU Intel;
 - sessão gráfica anterior à entrega da GPU;
 - reset físico de uma GPU travada;
-- teardown pós-commit completo das etapas 11, 12, 14, 18, 19 e 20;
+- teardown pós-commit completo das etapas 11, 12, 14, 19, 20 e 21;
 - consistência de aplicações e dados abertos dentro do Windows.
 
 Quando o mecanismo necessário não existir, pare e crie um plano específico com

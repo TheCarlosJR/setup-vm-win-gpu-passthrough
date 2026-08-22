@@ -9,7 +9,7 @@
 #   - Disco /vm/Windows11.qcow2 (qcow2 dinâmico, VirtIO, cache=none)
 #   - 2 CD-ROMs: ISO do Windows 11 + virtio-win.iso
 #   - CPU host-passthrough, NIC virtio em NAT 'default' TEMPORÁRIA
-#     (a etapa 18 aplica o modo final bridge ou NAT dedicado)
+#     (a etapa 19 aplica o modo final bridge ou NAT dedicado)
 #   - Vídeo QXL temporário (a GPU real entra na etapa 14)
 #   - Canal virtio org.qemu.guest_agent.0, sem o qual o qemu-guest-agent
 #     instalado no Windows na etapa 13 nunca responde a guest-ping
@@ -175,7 +175,7 @@ verificar() {
         v_falta "Modelo de acesso a /vm pendente: ${GRUPO_VM_ERRO:-identidades indisponíveis}."
     fi
     if validar_config_rede; then
-        v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 18)."
+        v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 19)."
     else
         v_falta "$REDE_CONFIG_ERRO"
     fi
@@ -213,7 +213,7 @@ verificar() {
                 && v_ok "MAC persistido da NIC: $VM_NIC_MAC" \
                 || v_falta "VM_NIC_MAC inválido: $VM_NIC_MAC"
         else
-            v_ok "Configuração antiga: a etapa 18 registrará VM_NIC_MAC antes de alterar a NIC."
+            v_ok "Configuração antiga: a etapa 19 registrará VM_NIC_MAC antes de alterar a NIC."
         fi
     else
         v_falta "VM '$VM_NAME' não definida."
@@ -276,7 +276,7 @@ preparar_iso_para_uso ISO_VIRTIO
 info "As ISOs serão usadas somente como filhos diretos de /vm e se o QEMU já puder lê-las; nenhum chmod, chgrp, ACL ou sudo install será aplicado."
 
 titulo "Etapa 12: Criação da VM '$VM_NAME'"
-info "Modo final selecionado: $REDE_MODO via $INTERFACE_FISICA; a criação usa NAT default somente até a etapa 18."
+info "Modo final selecionado: $REDE_MODO via $INTERFACE_FISICA; a criação usa NAT default somente até a etapa 19."
 
 # Rede de segurança: o conf pode ter sido editado à mão depois da etapa 3.
 RAM_MAX="$(ram_max_vm_mib)"
@@ -378,7 +378,7 @@ revalidar_artefatos_vm
 qemu-img info "$QCOW2_USO" | sed 's/^/  /'
 
 # ----------------------------------------------------------------------------
-# 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 18)
+# 4. Rede default do libvirt ativa (NAT de bootstrap até a etapa 19)
 # ----------------------------------------------------------------------------
 titulo "Etapa 12.4/5 Rede NAT default temporária"
 # LC_ALL=C mantém os rótulos de net-info em inglês: com locale pt_BR a rede

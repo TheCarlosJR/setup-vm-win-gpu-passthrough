@@ -52,12 +52,13 @@ popos-win11-passthrough/
 │   ├── 40-criar-vm.sh               12 VM + NAT default temporária
 │   ├── 41-instalacao-windows.sh     13 instalação e pós-instalação do Windows
 │   ├── 50-hooks-gpu-hd1.sh          14 hooks dinâmicos + HD1
-│   ├── 51-usb-passthrough.sh        15 USB (opcional)
-│   ├── 52-cpu-pinning-hugepages.sh  16 pinning + HugePages               <reboot>
-│   ├── 53-cpu-isolation.sh          17 isolcpus                          <reboot>
-│   ├── 60-rede-bridge.sh            18 rede final: bridge Ethernet ou NAT
-│   ├── 61-airlock.sh                19 SFTP seguro em bridge/NAT
-│   └── 70-trim-discard.sh           20 TRIM/discard
+│   ├── 55-driver-nvidia-vm.sh       15 driver NVIDIA na VM (automático)
+│   ├── 51-usb-passthrough.sh        16 USB (opcional)
+│   ├── 52-cpu-pinning-hugepages.sh  17 pinning + HugePages               <reboot>
+│   ├── 53-cpu-isolation.sh          18 isolcpus                          <reboot>
+│   ├── 60-rede-bridge.sh            19 rede final: bridge Ethernet ou NAT
+│   ├── 61-airlock.sh                20 SFTP seguro em bridge/NAT
+│   └── 70-trim-discard.sh           21 TRIM/discard
 ├── util/                        operação contínua e emergência
 │   ├── listar-grupos-iommu.sh       inspeciona grupos IOMMU
 │   ├── snapshot-vm.sh               cria/lista/reverte/apaga snapshots
@@ -100,7 +101,7 @@ converter para CRLF, corrija com `sed -i 's/\r$//' arquivo.sh` (ou dos2unix).
 4. **Conectividade física disponível**: Ethernet permite `bridge` ou `nat`;
    Wi-Fi station usa obrigatoriamente `nat`. Bridge Wi-Fi normalmente exige
    4addr/WDS dos dois lados e não é suportada. Reserva no roteador só existe no
-   modo bridge; no NAT a etapa 18 cria a reserva DHCP libvirt automaticamente.
+   modo bridge; no NAT a etapa 19 cria a reserva DHCP libvirt automaticamente.
 5. **workingDisk opcional já montado**, se for usado: o operador cria e monta
    externamente o caminho (por exemplo, `/mnt/workingDisk`) antes da etapa 3.
    O projeto apenas verifica o mountpoint; não o cria, monta, formata nem grava
@@ -133,7 +134,7 @@ bash etapas/30-iommu-vfio.sh --verificar  # só verifica (código de saída 0 = 
 bash menu.sh --status                     # checklist completo sem menu
 ```
 
-**Numeração.** A etapa é sempre o número do menu, de 1 a 20, e é assim que a
+**Numeração.** A etapa é sempre o número do menu, de 1 a 21, e é assim que a
 documentação e as mensagens dos scripts se referem a ela. O nome do arquivo em
 `etapas/` mantém uma numeração histórica diferente (a etapa 11 é
 `30-iommu-vfio.sh`); a tabela da seção 4 e a árvore acima fazem a tradução.
@@ -156,14 +157,15 @@ Etapas com vários blocos internos os anunciam como `Etapa N.x`, por exemplo
 | 10 | `21-usuario-grupos` | **logout/login** obrigatório ao final |
 | 11 | `30-iommu-vfio` | `Etapa 11.1/2` (fase A) aplica parâmetros, **reboot**, rodar de novo para a `Etapa 11.2/2` (fase B) validar e registrar o grupo IOMMU |
 | 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install, já com o canal virtio `org.qemu.guest_agent.0`; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
-| 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup, driver NVIDIA no guest em `13.15`, depois da etapa 14) |
+| 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup; o driver NVIDIA do `13.15` tem caminho automático na etapa 15, depois da etapa 14) |
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
-| 15 | `51-usb-passthrough` | opcional |
-| 16 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
-| 17 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
-| 18 | `60-rede-bridge` | aplica o modo escolhido: bridge somente em Ethernet (`netplan try` + reservas no roteador) ou NAT dedicado Ethernet/Wi-Fi (sem Netplan, reserva libvirt automática) |
-| 19 | `61-airlock` | depende da etapa 18; SFTP chroot + ufw na `REDE_BRIDGE` ou `REDE_BRIDGE_LIBVIRT`; chave gerada NA VM e instalada com `--instalar-chave` |
-| 20 | `70-trim-discard` | discard=unmap + pasta de backups |
+| 15 | `55-driver-nvidia-vm` | instala o driver NVIDIA dentro do Windows sem monitor dedicado: baixa o pacote oficial, injeta o `qemu-guest-agent` no QCOW2 se faltar, dispara unidade systemd que liga a VM, instala silenciosamente (`-s -noreboot` via guest-exec), confirma com `nvidia-smi` e desliga |
+| 16 | `51-usb-passthrough` | opcional |
+| 17 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
+| 18 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
+| 19 | `60-rede-bridge` | aplica o modo escolhido: bridge somente em Ethernet (`netplan try` + reservas no roteador) ou NAT dedicado Ethernet/Wi-Fi (sem Netplan, reserva libvirt automática) |
+| 20 | `61-airlock` | depende da etapa 19; SFTP chroot + ufw na `REDE_BRIDGE` ou `REDE_BRIDGE_LIBVIRT`; chave gerada NA VM e instalada com `--instalar-chave` |
+| 21 | `70-trim-discard` | discard=unmap + pasta de backups |
 
 ### 5. Configuração central
 
@@ -193,7 +195,7 @@ VM usa para chegar ao host (IP LAN da bridge ou gateway virtual no NAT).
 A etapa 3 sempre mostra **todas** as interfaces físicas elegíveis e destaca o
 dispositivo retornado por `ip -4 route get 1.1.1.1` (consulta local: nenhum
 pacote é enviado). No NAT, `INTERFACE_FISICA` precisa ser exatamente esse uplink
-IPv4 efetivo: a etapa 3 avisa uma divergência, e a etapa 18 aborta antes de
+IPv4 efetivo: a etapa 3 avisa uma divergência, e a etapa 19 aborta antes de
 qualquer mutação — inclusive do `passthrough.conf` — até o adaptador escolhido
 virar a rota padrão ou o outro ser desconectado/ter sua métrica ajustada. Ao
 trocar o uplink mantendo bridge, a etapa 3 limpa os IPs reservados da LAN
@@ -349,7 +351,7 @@ Verificações chave por fase:
 ### D. Testes funcionais do Airlock
 
 1. Visão de serviço: `mount | grep airlock` (fuse.bindfs) e o teste de escrita
-   que a própria etapa 19 executa.
+   que a própria etapa 20 executa.
 2. `sudo sshd -t` sem saída e `systemctl status ssh` ativo.
 3. Transferência real pelo WinSCP: sessão abre em `/files`; arquivo enviado
    aparece em `AIRLOCK_DIR` (por padrão, `/mnt/workingDisk/airlock` quando
@@ -379,7 +381,7 @@ Consulte **[troubleshooting.md](troubleshooting.md)** antes de desfazer qualquer
 etapa. O documento organiza os procedimentos por sintoma e diferencia:
 
 - rollback automático durante uma transação;
-- `--desfazer` explícito das etapas 16 e 17;
+- `--desfazer` explícito das etapas 17 e 18;
 - restauração manual por um backup exato;
 - snapshot interno do QCOW2;
 - backup offline da VM.

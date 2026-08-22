@@ -31,6 +31,7 @@ ETAPAS=(
     "40-criar-vm.sh|Criar a VM com virt-install|auto||domain.create"
     "41-instalacao-windows.sh|Instalar o Windows na VM|manual||domain.console"
     "50-hooks-gpu-hd1.sh|Hooks da GPU e HD1 físico|auto||hooks.configure"
+    "55-driver-nvidia-vm.sh|Instalar driver NVIDIA na VM (automático)|auto||guest.driver"
     "51-usb-passthrough.sh|USB passthrough|opcional||usb.configure"
     "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|reboot|cpu.tune"
     "53-cpu-isolation.sh|CPU isolation|opcional|reboot|cpu.tune"

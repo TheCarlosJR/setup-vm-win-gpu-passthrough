@@ -35,7 +35,7 @@ Pacotes base atuais:
 ```bash
 sudo apt install -y \
   pciutils usbutils dmidecode curl wget git htop \
-  xmlstarlet rsync acl
+  xmlstarlet rsync acl xorriso guestfs-tools
 ```
 
 Pilha de virtualização atual:

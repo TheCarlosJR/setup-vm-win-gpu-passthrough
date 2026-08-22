@@ -173,7 +173,10 @@ EXAMPLE_HASH_AFTER=$(sha256sum "$ROOT/passthrough.conf.example")
 # deixaram de citar identificadores concretos (regra 8.1: clone limpo nunca
 # recebe IDs de outro host). O hash anterior de I0 era
 # 770ccd4d0dec50d256a8f9bf1dd75ed0e3a4aff98d93f39f91d091598a559d69.
-[[ $EXAMPLE_HASH_BEFORE == 73e9253fa5aeccd951e8257903eeda972950e4edac042d19e9492757efa55175 ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
+# Baseline atualizado pela etapa 15 (driver NVIDIA na VM): o exemplo ganhou a
+# chave NVIDIA_DRIVER_EXE, documentada e vazia por padrão. O hash anterior era
+# 73e9253fa5aeccd951e8257903eeda972950e4edac042d19e9492757efa55175.
+[[ $EXAMPLE_HASH_BEFORE == e26fc804889420ff8f5ec714ca8f82e6232ac1825ec54cadf941470f06c27878 ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
 [[ $ROUNDTRIP_BEFORE != "$(sha256sum "$TMP/batch-before" | cut -d' ' -f1)" ]] || : # mudança anterior foi intencional
 
 # A matriz de I0 deve cobrir cada chave pública individualmente, inclusive as

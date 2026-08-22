@@ -577,7 +577,7 @@ CHAVES_CONF_PERMITIDAS=(
     NVME_DEVICE WORKING_DISK_PATH WORKING_DISK_DISPENSADO
     HD1_BY_ID_PATH HD1_DISPENSADO
     QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS VM_CORES VM_THREADS
-    CPUS_VM CPUS_HOST HUGEPAGES_1G ISO_WINDOWS ISO_VIRTIO
+    CPUS_VM CPUS_HOST HUGEPAGES_1G ISO_WINDOWS ISO_VIRTIO NVIDIA_DRIVER_EXE
     REDE_MODO INTERFACE_FISICA REDE_BRIDGE REDE_LIBVIRT
     REDE_BRIDGE_LIBVIRT REDE_NAT_CIDR VM_NIC_MAC VM_IP_FIXO IP_FIXO_HOST
     TRANSFER_USER AIRLOCK_DIR AIRLOCK_BIND
@@ -2399,7 +2399,7 @@ ram_reserva_host_mib() {
 
 ram_max_vm_mib() {
     # Teto para a VM: total menos a reserva do host, arredondado para baixo em
-    # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 16).
+    # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 17).
     local total="${1:-}"
     [ -n "$total" ] || total="$(ram_total_mib)" || return 1
     plano_memoria_vm "$total" || return 1

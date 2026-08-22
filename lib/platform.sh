@@ -47,9 +47,9 @@ PLATAFORMA_PACOTES_VIRTUALIZACAO=()
 declare -ag PLATAFORMA_CAPABILITIES_CONHECIDAS=(
     inventory.write config.manage host.update nvidia.driver packages.base
     storage.prepare virtualization.manage iommu.configure domain.create
-    domain.console hooks.configure usb.configure cpu.tune network.configure
-    airlock.configure trim.configure backup.create snapshot.manage gpu.recover
-    diagnostic.write
+    domain.console hooks.configure guest.driver usb.configure cpu.tune
+    network.configure airlock.configure trim.configure backup.create
+    snapshot.manage gpu.recover diagnostic.write
 )
 declare -Ag PLATAFORMA_CAPABILITIES=()
 declare -Ag PLATAFORMA_CAPABILITY_REASONS=()

@@ -14,7 +14,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
-PACOTES=(pciutils usbutils dmidecode curl wget git htop xmlstarlet rsync acl)
+PACOTES=(pciutils usbutils dmidecode curl wget git htop xmlstarlet rsync
+    xorriso guestfs-tools acl)
 
 verificar() {
     local p
@@ -38,6 +39,7 @@ info "Pré-requisitos: rede funcional, APT sem transações pendentes e usuário
 info "Alterações: atualiza o índice APT e instala a lista abaixo, além das dependências resolvidas pelo APT."
 info "Pacotes/finalidades: pciutils, usbutils e dmidecode (inventário de hardware)."
 info "  curl e wget (downloads); git (versionamento); htop (monitoramento); xmlstarlet (mantido até I10, sem consumidor operacional); rsync (backup); acl (herança segura em /vm)."
+info "  xorriso (ISO de payload da etapa 15) e guestfs-tools (virt-customize, injeção offline do qemu-guest-agent na etapa 15)."
 info "O backup da VM depende de rsync; as etapas 7/10 dependem de setfacl/getfacl do pacote acl."
 aviso "Risco principal: interrupção ou conflito do APT pode deixar a instalação de pacotes incompleta."
 info "Reboot/retorno: não exige reboot; ao concluir, retorne ao menu e siga para a etapa 7."

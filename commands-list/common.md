@@ -2,7 +2,7 @@
 
 **Estado:** inventário do código atual Ubuntu/Pop!_OS.
 
-Este arquivo cobre `menu.sh`, `lib/*.sh`, `etapas/*.sh`, `util/*.sh` e os hooks escritos pelas etapas 14 e 19. Os arquivos de distro explicam quais itens são específicos de cada provedor.
+Este arquivo cobre `menu.sh`, `lib/*.sh`, `etapas/*.sh`, `util/*.sh` e os hooks escritos pelas etapas 14 e 20, além do runner gerado pela etapa 15. Os arquivos de distro explicam quais itens são específicos de cada provedor.
 
 ## Critério de inclusão
 
@@ -10,13 +10,14 @@ Entram executáveis externos iniciados diretamente, por `sudo`, dentro de `bash 
 
 `true` e `test` entram porque também são lançados como processos por `sudo`.
 
-## União canônica atual: 99 executáveis
+## União canônica atual: 104 executáveis
 
 ```text
 apt
 apt-cache
 apt-get
 awk
+base64
 basename
 bash
 bootctl
@@ -26,6 +27,7 @@ chown
 clear
 cmp
 cp
+curl
 cut
 date
 df
@@ -90,6 +92,7 @@ sshd
 stat
 sudo
 systemctl
+systemd-run
 tail
 tee
 test
@@ -107,11 +110,13 @@ useradd
 userdel
 usermod
 virsh
+virt-customize
 virt-install
 virt-manager
 virt-xml-validate
 wc
 xmlstarlet
+xorriso
 ```
 
 Itens claramente vinculados ao perfil atual — `apt*`, `dpkg`, `ubuntu-drivers`, `kernelstub`, `kvm-ok`, `netplan`, `ufw`, `update-grub` e `update-initramfs` — possuem substitutos ou políticas diferentes nos demais arquivos.
@@ -135,7 +140,7 @@ modprobe, nproc, nvidia-smi, udevadm, uname
 
 ```text
 osinfo-query, python3, qemu-img, qemu-system-x86_64, virsh,
-virt-install, virt-manager, virt-xml-validate, xmlstarlet
+virt-customize, virt-install, virt-manager, virt-xml-validate, xmlstarlet
 ```
 
 O wrapper atual é:
@@ -215,6 +220,7 @@ As funções chamadas de `lib/common.sh` podem acrescentar comandos compartilhad
 | `etapas/51-usb-passthrough.sh` | `awk`, `cat`, `cut`, `grep`, `lsusb`, `mktemp`, `rm`, `sed`, `virsh`, `xmlstarlet` |
 | `etapas/52-cpu-pinning-hugepages.sh` | `awk`, `grep`, `kernelstub`, `lscpu`, `mktemp`, `python3`, `reboot`, `rm`, `update-grub`, `virsh`, `virt-xml-validate` |
 | `etapas/53-cpu-isolation.sh` | `grep`, `gzip`, `kernelstub`, `lscpu`, `mktemp`, `python3`, `reboot`, `rm`, `uname`, `update-grub`, `virsh`, `virt-xml-validate` |
+| `etapas/55-driver-nvidia-vm.sh` (inclui o runner que ela gera) | `awk`, `base64`, `basename`, `bash`, `cat`, `chmod`, `cp`, `curl`, `date`, `grep`, `head`, `install`, `lspci`, `mktemp`, `mv`, `python3`, `rm`, `sed`, `sleep`, `stat`, `sudo`, `systemctl`, `systemd-run`, `tr`, `virt-customize`, `virsh`, `xorriso` |
 | `etapas/60-rede-bridge.sh` | `awk`, `cat`, `cmp`, `cp`, `date`, `grep`, `install`, `ip`, `mkdir`, `mktemp`, `netplan`, `ping`, `rm`, `sed`, `sudo`, `test`, `virsh`, `virt-xml-validate`, `xmlstarlet` |
 | `etapas/61-airlock.sh` | `apt`, `basename`, `cat`, `chmod`, `chown`, `cp`, `date`, `dpkg`, `findmnt`, `getent`, `grep`, `groupadd`, `groupdel`, `id`, `install`, `ip`, `mkdir`, `mktemp`, `mount`, `mountpoint`, `mv`, `rm`, `sed`, `ssh-keygen`, `sshd`, `sudo`, `systemctl`, `tee`, `test`, `touch`, `ufw`, `umount`, `useradd`, `userdel` |
 | `etapas/70-trim-discard.sh` | `cat`, `cp`, `grep`, `lsblk`, `mkdir`, `mktemp`, `python3`, `rm`, `sed`, `sudo`, `virsh`, `virt-xml-validate`, `xmlstarlet` |

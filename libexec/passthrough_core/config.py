@@ -216,6 +216,7 @@ SCHEMA: dict[str, tuple[Callable[[str], bool], str, str]] = {
     "HUGEPAGES_1G": (_ranged(0, 1048576), PUBLIC, "inteiro 0..1048576"),
     "ISO_WINDOWS": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
     "ISO_VIRTIO": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
+    "NVIDIA_DRIVER_EXE": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
     "REDE_MODO": (_enum("bridge", "nat"), PUBLIC, "bridge ou nat"),
     "INTERFACE_FISICA": (
         _pattern(_INTERFACE_NAME),

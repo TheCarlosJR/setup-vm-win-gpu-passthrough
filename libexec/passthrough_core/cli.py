@@ -22,7 +22,7 @@ import stat
 import sys
 from typing import Any, BinaryIO, Callable, Mapping
 
-from . import config, cpu, domain_xml, network_xml, protocol, qemu_image
+from . import config, cpu, domain_xml, network_xml, nvidia_lookup, protocol, qemu_image
 from .errors import (
     EXIT_INTERNAL,
     EXIT_OK,
@@ -49,7 +49,8 @@ USAGE = (
     "  domain-snapshot-internal, domain-hostdev-pci, domain-usb-hostdev,\n"
     "  domain-interfaces, domain-memory-backing, domain-validate-cpu,\n"
     "  domain-compare, domain-fingerprint, domain-metadata, domain-candidate,\n"
-    "  network-inspect, network-overlap, qemu-image-inspect,\n"
+    "  network-inspect, network-overlap, nvidia-product-match,\n"
+    "  nvidia-download-info, qemu-image-inspect,\n"
     "  cpu-topology, cpu-layout, cpu-plan, cpu-memory\n"
     "  passthrough_core_cli.py [--traceback] SUBCOMANDO-DE-CONFIG\n"
     "      --dir-fd=N (--stdin | --input-file=CAMINHO) [--format=json|pairs]\n"
@@ -668,6 +669,8 @@ _PURE_COMMANDS: dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] = {
     "domain-validate-cpu": domain_xml.validate_cpu_pinning,
     "network-inspect": network_xml.inspect_network,
     "network-overlap": network_xml.network_overlap,
+    "nvidia-download-info": nvidia_lookup.download_info,
+    "nvidia-product-match": nvidia_lookup.product_match,
     "config-validate": config.validate_pair,
     "qemu-image-inspect": qemu_image.inspect_image,
 }
