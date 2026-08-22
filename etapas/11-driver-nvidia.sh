@@ -5,6 +5,7 @@
 # Garante o driver proprietário NVIDIA funcionando no Ubuntu/Pop!_OS. Este é
 # o estado de repouso da GPU enquanto a VM está desligada.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

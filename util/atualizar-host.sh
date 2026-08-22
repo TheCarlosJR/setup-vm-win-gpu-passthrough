@@ -7,6 +7,7 @@
 #                                full-upgrade e autoremove
 #   atualizar-host.sh --validar  faz checagens parciais depois do reboot
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 

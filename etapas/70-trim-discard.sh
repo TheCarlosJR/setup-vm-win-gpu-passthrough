@@ -5,6 +5,7 @@
 # Habilita discard='unmap' exclusivamente no disco device='disk' cujo
 # source/@file é exatamente QCOW2_PATH, exigindo cardinalidade um.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

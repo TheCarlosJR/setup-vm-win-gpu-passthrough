@@ -8,6 +8,7 @@
 # Exige a VM comprovadamente desligada, valida o grupo/identidade PCI e recusa
 # drivers inesperados antes de tentar reattach/probe e restaurar o display.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

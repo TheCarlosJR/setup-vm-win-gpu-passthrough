@@ -8,6 +8,7 @@
 #   3. somente num boot posterior, com páginas exatas e livres, define o XML.
 # A reversão segue a ordem segura inversa: XML primeiro, boot depois.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 

@@ -6,6 +6,7 @@
 # externamente pelo operador; esta etapa nunca cria diretórios, monta, formata,
 # copia dados ou altera configuração persistente do host.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

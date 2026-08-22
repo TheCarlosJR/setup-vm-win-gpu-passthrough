@@ -10,6 +10,7 @@
 #   bash menu.sh            menu interativo
 #   bash menu.sh --status   só imprime o checklist e sai
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 carregar_conf
@@ -100,7 +101,7 @@ imprimir_diagnostico_status() {
 imprimir_lista() {
     MENU_STATUS_RC=0
     echo
-    echo "${C_NEGRITO}Windows 11 VM + GPU Passthrough (Ubuntu/Pop!_OS): etapas${C_RESET}"
+    echo "${C_NEGRITO}Windows 11 VM + GPU Passthrough (Ubuntu/Pop!_OS): etapas${C_RESET} ${C_AZUL}menu v${SCRIPT_VERSION} · lib v${LIB_COMMON_VERSION}${C_RESET}"
     echo "Conf: ${CONF_ARQUIVO} $( [ -f "$CONF_ARQUIVO" ] && echo '(presente)' || echo '(AUSENTE: execute a opção 3)')"
     echo "Execute como usuário normal; no modo interativo, sudo será solicitado quando necessário."
     echo "A opção 3 reinicia a configuração central, faz backup das escolhas atuais e pergunta tudo novamente."
@@ -135,7 +136,8 @@ imprimir_lista() {
         else
             simbolo="${C_AMARELO}[  ]${C_RESET}"
         fi
-        printf ' %s %2d) %s' "$simbolo" "$i" "$titulo"
+        printf ' %s %2d) %s %s(v%s)%s' "$simbolo" "$i" "$titulo" \
+            "$C_AZUL" "$(versao_de_script "$PROJETO_DIR/etapas/$arquivo")" "$C_RESET"
         [ "$tipo" = "manual" ] && printf ' %s(manual)%s' "$C_AMARELO" "$C_RESET"
         [ -n "$pos" ] && printf ' %s<%s>%s' "$C_VERMELHO" "$pos" "$C_RESET"
         echo
@@ -149,7 +151,8 @@ imprimir_lista() {
     local u=1
     for entrada in "${UTILS[@]}"; do
         IFS='|' read -r arquivo titulo capability <<< "$entrada"
-        printf '      u%d) %s\n' "$u" "$titulo"
+        printf '      u%d) %s %s(v%s)%s\n' "$u" "$titulo" \
+            "$C_AZUL" "$(versao_de_script "$PROJETO_DIR/util/$arquivo")" "$C_RESET"
         u=$((u+1))
     done
     echo
@@ -174,6 +177,8 @@ limpar_terminal_menu() {
 executar_no_menu() {
     local caminho="$1" capability="${2:-}" rc resposta
     echo
+    log_ativar
+    log_acao menu "executando $(basename -- "$caminho") v$(versao_de_script "$caminho")"
     if [ -n "$capability" ]; then
         if guard_mutation "$capability"; then
             bash "$caminho"
@@ -185,6 +190,7 @@ executar_no_menu() {
         bash "$caminho"
         rc=$?
     fi
+    log_acao menu "$(basename -- "$caminho") terminou com status $rc"
     case "$rc" in
         0) ok "Execução concluída." ;;
         "$CODIGO_VOLTAR_MENU"|130)

@@ -9,6 +9,7 @@
 #   snapshot-vm.sh apagar <nome>
 # Sem argumento, lista os snapshots e imprime este uso.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

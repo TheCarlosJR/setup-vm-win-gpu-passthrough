@@ -19,6 +19,7 @@
 # O resultado fica registrado em /var/lib/vm-passthrough e o andamento pode
 # ser acompanhado sem vídeo com: journalctl -u vm-passthrough-driver-<vm> -f
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

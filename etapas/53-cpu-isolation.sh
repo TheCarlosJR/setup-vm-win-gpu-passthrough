@@ -7,6 +7,7 @@
 # físicos completos. As três chaves são sempre tratadas juntas e por nome.
 # Reversão: --desfazer.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 

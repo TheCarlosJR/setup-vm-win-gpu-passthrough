@@ -24,6 +24,7 @@
 #   02-detectar-config.sh --redetectar  alias compatível do mesmo reinício
 #   02-detectar-config.sh --verificar   confere sem modificar arquivo algum
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 

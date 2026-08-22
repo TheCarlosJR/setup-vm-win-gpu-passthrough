@@ -7,6 +7,7 @@
 #   1. Mostra o checklist exato do manual (o que mudar e onde).
 #   2. Verifica, pelo lado do Linux, tudo o que é verificável por comando.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

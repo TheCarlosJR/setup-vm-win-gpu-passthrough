@@ -2,6 +2,7 @@
 # ============================================================================
 # util/backup-vm.sh - backup offline restaurável do conjunto da VM
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

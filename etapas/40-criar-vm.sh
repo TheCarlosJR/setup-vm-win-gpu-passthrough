@@ -15,6 +15,7 @@
 #     instalado no Windows na etapa 13 nunca responde a guest-ping
 # Também aplica a regra AppArmor para o caminho customizado /vm.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

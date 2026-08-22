@@ -1,4 +1,5 @@
 #!/bin/bash
+SCRIPT_VERSION="1.0.0"
 # ============================================================================
 # util/listar-grupos-iommu.sh - inventário dos grupos IOMMU expostos no sysfs
 # ============================================================================

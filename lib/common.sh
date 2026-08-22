@@ -7,6 +7,7 @@
 #
 # Referências: Guia-QEMU-Passthrough.md e troubleshooting.md.
 # ============================================================================
+LIB_COMMON_VERSION="1.0.0"
 
 # --- Localização do projeto e arquivos centrais -----------------------------
 COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,6 +27,69 @@ KERNELSTUB_ENTRIES_DIR="/boot/efi/loader/entries"
 VFIO_MODULES_ARQUIVO="/etc/modules-load.d/vfio.conf"
 VIRSH="virsh --connect qemu:///system"
 
+# --- Log local de ações (diagnóstico com privacidade) -------------------------
+# Cada ação relevante do HOST fica registrada em um arquivo local, para que
+# falhas intermitentes (ex.: retomada da GPU que deixa a tela preta) possam ser
+# diagnosticadas depois, mesmo quando o terminal já se perdeu. Privacidade por
+# contrato: o log registra somente eventos do lado do host (drivers, hooks,
+# systemd, virsh, XML); NUNCA conteúdo, tela, teclado, rede ou qualquer dado de
+# dentro da VM, e nada sai da máquina.
+#
+# O registro em arquivo só é ativado por log_ativar (chamado por guard_mutation
+# e pelo menu) e somente em execução interativa (TTY) ou com
+# VM_PASSTHROUGH_LOG=1: os --verificar que o menu roda a cada redesenho e os
+# harnesses de teste (que exigem validação sem nenhum efeito de escrita)
+# permanecem fora do log. Falha de log é sempre best-effort e nunca altera o
+# resultado nem a saída de uma etapa.
+LOG_ACOES_ATIVO=0
+LOG_ACOES_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vm-passthrough"
+LOG_ACOES_ARQUIVO="$LOG_ACOES_DIR/acoes.log"
+LOG_ACOES_ROTACAO_BYTES=1048576
+# Somente expansão do bash: no momento do source, o PATH pode estar restrito.
+LOG_SCRIPT_ID="${BASH_SOURCE[-1]:-desconhecido}"
+LOG_SCRIPT_ID="${LOG_SCRIPT_ID##*/}"
+
+_log_acoes_rotacionar() {
+    local tamanho
+    [ -f "$LOG_ACOES_ARQUIVO" ] || return 0
+    tamanho="$(stat -c %s -- "$LOG_ACOES_ARQUIVO" 2>/dev/null)" || return 0
+    [ "$tamanho" -ge "$LOG_ACOES_ROTACAO_BYTES" ] 2>/dev/null || return 0
+    mv -f -- "$LOG_ACOES_ARQUIVO" "$LOG_ACOES_ARQUIVO.1" 2>/dev/null || true
+}
+
+log_ativar() {
+    [ "$LOG_ACOES_ATIVO" -eq 0 ] || return 0
+    # Sem TTY (testes, automação), nada é escrito, a menos que o operador
+    # peça explicitamente com VM_PASSTHROUGH_LOG=1; =0 desliga sempre.
+    [ "${VM_PASSTHROUGH_LOG:-}" != 0 ] || return 0
+    [ "${VM_PASSTHROUGH_LOG:-}" = 1 ] || [ -t 0 ] || return 0
+    mkdir -p -- "$LOG_ACOES_DIR" 2>/dev/null || return 0
+    _log_acoes_rotacionar
+    LOG_ACOES_ATIVO=1
+    log_acao inicio "execução iniciada (pid $$)"
+}
+
+log_acao() {
+    # log_acao NIVEL MENSAGEM: uma linha com timestamp, script e versão.
+    local nivel="$1"
+    shift
+    [ "$LOG_ACOES_ATIVO" -eq 1 ] || return 0
+    printf '%s [%s v%s] [%s] %s\n' \
+        "$(date '+%F %T' 2>/dev/null || echo '?')" \
+        "$LOG_SCRIPT_ID" "${SCRIPT_VERSION:-?}" "$nivel" "$*" \
+        >> "$LOG_ACOES_ARQUIVO" 2>/dev/null || true
+}
+
+versao_de_script() {
+    # Lê a constante SCRIPT_VERSION declarada no topo de um script, sem
+    # executá-lo; imprime "?" quando ausente ou ilegível.
+    local arquivo="$1" linha
+    linha="$(grep -m1 -E '^SCRIPT_VERSION="[0-9]+\.[0-9]+\.[0-9]+"' -- "$arquivo" 2>/dev/null)" \
+        || { echo "?"; return 0; }
+    linha="${linha#SCRIPT_VERSION=\"}"
+    printf '%s\n' "${linha%%\"*}"
+}
+
 # --- Saída colorida ----------------------------------------------------------
 if [ -t 1 ]; then
     C_VERDE=$'\033[0;32m'; C_AMARELO=$'\033[0;33m'; C_VERMELHO=$'\033[0;31m'
@@ -34,12 +98,12 @@ else
     C_VERDE=""; C_AMARELO=""; C_VERMELHO=""; C_AZUL=""; C_NEGRITO=""; C_RESET=""
 fi
 
-info()   { echo "${C_AZUL}[info]${C_RESET} $*"; }
-ok()     { echo "${C_VERDE}[ ok ]${C_RESET} $*"; }
-aviso()  { echo "${C_AMARELO}[aviso]${C_RESET} $*"; }
-erro()   { echo "${C_VERMELHO}[erro]${C_RESET} $*" >&2; }
-titulo() { echo; echo; echo "${C_NEGRITO}==== $* ====${C_RESET}"; echo; }
-falhar() { erro "$*"; exit 1; }
+info()   { echo "${C_AZUL}[info]${C_RESET} $*"; log_acao info "$*"; }
+ok()     { echo "${C_VERDE}[ ok ]${C_RESET} $*"; log_acao ok "$*"; }
+aviso()  { echo "${C_AMARELO}[aviso]${C_RESET} $*"; log_acao aviso "$*"; }
+erro()   { echo "${C_VERMELHO}[erro]${C_RESET} $*" >&2; log_acao erro "$*"; }
+titulo() { echo; echo; echo "${C_NEGRITO}==== $* ====${C_RESET}"; echo; log_acao titulo "$*"; }
+falhar() { erro "$*"; log_acao fatal "execução encerrada com status 1"; exit 1; }
 
 # --- Raiz hermética opcional, exclusiva dos testes ---------------------------
 # A produção nunca aceita redirecionamento de /etc, /vm ou /usr. O modo de
@@ -113,6 +177,10 @@ guard_mutation() {
         _guard_mutation_diagnosticar "Mutação bloqueada: informe exatamente uma capability."
         return 1
     fi
+    # Um fluxo que pede capability é um fluxo de mutação: a partir daqui as
+    # ações do host passam a ser registradas no log local de diagnóstico.
+    log_ativar
+    log_acao guard "capability '$capability' solicitada"
 
     if ! plataforma_carregar; then
         if [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
@@ -142,6 +210,7 @@ guard_mutation() {
             "Mutação '$capability' bloqueada: $PLATAFORMA_ERRO"
         return 1
     fi
+    log_acao guard "capability '$capability' autorizada"
     return 0
 }
 

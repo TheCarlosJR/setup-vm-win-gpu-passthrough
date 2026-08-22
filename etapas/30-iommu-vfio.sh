@@ -19,6 +19,7 @@
 # Fiel ao manual: a GPU NÃO é presa ao vfio-pci no boot (GPU única!);
 # a vinculação é dinâmica, feita pelos hooks da etapa 14.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

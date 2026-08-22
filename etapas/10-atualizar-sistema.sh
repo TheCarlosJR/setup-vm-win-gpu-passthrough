@@ -5,6 +5,7 @@
 # Atualiza pacotes, kernel e firmware ANTES de instalar drivers e a pilha de
 # virtualização. Termina pedindo reboot se algo foi atualizado.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

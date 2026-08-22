@@ -13,6 +13,7 @@
 #     que é justamente onde ele falha).
 # Pedindo a senha uma vez no começo, o relatório sai completo de primeira.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

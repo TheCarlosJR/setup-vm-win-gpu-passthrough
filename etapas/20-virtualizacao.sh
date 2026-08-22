@@ -3,6 +3,7 @@
 # etapas/20-virtualizacao.sh - Etapa 9: KVM, QEMU, Libvirt, Virt-Manager,
 #                              OVMF, SWTPM e VirtIO
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

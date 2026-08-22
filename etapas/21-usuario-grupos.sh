@@ -5,6 +5,7 @@
 # Integra operador e identidade QEMU ao grupo dedicado de /vm e garante o
 # serviço libvirt sondado pelo perfil da plataforma.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

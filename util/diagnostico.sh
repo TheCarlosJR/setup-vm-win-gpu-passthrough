@@ -7,6 +7,7 @@
 # saudável. Falhas de comandos individuais são mantidas no relatório sempre
 # que possível para não interromper a coleta.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

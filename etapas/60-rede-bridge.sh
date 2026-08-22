@@ -11,6 +11,7 @@
 # Em ambos os modos, a NIC é localizada pelo VM_NIC_MAC persistido, nunca por
 # posição no XML, e o MAC não é alterado.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

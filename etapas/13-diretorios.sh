@@ -5,6 +5,7 @@
 # Cria e converge somente /vm com o grupo compartilhado dedicado. A etapa 10
 # acrescenta a identidade QEMU ao mesmo grupo.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

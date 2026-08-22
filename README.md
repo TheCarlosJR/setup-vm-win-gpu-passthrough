@@ -75,6 +75,31 @@ popos-win11-passthrough/
 
 ---
 
+## Versionamento por script e logs de ação
+
+Cada script executável (`menu.sh`, `etapas/*.sh`, `util/*.sh`) declara uma
+constante `SCRIPT_VERSION="X.Y.Z"` no topo, exibida pelo menu ao lado de cada
+item. Regra de incremento a cada mudança no arquivo: **X** quando o fluxo ou o
+contrato do script muda de forma incompatível; **Y** quando ganha funcionalidade
+nova compatível; **Z** para correções e ajustes internos. A `lib/common.sh` usa
+`LIB_COMMON_VERSION` com a mesma regra.
+
+As ações do lado do HOST ficam registradas em dois logs locais, com rotação
+simples em 1 MiB:
+
+- `~/.local/state/vm-passthrough/acoes.log`: etapas e utilitários (ativado em
+  execução interativa ou com `VM_PASSTHROUGH_LOG=1`; `=0` desliga);
+- `/var/log/vm-passthrough/hooks.log`: os hooks do libvirt (prepare/start/
+  release), gravado com sync linha a linha para sobreviver a travamentos e
+  legível pelo grupo `adm` sem sudo. É a linha do tempo para diagnosticar a
+  retomada da GPU (tela preta/sem sinal ao desligar a VM).
+
+Privacidade por contrato: os logs registram somente eventos do host (drivers,
+hooks, systemd, virsh, XML). Nunca registram conteúdo, tela, teclado, rede ou
+qualquer dado de dentro da VM, e nada sai da máquina.
+
+---
+
 ## Como usar
 
 ### 1. Levar os scripts para o Pop!_OS

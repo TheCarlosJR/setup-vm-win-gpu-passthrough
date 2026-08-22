@@ -10,6 +10,7 @@
 # a busca por consumidores ficar vazia no gate arquitetural.
 # acl (modelo de permissões compartilhadas em /vm).
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf

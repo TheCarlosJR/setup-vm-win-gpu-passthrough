@@ -12,6 +12,7 @@
 # (hooks da GPU) estar aplicada, e o caminho recomendado para ele é a etapa 16
 # do menu (instalação automática via qemu-guest-agent, sem monitor dedicado).
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
