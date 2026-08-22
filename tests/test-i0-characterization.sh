@@ -176,7 +176,11 @@ EXAMPLE_HASH_AFTER=$(sha256sum "$ROOT/passthrough.conf.example")
 # Baseline atualizado pela etapa 16 (driver NVIDIA na VM): o exemplo ganhou a
 # chave NVIDIA_DRIVER_EXE, documentada e vazia por padrão. O hash anterior era
 # 73e9253fa5aeccd951e8257903eeda972950e4edac042d19e9492757efa55175.
-[[ $EXAMPLE_HASH_BEFORE == e26fc804889420ff8f5ec714ca8f82e6232ac1825ec54cadf941470f06c27878 ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
+# Baseline atualizado pela etapa 15 (controladora USB): o exemplo ganhou
+# USB_CTRL_PCI_IDS, USB_CTRL_VENDOR_DEVICE_IDS e USB_CTRL_IOMMU_GROUP, vazias
+# por padrão. O hash anterior era
+# e26fc804889420ff8f5ec714ca8f82e6232ac1825ec54cadf941470f06c27878.
+[[ $EXAMPLE_HASH_BEFORE == 16dba90bf8513ddccf9ba59ea2e0c80514aea427514dac605240b66c07bc63ff ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
 [[ $ROUNDTRIP_BEFORE != "$(sha256sum "$TMP/batch-before" | cut -d' ' -f1)" ]] || : # mudança anterior foi intencional
 
 # A matriz de I0 deve cobrir cada chave pública individualmente, inclusive as

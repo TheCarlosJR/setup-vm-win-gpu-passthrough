@@ -10,7 +10,7 @@ Entram executáveis externos iniciados diretamente, por `sudo`, dentro de `bash 
 
 `true` e `test` entram porque também são lançados como processos por `sudo`.
 
-## União canônica atual: 104 executáveis
+## União canônica atual: 105 executáveis
 
 ```text
 apt
@@ -31,6 +31,7 @@ curl
 cut
 date
 df
+diff
 dirname
 dmesg
 dmidecode
@@ -217,7 +218,7 @@ As funções chamadas de `lib/common.sh` podem acrescentar comandos compartilhad
 | `etapas/40-criar-vm.sh` | `chmod`, `df`, `getfacl`, `grep`, `ln`, `mkdir`, `mktemp`, `nohup`, `nproc`, `osinfo-query`, `qemu-img`, `readlink`, `rm`, `sed`, `sh`, `stat`, `sudo`, `systemctl`, `tail`, `tee`, `test`, `touch`, `tr`, `virsh`, `virt-install`, `virt-manager`, `xmlstarlet` |
 | `etapas/41-instalacao-windows.sh` | `awk`, `cat`, `ip`, `nohup`, `systemctl`, `virsh`, `virt-manager` |
 | `etapas/50-hooks-gpu-hd1.sh` | `awk`, `basename`, `bash`, `cat`, `chmod`, `cmp`, `cp`, `date`, `dirname`, `find`, `findmnt`, `flock`, `grep`, `install`, `lsblk`, `mkdir`, `mktemp`, `mv`, `rm`, `stat`, `sudo`, `systemctl`, `test`, `udevadm`, `virsh`, `virt-xml-validate`, `xmlstarlet` |
-| `etapas/51-usb-passthrough.sh` | `awk`, `cat`, `cut`, `grep`, `lsusb`, `mktemp`, `rm`, `sed`, `virsh`, `xmlstarlet` |
+| `etapas/51-usb-passthrough.sh` | `awk`, `basename`, `cat`, `cmp`, `cut`, `diff`, `find`, `grep`, `head`, `lspci`, `lsusb`, `mktemp`, `readlink`, `rm`, `sed`, `sort`, `virsh`, `xmlstarlet` |
 | `etapas/52-cpu-pinning-hugepages.sh` | `awk`, `grep`, `kernelstub`, `lscpu`, `mktemp`, `python3`, `reboot`, `rm`, `update-grub`, `virsh`, `virt-xml-validate` |
 | `etapas/53-cpu-isolation.sh` | `grep`, `gzip`, `kernelstub`, `lscpu`, `mktemp`, `python3`, `reboot`, `rm`, `uname`, `update-grub`, `virsh`, `virt-xml-validate` |
 | `etapas/55-driver-nvidia-vm.sh` (inclui o runner que ela gera) | `awk`, `base64`, `basename`, `bash`, `cat`, `chmod`, `cp`, `curl`, `date`, `grep`, `head`, `install`, `lspci`, `mktemp`, `mv`, `python3`, `rm`, `sed`, `sleep`, `stat`, `sudo`, `systemctl`, `systemd-run`, `tr`, `virt-customize`, `virsh`, `xorriso` |

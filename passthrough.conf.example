@@ -64,8 +64,16 @@ HUGEPAGES_1G=""                 # derivado exatamente de VM_RAM_MB/1024
 ISO_WINDOWS=""                   # caminho local da ISO do Windows 11
 ISO_VIRTIO=""                    # caminho local da virtio-win.iso
 
-# --- Driver NVIDIA da VM (etapa 15) -------------------------------------------
-# Preenchido automaticamente pela etapa 15 após o download oficial (ou pelo
+# --- Controladora USB em passthrough (etapa 15, modo --controladora) ----------
+# Preenchidas pela etapa 15 quando uma controladora USB PCI inteira é passada
+# à VM (hotplug nativo nas portas dela). Listas separadas por vírgula, na
+# mesma ordem; vazias = nenhuma controladora passada.
+USB_CTRL_PCI_IDS=""
+USB_CTRL_VENDOR_DEVICE_IDS=""
+USB_CTRL_IOMMU_GROUP=""
+
+# --- Driver NVIDIA da VM (etapa 16) -------------------------------------------
+# Preenchido automaticamente pela etapa 16 após o download oficial (ou pelo
 # caminho manual informado). Sempre um filho direto de /vm, extensão .exe.
 NVIDIA_DRIVER_EXE=""
 

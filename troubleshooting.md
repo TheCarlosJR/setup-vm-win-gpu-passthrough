@@ -139,6 +139,11 @@ automática via qemu-guest-agent, sem monitor nem teclado dedicados). O
 andamento da etapa 16 é acompanhável sem vídeo com
 `journalctl -u vm-passthrough-driver-<vm> -f`.
 
+Portas USB que somem do host com a VM ligada não são defeito quando a etapa 15
+passou uma controladora inteira (`--controladora`): elas pertencem ao Windows
+enquanto a VM roda e voltam sozinhas quando ela desliga. Para devolver em
+definitivo: `bash etapas/51-usb-passthrough.sh --remover-controladora`.
+
 Variante rápida do sintoma: a tela cai e o desktop VOLTA em poucos segundos
 (parece só um logoff). Isso é o preflight dos hooks recusando o start e
 revertendo; veja `journalctl -u libvirtd -e`. A causa comum é a sessão ainda

@@ -165,6 +165,18 @@ def _ranged(minimum: int, maximum: int) -> Callable[[str], bool]:
     return lambda value: _integer_in_range(value, minimum, maximum)
 
 
+def _csv_of(expression: re.Pattern[str], max_items: int) -> Callable[[str], bool]:
+    """Lista separada por vírgula, sem itens vazios, cada um casando o padrão."""
+
+    def check(value: str) -> bool:
+        parts = value.split(",")
+        if not parts or len(parts) > max_items:
+            return False
+        return all(expression.match(part) is not None for part in parts)
+
+    return check
+
+
 def _dedicated_group(value: str) -> bool:
     return (
         _GROUP_NAME.match(value) is not None
@@ -199,6 +211,21 @@ SCHEMA: dict[str, tuple[Callable[[str], bool], str, str]] = {
         "vendor:device",
     ),
     "IOMMU_GROUP_GPU": (_ranged(0, 65535), LOCAL_IDENTIFIER, "inteiro 0..65535"),
+    "USB_CTRL_PCI_IDS": (
+        _csv_of(_PCI_BDF, 8),
+        LOCAL_IDENTIFIER,
+        "lista de endereços PCI separada por vírgula",
+    ),
+    "USB_CTRL_VENDOR_DEVICE_IDS": (
+        _csv_of(_PCI_VENDOR_DEVICE, 8),
+        LOCAL_IDENTIFIER,
+        "lista vendor:device separada por vírgula",
+    ),
+    "USB_CTRL_IOMMU_GROUP": (
+        _ranged(0, 65535),
+        LOCAL_IDENTIFIER,
+        "inteiro 0..65535",
+    ),
     "DM_SERVICE": (_pattern(_SYSTEMD_UNIT), PUBLIC, "unidade systemd"),
     "NVME_DEVICE": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
     "WORKING_DISK_PATH": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),

@@ -619,8 +619,18 @@ bash etapas/53-cpu-isolation.sh
 Dentro do Windows, o complemento da etapa 18 é ativar interrupções MSI para a
 GPU: `windows/Ativar-MSI-GPU.ps1` (como administrador). Reduz microengasgos.
 
-Nunca passe o único teclado do host na etapa 15: você precisa dele para o
-terminal de emergência.
+A etapa 15 tem dois modos. O modo por dispositivo (padrão) passa um USB
+específico por vendor:product. O modo `--controladora` passa uma controladora
+USB PCI inteira: a descoberta é dinâmica (só é elegível a controladora cujo
+grupo IOMMU contém apenas USB; sem ACS override), um mapeamento interativo
+mostra quais portas físicas pertencem a ela, e o Windows ganha hotplug nativo
+nessas portas: qualquer dispositivo plugado nelas, inclusive adaptadores
+Bluetooth, aparece na VM na hora. As portas somem do host enquanto a VM roda e
+voltam quando ela desliga; `--remover-controladora` desfaz.
+
+Evite deixar o host sem nenhum teclado ao usar a etapa 15: sem um segundo
+teclado em porta do host, a recuperação de emergência é por SSH de outro
+dispositivo (`virsh shutdown`) ou, em último caso, o botão POWER.
 
 ---
 
