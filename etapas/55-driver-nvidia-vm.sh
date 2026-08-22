@@ -8,7 +8,8 @@
 # essa exigência: ela baixa o instalador oficial da NVIDIA, injeta o
 # qemu-guest-agent no QCOW2 quando necessário, e dispara uma unidade systemd
 # transiente que liga a VM, instala o driver em modo silencioso
-# (setup -s -noreboot) via guest-exec, confirma com nvidia-smi e desliga a VM.
+# (setup -s -noreboot) via guest-exec, confirma o driver pelo estado da GPU
+# no convidado (Win32_VideoController) e desliga a VM.
 # O hook release da etapa 14 devolve GPU e desktop sozinho ao final.
 #
 # Uso:
@@ -77,9 +78,9 @@ verificar() {
     case "$RES_STATUS" in
         sucesso)
             if [ "$RES_SMI_OK" = "1" ]; then
-                v_ok "Driver NVIDIA ${RES_DRIVER_VERSAO:-?} instalado e confirmado por nvidia-smi na VM (${RES_TS_FIM:-sem data})."
+                v_ok "Driver NVIDIA ${RES_DRIVER_VERSAO:-?} instalado e confirmado no Windows (${RES_TS_FIM:-sem data})."
             else
-                v_indeterminado "Instalador NVIDIA concluiu (código ${RES_SETUP_EXIT:-?}), mas nvidia-smi não confirmou; verifique dentro do Windows."
+                v_indeterminado "Instalador NVIDIA concluiu (código ${RES_SETUP_EXIT:-?}), mas a GPU não foi confirmada no Windows (possível Código 43; ver troubleshooting.md). Rodar a etapa de novo refaz a verificação."
             fi
             ;;
         falha)
@@ -368,10 +369,12 @@ echo
 titulo "O que vai acontecer agora"
 info "1) A VM liga com a GPU passada; os hooks da etapa 14 derrubam o desktop do host (tela preta)."
 info "2) O runner espera o qemu-guest-agent, instala os guest tools (se faltarem) e roda o instalador NVIDIA em modo silencioso."
-info "3) nvidia-smi confirma o driver (com um reboot de verificação da VM se necessário)."
+info "3) O driver é confirmado pelo estado da GPU no Windows (com um reboot de verificação da VM se necessário)."
 info "4) A VM desliga e o hook release devolve GPU e desktop sozinhos."
 info "Duração típica: 10 a 30 minutos. Acompanhe sem vídeo: journalctl -u $UNIDADE -f"
 aviso "Feche antes os aplicativos pesados que usam a GPU (navegador, IDE, acesso remoto): eles atrasam a liberação dos módulos nvidia na queda da sessão."
+aviso "Dispositivos ou controladora USB já passados na etapa 15 ficam presos à VM durante o processo: sem eles no host, acompanhe e aborte por SSH."
+info "Depois do sucesso, dê entrada à VM com a etapa 15 (teclado/mouse ou controladora), se ainda não deu."
 aviso "NÃO force o desligamento do PC durante o processo; para abortar use, por SSH: virsh --connect qemu:///system destroy $VM_NAME"
 confirmar_digitando INSTALAR "Ao confirmar, o VÍDEO DO HOST SERÁ PERDIDO durante a instalação automática; ele volta sozinho ao final." \
     || cancelar_etapa
@@ -585,15 +588,30 @@ instalar_guest_tools() {
     return 0
 }
 
-verificar_smi() {
-    local pid versao
-    pid="$(guest_exec '{"execute":"guest-exec","arguments":{"path":"C:\\Windows\\System32\\nvidia-smi.exe","capture-output":true}}' 60)" \
+verificar_driver_convidado() {
+    # Fonte primária: Win32_VideoController da GPU NVIDIA. Não depende do
+    # caminho do nvidia-smi (que os drivers DCH não instalam em System32) e
+    # ainda expõe o Código 43 via ConfigManagerErrorCode.
+    local saida codigo resto versao_win nome digitos
+    powershell_exec "Get-CimInstance Win32_VideoController | Where-Object { \$_.PNPDeviceID -like '*VEN_10DE*' } | Select-Object -First 1 | ForEach-Object { '{0};{1};{2}' -f \$_.ConfigManagerErrorCode, \$_.DriverVersion, \$_.Name }" 120 \
         || return 1
-    guest_exec_aguardar "$pid" 120 || return 1
-    [ "${EXEC_EXITCODE:-1}" = "0" ] || return 1
-    grep -q "Driver Version" <<< "$EXEC_SAIDA" || return 1
-    versao="$(grep -o 'Driver Version: [0-9.]*' <<< "$EXEC_SAIDA" | head -n1 | awk '{print $3}')"
-    [ -z "$versao" ] || R_DRIVER_VERSAO="$versao"
+    saida="$(printf '%s' "$EXEC_SAIDA" | tr -d '\r' | sed -n '1p')"
+    [ -n "$saida" ] || { echo "[driver-vm] o Windows não enxerga a GPU NVIDIA em Win32_VideoController." >&2; return 1; }
+    codigo="${saida%%;*}"
+    resto="${saida#*;}"
+    versao_win="${resto%%;*}"
+    nome="${resto#*;}"
+    if [ "$codigo" != "0" ]; then
+        echo "[driver-vm] GPU no convidado com ConfigManagerErrorCode=$codigo (43 = Código 43; ver troubleshooting.md)." >&2
+        return 1
+    fi
+    # DriverVersion do Windows (ex.: 32.0.16.1088) -> versão NVIDIA (610.88):
+    # dígitos do 3º e 4º campos, últimos 5, com ponto antes dos 2 finais.
+    digitos="$(printf '%s' "$versao_win" | awk -F. '{print $3 $4}' | tr -dc 0-9)"
+    if [ "${#digitos}" -ge 5 ]; then
+        R_DRIVER_VERSAO="${digitos: -5:3}.${digitos: -2}"
+    fi
+    echo "[driver-vm] GPU confirmada no convidado: ${nome} (DriverVersion ${versao_win})."
     return 0
 }
 
@@ -657,24 +675,30 @@ else
     done
     [ "$CONCLUIU" -eq 1 ] \
         || falhar_runner "o instalador NVIDIA não terminou em 40 minutos"
-    echo "[driver-vm] processo do instalador terminou; a confirmação fica com o nvidia-smi."
+    echo "[driver-vm] processo do instalador terminou; a confirmação fica com a fase de verificação."
 fi
 
 fase verificacao
-if verificar_smi; then
+if verificar_driver_convidado; then
     R_SMI_OK=1
 else
-    echo "[driver-vm] nvidia-smi ainda não confirmou; reboot de verificação da VM..."
+    echo "[driver-vm] driver ainda não confirmado; reboot de verificação da VM..."
     $VIRSH reboot --mode agent "$VM_NAME" >/dev/null 2>&1 \
         || $VIRSH reboot "$VM_NAME" >/dev/null 2>&1 || true
-    sleep 30
+    # Espera a VM realmente cair antes de esperar voltar: sem isso o ping
+    # responde no boot antigo e a rechecagem roda cedo demais.
+    for ((i=0; i<120; i+=5)); do
+        guest_ping || break
+        sleep 5
+    done
     aguardar_agente 600 \
         || falhar_runner "a VM não voltou do reboot de verificação"
-    if verificar_smi; then
+    sleep 20
+    if verificar_driver_convidado; then
         R_SMI_OK=1
     else
         R_SMI_OK=0
-        echo "[driver-vm] nvidia-smi não confirmou o driver; verifique dentro do Windows." >&2
+        echo "[driver-vm] a verificação no convidado não confirmou o driver; confira dentro do Windows." >&2
     fi
 fi
 publicar || true
@@ -698,7 +722,7 @@ R_STATUS=sucesso
 R_FASE=concluido
 R_TS_FIM="$(date -Is)"
 publicar || true
-echo "[driver-vm] concluído: driver ${R_DRIVER_VERSAO:-?} instalado (nvidia-smi=${R_SMI_OK})."
+echo "[driver-vm] concluído: driver ${R_DRIVER_VERSAO:-?} instalado (confirmado no convidado=${R_SMI_OK})."
 echo "[driver-vm] o hook release da etapa 14 devolve GPU e desktop automaticamente."
 exit 0
 CORPO
