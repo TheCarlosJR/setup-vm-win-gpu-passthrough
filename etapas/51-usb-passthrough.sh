@@ -409,38 +409,89 @@ echo
 aviso "O dispositivo escolhido fica EXCLUSIVO da VM enquanto ela estiver ligada."
 aviso "A seleção usa apenas vendor:product: unidades idênticas têm o mesmo par e qualquer uma pode ser capturada pela VM."
 aviso "Recomendado: um segundo teclado/receptor no host. Sem ele, a recuperação é por SSH ou botão POWER (troubleshooting.md)."
+info "Itens em verde já estão selecionados; escolher um deles de novo REMOVE a seleção."
+
+par_da_linha() {
+    # vendor:product (minúsculo) extraído de uma linha do lsusb; vazio se falhar.
+    grep -oE 'ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}' <<< "$1" | awk '{print tolower($2)}'
+}
+
+usb_hostdev_xml() {
+    # Gera o hostdev USB de vendor $1 / product $2 no arquivo $3.
+    cat > "$3" <<XML
+<hostdev mode='subsystem' type='usb' managed='yes'>
+  <source>
+    <vendor id='0x$1'/>
+    <product id='0x$2'/>
+  </source>
+</hostdev>
+XML
+}
+
+# Pares já anexados ao XML da VM: começam marcados como selecionados.
+declare -A SELECIONADOS=()
+while read -r VEND_XML PROD_XML; do
+    [ -n "$VEND_XML" ] && [ -n "$PROD_XML" ] || continue
+    VEND_XML="${VEND_XML,,}"; PROD_XML="${PROD_XML,,}"
+    SELECIONADOS["${VEND_XML#0x}:${PROD_XML#0x}"]=1
+done < <(listar_usb_xml)
 
 while :; do
     echo
     echo "Dispositivos USB conectados agora (0 = terminar):"
-    ESCOLHA="$(escolher_da_lista 'Dispositivo para passar à VM' sim "${LINHAS[@]}")"
+    EXIBICAO=()
+    for LINHA in "${LINHAS[@]}"; do
+        PAR="$(par_da_linha "$LINHA")"
+        if [ -n "$PAR" ] && [ -n "${SELECIONADOS[$PAR]:-}" ]; then
+            EXIBICAO+=("${C_VERDE}${LINHA}  [selecionado]${C_RESET}")
+        else
+            EXIBICAO+=("$LINHA")
+        fi
+    done
+    ESCOLHA="$(escolher_da_lista 'Dispositivo para alternar a seleção' sim "${EXIBICAO[@]}")"
     [ "$ESCOLHA" -eq 0 ] && break
     LINHA="${LINHAS[$((ESCOLHA-1))]}"
-    PAR="$(grep -oE 'ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}' <<< "$LINHA" | awk '{print $2}')"
+    PAR="$(par_da_linha "$LINHA")"
     if [ -z "$PAR" ]; then
         erro "Não consegui extrair vendor:product de: $LINHA"
         continue
     fi
     VEND="${PAR%%:*}"; PROD="${PAR##*:}"
+
+    if [ -n "${SELECIONADOS[$PAR]:-}" ]; then
+        echo "Já selecionado: $LINHA  (vendor=0x$VEND product=0x$PROD)"
+        confirmar "Remover a seleção (o dispositivo volta ao host no próximo boot da VM)?" || continue
+        # REQ-USB-IDENTITY: um par duplicado no XML não pode ser removido às
+        # cegas; o mesmo critério do modo --remover vale para o toggle.
+        QTD_PAR="$(listar_usb_xml | grep -cix "0x$VEND 0x$PROD" || true)"
+        if [ "${QTD_PAR:-0}" -gt 1 ]; then
+            erro "O XML tem $QTD_PAR hostdevs com o par 0x$VEND:0x$PROD; a remoção seria ambígua. Edite o XML manualmente."
+            continue
+        fi
+        if [ "${QTD_PAR:-0}" -eq 0 ]; then
+            aviso "O par 0x$VEND:0x$PROD já não está no XML (removido por fora); atualizando a lista."
+            unset 'SELECIONADOS[$PAR]'
+            continue
+        fi
+        xml_backup "$VM_NAME"
+        TMP="$(mktemp)"
+        usb_hostdev_xml "$VEND" "$PROD" "$TMP"
+        $VIRSH detach-device "$VM_NAME" "$TMP" --config
+        rm -f "$TMP"
+        unset 'SELECIONADOS[$PAR]'
+        ok "Seleção removida (vale a partir do próximo boot da VM): 0x$VEND:0x$PROD"
+        continue
+    fi
+
     echo "Selecionado: $LINHA  (vendor=0x$VEND product=0x$PROD)"
     confirmar "Confirmar?" || continue
 
-    if listar_usb_xml | grep -q "0x$VEND 0x$PROD"; then
-        info "Este dispositivo já está no XML; pulando."
-        continue
-    fi
     xml_backup "$VM_NAME"
     TMP="$(mktemp)"
-    cat > "$TMP" <<XML
-<hostdev mode='subsystem' type='usb' managed='yes'>
-  <source>
-    <vendor id='0x$VEND'/>
-    <product id='0x$PROD'/>
-  </source>
-</hostdev>
-XML
+    usb_hostdev_xml "$VEND" "$PROD" "$TMP"
     $VIRSH attach-device "$VM_NAME" "$TMP" --config
     rm -f "$TMP"
+    SELECIONADOS["$PAR"]=1
     ok "Anexado (vale a partir do próximo boot da VM): 0x$VEND:0x$PROD"
 done
 
