@@ -24,6 +24,7 @@
 #   51-usb-passthrough.sh --verificar            verifica sem alterar
 # Adição e remoção são persistentes e valem no próximo boot da VM.
 # ============================================================================
+SCRIPT_VERSION="1.0.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
@@ -118,6 +119,42 @@ enumerar_controladoras() {
     done
 }
 
+pci_driver_atual() {
+    local link="/sys/bus/pci/devices/$1/driver"
+    [ -L "$link" ] || { printf 'sem_driver\n'; return 0; }
+    basename -- "$(readlink -f -- "$link")"
+}
+
+# Enumeração dos hostdevs USB do XML pelo core Python (também usada pelo
+# --verificar, por isso definida antes dele).
+USB_XML_PERMITIDAS=(
+    "${CORE_PARES_ENVELOPE[@]}"
+    USB_COUNT AMBIGUOUS_PAIRS
+    'USB_#_VENDOR' 'USB_#_PRODUCT' 'USB_#_BUS' 'USB_#_DEVICE' 'USB_#_MANAGED'
+)
+USB_AMBIGUOS=0
+listar_usb_xml() {
+    # A enumeração vem do core Python: cada hostdev USB precisa ter pelo menos
+    # um discriminador (vendor/product ou endereço físico) e a resposta informa
+    # quantos pares VID:PID estão duplicados. Nada é escolhido por ordem.
+    local xml total indice vendor produto nome_vendor nome_produto
+    local -a payload=()
+    USB_AMBIGUOS=0
+    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 0
+    payload=(xml "$xml")
+    python_core_pares_payload USB_XML_PERMITIDAS USBX_ domain-usb-hostdev payload \
+        2>/dev/null || return 0
+    USB_AMBIGUOS="$USBX_AMBIGUOUS_PAIRS"
+    total="$USBX_USB_COUNT"
+    for (( indice = 0; indice < total; indice++ )); do
+        nome_vendor="USBX_USB_${indice}_VENDOR"
+        nome_produto="USBX_USB_${indice}_PRODUCT"
+        vendor="${!nome_vendor}"
+        produto="${!nome_produto}"
+        printf '%s %s\n' "$vendor" "$produto"
+    done
+}
+
 verificar() {
     # Etapa opcional: [ok] com pelo menos um dispositivo OU uma controladora
     # configurada e convergida. Sem nada, pendente-opcional, para não passar a
@@ -127,11 +164,28 @@ verificar() {
         v_falta "VM '$VM_NAME' não existe."
         v_fim
     fi
-    local qtd tem_algo=0
+    local qtd tem_algo=0 estado_vm=""
+    # Com a VM comprovadamente desligada, o verify também prova o RETORNO ao
+    # host: dispositivos individuais visíveis no lsusb e controladora fora do
+    # vfio-pci. Com a VM ligada, o lado do host fica mudo por definição.
+    estado_vm="$(LC_ALL=C $VIRSH domstate "$VM_NAME" 2>/dev/null || true)"
     qtd="$($VIRSH dumpxml --inactive "$VM_NAME" | grep -c "hostdev mode='subsystem' type='usb'" || true)"
     if [ "${qtd:-0}" -ge 1 ]; then
         v_ok "Dispositivos USB em passthrough no XML: $qtd."
         tem_algo=1
+        if [ "$estado_vm" = "shut off" ] && command -v lsusb >/dev/null 2>&1; then
+            local par listagem par_vendor par_produto
+            listagem="$(lsusb 2>/dev/null || true)"
+            while read -r par_vendor par_produto; do
+                [ -n "$par_vendor" ] && [ -n "$par_produto" ] || continue
+                par="${par_vendor#0x}:${par_produto#0x}"
+                if grep -qiF "ID $par" <<< "$listagem"; then
+                    v_ok "USB $par visível no host com a VM desligada: retornou/permanece no host."
+                else
+                    v_indeterminado "USB $par não aparece no lsusb com a VM desligada: desconectado fisicamente ou não retornou ao host."
+                fi
+            done < <(listar_usb_xml)
+        fi
     fi
     if [ -n "${USB_CTRL_PCI_IDS:-}" ]; then
         tem_algo=1
@@ -168,6 +222,15 @@ verificar() {
                 1) v_falta "Controladora $bdf configurada, mas ausente do XML; rode --controladora de novo." ;;
                 *) v_indeterminado "Não foi possível ler o XML para conferir a controladora $bdf." ;;
             esac
+            if [ "$estado_vm" = "shut off" ]; then
+                local driver
+                driver="$(pci_driver_atual "$bdf")"
+                case "$driver" in
+                    vfio-pci) v_falta "Controladora $bdf continua no vfio-pci com a VM desligada: as portas USB dela NÃO retornaram ao host." ;;
+                    sem_driver) v_falta "Controladora $bdf está sem driver com a VM desligada: as portas USB dela NÃO retornaram ao host." ;;
+                    *) v_ok "Controladora $bdf devolvida ao host (driver $driver) com a VM desligada." ;;
+                esac
+            fi
         done
     fi
     [ "$tem_algo" -eq 1 ] \
@@ -340,34 +403,6 @@ modo_remover_controladora() {
 }
 
 # --- Modo dispositivos individuais ---------------------------------------------
-USB_XML_PERMITIDAS=(
-    "${CORE_PARES_ENVELOPE[@]}"
-    USB_COUNT AMBIGUOUS_PAIRS
-    'USB_#_VENDOR' 'USB_#_PRODUCT' 'USB_#_BUS' 'USB_#_DEVICE' 'USB_#_MANAGED'
-)
-USB_AMBIGUOS=0
-listar_usb_xml() {
-    # A enumeração vem do core Python: cada hostdev USB precisa ter pelo menos
-    # um discriminador (vendor/product ou endereço físico) e a resposta informa
-    # quantos pares VID:PID estão duplicados. Nada é escolhido por ordem.
-    local xml total indice vendor produto nome_vendor nome_produto
-    local -a payload=()
-    USB_AMBIGUOS=0
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 0
-    payload=(xml "$xml")
-    python_core_pares_payload USB_XML_PERMITIDAS USBX_ domain-usb-hostdev payload \
-        2>/dev/null || return 0
-    USB_AMBIGUOS="$USBX_AMBIGUOUS_PAIRS"
-    total="$USBX_USB_COUNT"
-    for (( indice = 0; indice < total; indice++ )); do
-        nome_vendor="USBX_USB_${indice}_VENDOR"
-        nome_produto="USBX_USB_${indice}_PRODUCT"
-        vendor="${!nome_vendor}"
-        produto="${!nome_produto}"
-        printf '%s %s\n' "$vendor" "$produto"
-    done
-}
-
 modo_remover_dispositivos() {
     titulo "Etapa 15: remover USB passthrough da VM $VM_NAME"
     mapfile -t ATUAIS < <(listar_usb_xml | sed '/^$/d')
