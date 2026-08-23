@@ -394,7 +394,25 @@ info "Trânsito: $AIRLOCK_TRANSITO  ->  visão exposta: $AIRLOCK_BIND"
 
 echo
 cat <<ORIENTACAO
-Airlock/SFTP é o canal recomendado; esta execução fará, nesta ordem:
+O que é o Airlock: o canal recomendado de troca de arquivos entre o host e a
+VM Windows. Não é pasta compartilhada de rede: o host passa a oferecer SFTP na
+porta 22 e a VM conecta nele como cliente, autenticando por chave.
+
+São dois caminhos para a MESMA pasta:
+  - trânsito, onde os arquivos realmente ficam: $AIRLOCK_TRANSITO
+  - visão exposta ao SFTP (chroot), a mesma pasta com dono e permissões
+    forçados para o serviço: $AIRLOCK_BIND
+
+Como isso funciona no dia a dia:
+  - no host: grave e leia em $AIRLOCK_TRANSITO como em qualquer pasta sua;
+  - na VM: WinSCP (ou o comando sftp) apontando para o host $IP_FIXO_HOST com
+    o usuário $TRANSFER_USER e a chave privada gerada DENTRO do Windows; a
+    sessão abre direto em /$(basename "$AIRLOCK_BIND") e não alcança o resto
+    do host;
+  - o que um lado grava, o outro vê na hora. É zona de passagem: sem dado
+    permanente, fora do backup e montada noexec (nada roda de dentro dela).
+
+Esta execução fará, nesta ordem:
   1. conta: grupo airlock-transfer e usuário sem shell $TRANSFER_USER;
   2. pastas: trânsito $AIRLOCK_TRANSITO e chroot/visão $AIRLOCK_BIND;
   3. fstab/bindfs: backup do fstab, linha persistente e montagem da visão;
@@ -469,6 +487,52 @@ titulo "Etapa 20.4/7 Servidor SSH"
 sudo mkdir -p /etc/ssh/authorized_keys
 sudo chmod 755 /etc/ssh/authorized_keys
 
+echo
+cat <<SSHEXPLICA
+Este drop-in ($SSHD_DROPIN) é lido pelo sshd
+porque /etc/ssh/sshd_config tem um Include para /etc/ssh/sshd_config.d/*.conf,
+como se o conteúdo estivesse colado no início da configuração. Ele tem DUAS
+partes bem diferentes:
+
+  1) GLOBAL, vale para todos os usuários do SSH:
+     PasswordAuthentication no       login por senha deixa de existir
+     KbdInteractiveAuthentication no fecha o caminho alternativo via PAM
+     PermitRootLogin no              root não entra mais por SSH
+
+  2) SÓ PARA $TRANSFER_USER, no bloco Match User:
+     chroot em $AIRLOCK_BASE (a sessão vê essa pasta como se fosse a raiz),
+     internal-sftp com umask 0007 (sem shell, sem comando arbitrário),
+     chave lida de /etc/ssh/authorized_keys/$TRANSFER_USER, que pertence ao
+     root e fica fora do alcance da própria conta, e nenhum forwarding ou
+     túnel, para a sessão de arquivos não virar ponte de rede.
+
+O RISCO está na parte GLOBAL. Cenário concreto: se hoje você administra este
+host de outro dispositivo com "ssh $USUARIO_LINUX@<IP-do-host-na-LAN>"
+digitando a SENHA, no instante do reload do sshd esse caminho deixa de
+existir. Aquele dispositivo passa a receber "Permission denied (publickey)" e
+não há como consertar remotamente, porque para consertar você precisaria
+justamente do SSH. Por isso: instale a chave pública nesse dispositivo ANTES
+de responder s.
+
+O que NÃO é afetado: o console local. Sentado na frente da máquina, com
+teclado e monitor, o login não passa pelo sshd, então PasswordAuthentication
+não tem efeito nenhum ali. O sudo também continua pedindo sua senha como
+sempre. Recusar aqui também é seguro: a etapa cai no rollback e devolve
+fstab, SSH, chave, UFW, hook e a conta que tenha criado.
+
+Se o TRANSFER_USER for a MESMA conta que você usa para administrar o host,
+lembre que o bloco Match acima passa a valer para ela: SSH com essa conta vira
+SFTP dentro do chroot, sem shell. Uma conta dedicada (ex.: vmtransfer) mantém
+as duas funções separadas.
+
+Antes de recarregar, a configuração passa por sshd -t e por sshd -T do usuário
+Airlock; se qualquer uma reprovar, nada é aplicado e o rollback assume.
+
+Mais adiante, a etapa 20.6 faz o cuidado equivalente no firewall: ela pergunta
+se você acessa este host por SSH de outro dispositivo e, se sim, cria a regra
+"allow from <IP> to any port 22" ANTES de aplicar default deny incoming.
+Tenha o IPv4 desse dispositivo em mãos.
+SSHEXPLICA
 echo
 aviso "Endurecimento GLOBAL do sshd: PasswordAuthentication no / PermitRootLogin no."
 aviso "Se você acessa ESTE host por SSH com SENHA de outro dispositivo, configure"
