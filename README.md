@@ -1,10 +1,8 @@
-# Windows 11 VM com GPU Passthrough no Pop!_OS: scripts de instalação
+# Setup VM Windows com GPU Passthrough
 
-Scripts de instalação e configuração da VM Windows 11 com GPU em passthrough
-(KVM/QEMU/libvirt + VFIO). As etapas que alteram estado persistente descrevem
-seu impacto, pedem confirmação nos passos destrutivos e, quando aplicável,
-oferecem backup, rollback ou um modo `--verificar`. Consulte as limitações de
-cada etapa antes de executá-la em um host de uso diário.
+Scripts de instalação e configuração da VM Windows (Windows 11) com GPU em passthrough (KVM/QEMU/libvirt + VFIO).
+As etapas que alteram estado persistente descrevem seu impacto, pedem confirmação nos passos destrutivos e, quando aplicável, oferecem backup, rollback ou um modo `--verificar`.
+Consulte as limitações de cada etapa antes de executá-la em um host de uso diário.
 
 ### Documentação
 

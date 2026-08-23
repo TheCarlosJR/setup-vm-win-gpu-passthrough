@@ -101,13 +101,30 @@ imprimir_diagnostico_status() {
 imprimir_lista() {
     MENU_STATUS_RC=0
     echo
-    echo "${C_NEGRITO}Windows 11 VM + GPU Passthrough (Ubuntu/Pop!_OS): etapas${C_RESET} ${C_AZUL}menu v${SCRIPT_VERSION} · lib v${LIB_COMMON_VERSION}${C_RESET}"
-    echo "Conf: ${CONF_ARQUIVO} $( [ -f "$CONF_ARQUIVO" ] && echo '(presente)' || echo '(AUSENTE: execute a opção 3)')"
-    echo "Execute como usuário normal; no modo interativo, sudo será solicitado quando necessário."
+    echo "**************************************"
+    echo
+    echo " ${C_NEGRITO}Setup VM Windows com GPU Passthrough${C_RESET}"
+    echo
+    echo "**************************************"
+    echo
+    echo "Scripts de instalação e configuração da VM Windows (Windows 11) com GPU em passthrough (KVM/QEMU/libvirt + VFIO)"
+    echo
+    echo "${C_AMARELO}Recomendação:${C_RESET}"
+    echo "Execute como usuário normal, siga a ordem e, após <reboot>/<logout>, retorne ao menu antes de continuar."
+    echo
+    echo "No modo interativo, sudo será solicitado quando necessário."
     echo "A opção 3 reinicia a configuração central, faz backup das escolhas atuais e pergunta tudo novamente."
     echo "Ela usa automaticamente o último inventário completo da opção 1 e preserva validações ao vivo."
     echo "O menu apenas consulta status e inicia o item escolhido; cada fluxo informa alterações e riscos."
-    echo "Recomendação: siga a ordem e, após <reboot>/<logout>, retorne ao menu antes de continuar."
+    echo
+    echo "${C_AMARELO}Configuração:${C_RESET}"
+    echo "${CONF_ARQUIVO} $( [ -f "$CONF_ARQUIVO" ] && echo ${C_VERDE}'(presente)'${C_RESET} || echo ${C_VERMELHO}'(AUSENTE: execute a opção 3)'${C_RESET})"
+    echo
+    echo ---
+    echo
+    echo "${C_AZUL}menu v${SCRIPT_VERSION} · lib v${LIB_COMMON_VERSION}${C_RESET}"
+    echo
+    echo "**************************************"
     echo
     local i=1 entrada arquivo titulo tipo pos capability st simbolo
     for entrada in "${ETAPAS[@]}"; do
