@@ -30,7 +30,62 @@ Caminhos de arquivo (`etapas/40-criar-vm.sh`, `tests/i0/...`) continuam literais
 
 ## 0. Instrução principal ao executor
 
-Este arquivo é a fonte de verdade para a implementação. Trabalhe de **I6 até I13 na ordem** (I0 a I5 já estão concluídas) e só então inicie I14 conforme a ordem interna registrada naquela fase. Não presuma que um item está ausente só porque aparece como tarefa: primeiro detecte e caracterize o estado atual, classifique-o como `AUSENTE`, `PARCIAL` ou `CONFORME`, preserve o que já estiver correto e aplique somente o delta necessário. O marco `BASE_QUALIFICADA` encerra I0 a I13; o marco `EXPANSAO_TOTAL_QUALIFICADA` só existe após todos os providers mutáveis de I14 e o gate diagnóstico Silverblue estarem concluídos.
+Este arquivo é a fonte de verdade para a implementação.
+
+### 0.0 Comece por aqui
+
+Se você é o executor e acabou de abrir este documento, faça exatamente isto, nesta ordem:
+
+1. Rode `git status --short` e preserve qualquer alteração do usuário.
+2. Leia a seção **1.5** (auditoria de 23/08/2026). Ela diz o que foi verificado **no código**, não nos checkboxes.
+3. Execute a tarefa **I6.0** da seção 1.5.4. Ela é um bloqueador: o Gate I5 não vale mais como baseline porque 27 commits alteraram a árvore depois dele.
+4. Só então abra a fase ativa no **mapa de execução** abaixo e trabalhe **uma fase por vez**.
+
+Nunca presuma que um item está ausente só porque aparece como tarefa. Primeiro detecte e caracterize o estado atual, classifique-o como `AUSENTE`, `PARCIAL` ou `CONFORME`, preserve o que já estiver correto e aplique somente o delta necessário. A seção 1.5 é o exemplo normativo de como fazer essa caracterização.
+
+### 0.0.1 Mapa de execução
+
+A ordem de execução **não é a ordem numérica**. Siga a coluna "ordem".
+
+**Trilha base** (termina no marco `BASE_QUALIFICADA`):
+
+| Ordem | Fase | Título | Estado | Entrega principal |
+|---|---|---|---|---|
+| 1 | I0 | Baseline, oráculo e caracterização | `CONCLUÍDA` 2026-08-14 | `tests/i0/*` |
+| 2 | I1 | Envelope de segurança imediato | `CONCLUÍDA` 2026-08-16 | guarda + CI |
+| 3 | I2 | Fundação do core Python | `CONCLUÍDA` 2026-08-17 | `libexec/passthrough_core/{__init__,errors,protocol,cli}.py`, `lib/python-core.sh` |
+| 4 | I3 | XML/JSON, libvirt e transações de domínio | `CONCLUÍDA` 2026-08-17 | `domain_xml.py`, `network_xml.py`, `qemu_image.py`, `xmlutil.py` |
+| 5 | I4 | Configuração, ISO legada, dispensas e dados locais | `CONCLUÍDA` 2026-08-17 | `config.py` |
+| 6 | I5 | CPU, RAM, HugePages, isolamento e IOMMU/VFIO | `CONCLUÍDA` 2026-08-17 | `cpu.py`, `lib/shell/boot.sh` |
+| 7 | **I6.0** | **Revalidação do baseline pós-commits** | **BLOQUEADOR ABERTO** | linha nova na seção 12 |
+| 8 | I6 | Inventário e identidades físicas | `ABERTA` | `inventory.py`, REQ-DISK-IDENTITY, REQ-USB-IDENTITY |
+| 9 | I7 | Rede transacional e planner backend-neutral | `ABERTA` | `network.py`, REQ-NET-TX |
+| 10 | I8 | Plataforma, capabilities e **eixos de hardware** | `ABERTA` | `platform.py`, eixos distro/CPU/GPU |
+| 11 | I9 | Modularização Bash e requisitos P1 restantes | `ABERTA` | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY |
+| 12 | **I9B** | **Internacionalização (en, pt-BR, es)** | **ABERTA (nova)** | `lang/*.msg`, `lib/shell/i18n.sh`, `messages.py` |
+| 13 | I10 | Convergência, remoção de legado e CI completa | `ABERTA` | gates estáticos, `check-python-boundary.py` |
+| 14 | I11 | Documentação, specs e recuperação | `ABERTA` | docs + `check-plan-traceability.py` |
+| 15 | I12 | Validação hermética final | `ABERTA` | release candidate de código |
+| 16 | I13 | Qualificação operacional Ubuntu e Pop!_OS | `[H]` | campanha em hardware real |
+| 17 | marco | **`BASE_QUALIFICADA`** | pendente | encerra a trilha base |
+
+**Trilha de expansão** (só começa após `BASE_QUALIFICADA`; **um alvo por vez**; o usuário aprova a ordem entre os oito):
+
+| Alvo | Título | Custo relativo | Exige hardware que o usuário não tem |
+|---|---|---|---|
+| I14B | Eixo CPU Intel | **baixo** | sim, host Intel |
+| I14C | Eixo GPU AMD | alto | sim, GPU Radeon |
+| I14.1 | Provider Debian | médio | sim, instalação Debian |
+| I14.2 | Provider Fedora Workstation | **alto** (SELinux + BLS) | sim |
+| I14.3 | Provider Arch Linux | médio | sim |
+| I14.4 | Provider CachyOS | médio (herda Arch) | sim |
+| I14.5 | Provider openSUSE Tumbleweed | alto | sim |
+| I14.6 | Fedora Silverblue (diagnóstico) | **baixo** | não, é só recusa |
+| marco | **`EXPANSAO_TOTAL_QUALIFICADA`** | pendente | encerra o plano |
+
+**Por que I9B fica entre I9 e I10, e não no fim:** I9 quebra `lib/common.sh` em módulos. Extrair strings antes disso duplicaria o churn no mesmo arquivo; extrair depois de I10/I11 obrigaria a reescrever documentação e gates recém-criados. Entre I9 e I10 os módulos já estão estáveis, o gate de paridade de catálogo nasce junto com os demais gates estáticos de I10, e I11 documenta um sistema que já existe. Além disso, todo provider de I14 nasce traduzível em vez de nascer em português e ser retrofitado.
+
+**Por que os eixos de hardware ficam na trilha de expansão:** o mesmo critério já aplicado às distros. O **modelo** dos eixos entra em I8 (tarefas I8.7 e I8.8), de forma que a camada de plataforma seja vendor-genérica desde o início e nenhum provider precise reabrir essa fronteira. A **implementação e a qualificação** de cada eixo exigem hardware real e ficam em I14B/I14C, capability-gated e recusadas por padrão até prova. Isso não é adiamento: é a mesma regra que impede promover uma distro por fixture.
 
 O objetivo não é apenas criar um núcleo Python. O resultado final deve simultaneamente:
 
@@ -141,8 +196,48 @@ O prompt de `USUARIO_LINUX` (1/8) mantém o aborto fatal deliberadamente: a vali
 
 ### 1.4 Divergências de documentação já conhecidas (corrigir em I11, não antes)
 
-- `README.md` e `Guia-QEMU-Passthrough.md` ainda dizem "Pop!_OS" no título/ambiente de referência, enquanto `lib/platform.sh` e o menu suportam Ubuntu e Pop!_OS com perfis distintos (Ubuntu: `grub` + `ubuntu-drivers` + `qemu-system-x86`; Pop: `kernelstub`/`grub` + `system76` + `qemu-kvm`).
+- **Corrigido pela metade em 20/08/2026, ver seção 1.5:** `README.md:1` já **não** diz "Pop!_OS" no título; `Guia-QEMU-Passthrough.md:1` **ainda diz**. Resta somente o guia. Contexto original: enquanto `lib/platform.sh` e o menu suportam Ubuntu e Pop!_OS com perfis distintos (Ubuntu: `grub` + `ubuntu-drivers` + `qemu-system-x86`; Pop: `kernelstub`/`grub` + `system76` + `qemu-kvm`).
 - `tests/i0/baseline.md` referencia o nome do plano antigo; é evidência histórica e não deve ser reescrita.
+
+### 1.5 Auditoria de 23 de agosto de 2026 (verificada contra o código, não contra os checkboxes)
+
+Esta auditoria **não releu os checkboxes**: ela testou cada afirmação do plano contra o código realmente presente na working tree. O motivo é concreto: entre 18/08/2026 e 23/08/2026 entraram **27 commits** que tocaram praticamente toda a árvore (as 21 etapas, `lib/common.sh`, `lib/platform.sh`, `lib/shell/boot.sh`, seis módulos do core Python, `menu.sh`, quatro suítes de teste e os quatro documentos) **sem nenhuma linha correspondente no registro da seção 12**. Era necessário decidir, por evidência, se o plano havia se tornado ficção.
+
+**Conclusão: o plano não estava defasado no essencial.** I0 a I5 seguem concluídas, I6 a I14 seguem abertas, e o próprio código carrega marcadores de adiamento escritos pelo executor das fases anteriores. Foram encontrados apenas **dois pontos defasados**, ambos no sentido "já feito, mas ainda marcado como aberto", corrigidos nesta revisão.
+
+**Estado das caixas em 23/08/2026:** 110 em `[ ]`, 14 em `[~]`, 38 em `[x]`, 0 em `[H]`.
+
+#### 1.5.1 Pendências confirmadas no código
+
+Cada linha abaixo foi verificada lendo o arquivo, não o checkbox.
+
+| Item do plano | Evidência no código em 23/08/2026 | Veredito |
+|---|---|---|
+| I6.6 / REQ-USB-IDENTITY | `etapas/51-usb-passthrough.sh:411` contém o comentário literal "O fluxo completo (serial/porta) é de I6". A busca por `serial`, `busnum`, `devpath` e `ID_SERIAL` no arquivo inteiro devolve **apenas esse comentário**. `libexec/passthrough_core/domain_xml.py:582` repete o marcador. | Pendente de fato, inclusive após os commits de USB de 22/08 |
+| I9.8 / REQ-AIRLOCK-VERIFY | `etapas/61-airlock.sh` é o arquivo mais recente do projeto (23/08). Sua função `verificar()` (linhas 230 a 296) testa **presença textual**: `[ -f "$SSHD_DROPIN" ] && v_ok "Drop-in do sshd presente."`. O `sshd -T -C` existe apenas no caminho de aplicação, em `etapas/61-airlock.sh:565`, nunca dentro de `verificar()`. Não há checagem de UID/GID, grupos, lock, shell/chroot, fingerprint, modos nem IPv6. | Pendente de fato, e é exatamente o falso sucesso que o requisito proíbe |
+| I9.7 / REQ-WINDOWS-STATE | A metadata `vmpass:windows-install` existe em `libexec/passthrough_core/domain_xml.py`, mas a busca por consumidores em `etapas/`, `lib/` e `util/` devolve **zero**. A etapa 13 continua decidindo só por agente: `etapas/41-instalacao-windows.sh:26` e `:294` usam `guest-ping`. | Core pronto, fluxo não ligado, exatamente como o requisito descreve |
+| I6.5 / REQ-DISK-IDENTITY | Existe base real: `etapas/50-hooks-gpu-hd1.sh:422`, `:647` e `:924` resolvem `ID_WWN_WITH_EXTENSION`/`ID_WWN`/`ID_SERIAL`, e `lib/common.sh:2393` exige `/dev/disk/by-id/*`. Falta o cruzamento exigido pelo aceite: `lib/common.sh:2430` compara HD1 apenas com o disco do sistema, não com o workingDisk. | Parcial; o alias físico entre os dois papéis ainda não é recusado |
+| I7 / REQ-NET-TX | Existem fingerprints de XML de domínio (`lib/common.sh:2705`), de topologia de CPU (`lib/common.sh:2947`) e de armazenamento (`lib/common.sh:923`). A busca por `recovery_id` em `etapas/`, `lib/` e `libexec/` devolve **zero**. | Pendente de fato |
+| I8 | `libexec/passthrough_core/platform.py` **não existe**. O resolver continua sendo `lib/platform.sh`, em Bash. | Pendente de fato |
+| I9.4 | `lib/common.sh` tem **3199 linhas** e continua contendo algoritmos de domínio. | Pendente de fato |
+| I10.2 | `tests/check-python-boundary.py` **não existe**. | Pendente de fato |
+| I11.10 | `tests/check-plan-traceability.py` **não existe**, e o Gate I11 depende dele. | Pendente de fato |
+| Manifestos de fase | `tests/manifests/` contém apenas `i0-files.txt` a `i5-files.txt`. | Coerente com I6 não iniciada |
+
+#### 1.5.2 Prova de que o plano foi mantido, não abandonado
+
+A tabela de numeração da seção "Numeração das etapas" mapeia as 21 etapas e **bate 100%** com o array `ETAPAS` de `menu.sh`, incluindo a etapa 16 (`55-driver-nvidia-vm.sh`), criada em 22/08. Um documento abandonado não teria acompanhado essa renumeração. As afirmações do plano são confiáveis; o que faltou foi o registro da seção 12.
+
+#### 1.5.3 Correções aplicadas nesta revisão
+
+1. **REQ-IOMMU-TX:** o checklist mestre da seção 16 mantinha `[ ]`, enquanto o catálogo da seção 4 já registrava "Estado: código `CONFORME` ... **Aprovado em I5**". A caixa não foi atualizada no fechamento de I5. Corrigida para `[~]`, com a parte de hardware (dois reboots reais) explicitamente atribuída a I13.
+2. **Seção 1.4:** `README.md:1` já não diz "Pop!_OS" no título, corrigido pelos commits de documentação de 20/08. `Guia-QEMU-Passthrough.md:1` ainda diz. A divergência foi reduzida ao guia.
+
+#### 1.5.4 Bloqueador de entrada em I6 (obrigatório, não opcional)
+
+Os 27 commits de 18/08 a 23/08 alteraram etapas cobertas pelos oráculos de I0 e pelas suítes de regressão **sem reexecutar nem registrar o gate canônico**. Portanto o resultado do Gate I5 **não vale mais como baseline**. Antes da primeira linha de I6:
+
+- [ ] **I6.0:** reexecutar `bash tests/run-gate-i1.sh` sobre o estado atual, registrar o resultado (aprovado ou reprovado) numa linha nova da seção 12 e tratar qualquer falha como preexistente, jamais apagando-a. Se o gate reprovar, corrigir a regressão **antes** de iniciar I6.1. Reexecutar também a campanha I0 `full`, porque `etapas/50-hooks-gpu-hd1.sh`, `etapas/51-usb-passthrough.sh`, `etapas/60-rede-bridge.sh` e `etapas/61-airlock.sh` mudaram depois de os oráculos terem sido escritos.
 
 ---
 
@@ -213,6 +308,15 @@ tests/
 ├── python/
 │   └── run_tests.py             # bootstrap isolado e discovery unittest
 └── fixtures/core/
+
+lang/                            # catálogos de mensagem (I9B), dado inerte, nunca código
+├── en.msg                       # fallback obrigatório e completo
+├── pt-BR.msg
+└── es.msg
+lib/shell/i18n.sh                # carregamento e função msg(); sem source/eval de dados
+libexec/passthrough_core/messages.py   # validação/comparação de catálogos (cálculo puro)
+tests/check-i18n-catalogs.py     # gate de paridade, placeholders e literais remanescentes
+tests/i18n-pendentes.txt         # allowlist decrescente da migração; termina vazia
 ```
 
 ### 2.4 Direção de dependências
@@ -347,6 +451,54 @@ Todo campo do schema de configuração, XML, inventário, rede, storage, protoco
 
 ---
 
+### 3.10 Mensagens, idioma e fronteira humano/máquina
+
+Este contrato nasce em I9B e vale para todas as fases seguintes, inclusive I14.
+
+**Separação obrigatória.** Existem dois canais de texto e eles nunca se misturam:
+
+| Canal | Exemplos | Traduzível |
+|---|---|---|
+| **Humano** | `info`, `ok`, `aviso`, `erro`, `titulo`, `falhar`, `v_ok`, `v_falta`, `v_erro`, prompts `read -r -p`, textos de menu | **sim** |
+| **Máquina** | payload JSON do protocolo v1/NUL, códigos de saída 0-3, categorias de `log_acao` (`info`/`ok`/`aviso`/`erro`/`titulo`/`fatal`), chaves de `passthrough.conf`, conteúdo XML/libvirt, nomes de capability, `recovery_id`, marcadores comparados por teste | **não, nunca** |
+
+Traduzir qualquer item do canal de máquina é regressão de contrato e reprova o gate. A tradução muda **apenas** a superfície apresentada ao operador; ela **não pode** alterar código de saída, ordem de operações, decisão de fluxo, nome de arquivo, conteúdo publicado no host nem qualquer byte lido por outro programa.
+
+**Catálogo é dado, nunca código.** É proibido `source`, `eval`, `declare -a` a partir do arquivo, substituição de comando e expansão aritmética sobre qualquer valor do catálogo. O carregamento usa leitura linha a linha com `while IFS= read -r` e separação pelo primeiro `=` por expansão de parâmetro. Um catálogo hostil deve ser **inerte**: `$(...)`, crase, `${...}`, `;`, newline escapado, `%n` e sequência `%` desconhecida não podem executar nada nem quebrar o processo.
+
+**Format string controlada.** O valor do catálogo é usado como formato de `printf`, portanto o conjunto de especificadores é fechado por allowlist validada **no carregamento e no gate**: somente `%%` e `%N$s` (posicional, `N` de 1 a 9). Qualquer outro `%` reprova o catálogo inteiro e força o fallback para `en`. Posicional é obrigatório porque a ordem dos termos muda entre idiomas; `%s` simples não sobrevive a reordenação.
+
+**Precedência de seleção**, determinística e nesta ordem:
+
+1. `PASSTHROUGH_LANG` (variável de ambiente explícita);
+2. chave `IDIOMA` de `passthrough.conf`;
+3. `LC_ALL`, depois `LC_MESSAGES`, depois `LANG` do ambiente, normalizados (`pt_BR.UTF-8` vira `pt-BR`, `es_ES@euro` vira `es`);
+4. `en`.
+
+**Fallback por chave, não por catálogo.** Chave ausente no idioma ativo cai para `en`. Ausente também em `en`, a saída é o próprio nome da chave entre marcadores (`!!CHAVE!!`), o evento é registrado como aviso e, sob `PASSTHROUGH_I18N_STRICT=1` (usado pela CI), vira erro. Nunca abortar a execução por mensagem faltando: um problema de tradução não pode derrubar um mutador no meio de uma transação.
+
+**Idiomas normativos:** `en` (fallback obrigatório, catálogo completo por definição), `pt-BR` (idioma atual do projeto) e `es`. Acrescentar idioma é acrescentar um arquivo e passar o gate; nenhum código muda.
+
+### 3.11 Eixos de suporte independentes
+
+Suporte **não** é um booleano por distribuição. São três eixos ortogonais, cada um com seu próprio estado, e a combinação só é utilizável quando os três permitem:
+
+| Eixo | Valores | Resolvido por | Estado em 23/08/2026 |
+|---|---|---|---|
+| **Distribuição** | `supported`, `diagnostic-only`, `family-unverified`, `blocked` | `lib/platform.sh`, depois `platform.py` (I8) | `ubuntu` e `pop` suportados; `debian`, `arch`, `cachyos`, `fedora`, `opensuse-tumbleweed` em diagnóstico; Silverblue imutável |
+| **Fabricante de CPU** | `supported`, `blocked` | `plataforma_validar_cpu_amd` em `lib/platform.sh` | somente `AuthenticAMD`; `GenuineIntel` explicitamente bloqueado |
+| **Fabricante de GPU** | `supported`, `blocked` | hoje **implícito**, espalhado por 12 arquivos | somente NVIDIA, sem eixo formal |
+
+**Regras invariantes:**
+
+1. A combinação efetiva é a **interseção** dos três eixos. Um eixo em `blocked` recusa a operação inteira, com diagnóstico nomeando **qual** eixo recusou e por quê. Nunca uma recusa genérica.
+2. Nenhum eixo é promovido por inferência. Presença de comando, fixture aprovada, parser que reconhece o valor ou migração arquitetural **não** promovem nada. Só campanha real na combinação exata promove, conforme a seção 11.
+3. Toda capability é resolvida **depois** dos três eixos. Capability habilitada por perfil de distro mas incompatível com o fabricante de CPU ou de GPU presente deve ser rebaixada, com motivo próprio.
+4. O eixo de GPU precisa ser **formalizado** em I8 (tarefa I8.8), porque hoje ele existe apenas como suposição espalhada. Enquanto não existir, `gpu.driver` e `guest.driver` são NVIDIA-only por acidente, não por decisão auditável.
+5. Um eixo novo (Intel, Radeon) entra no código **recusado por padrão** e permanece recusado até a campanha de I14B/I14C. Código presente e não qualificado é o estado correto e esperado; não é dívida escondida, é a mesma regra já aplicada a `debian` e `arch`.
+
+---
+
 ## 4. Catálogo completo de requisitos funcionais e de segurança
 
 Cada requisito abaixo é bloqueante. A fase indicada organiza a implementação, mas o aceite só ocorre quando todos os testes e gates associados passarem. O estado caracterizado em I0 consta de `tests/i0/deltas.tsv` e `tests/i0/oracle.tsv` e é evidência histórica: naquele momento REQ-CONF-ISO, REQ-WINDOWS-STATE e REQ-USB-IDENTITY estavam `AUSENTE` e os demais `PARCIAL`.
@@ -354,6 +506,49 @@ Cada requisito abaixo é bloqueante. A fase indicada organiza a implementação,
 Estado depois de I3: REQ-TRIM-TX, REQ-LIBVIRT-BACKEND e REQ-HOOKS-TX estão `CONFORME` no código e nos testes herméticos, com a prova em hardware real ainda pendente em I13 (blocos/alocação de TRIM, ciclo real de GPU/display e libvirt real). A parte de REQ-GUARD e de REQ-VERIFY-FAILCLOSED fechada em I1 permanece. Os demais seguem `PARCIAL` ou `AUSENTE` nas fases indicadas.
 
 Estado depois de I5: REQ-IOMMU-TX passou a `CONFORME` no código e nos testes herméticos; a campanha de dois reboots reais continua em I13. Os demais requisitos não mudaram de estado nesta fase.
+
+### 4.0 Travas estruturais que todo alvo novo esbarra (leia antes de I14, I14B ou I14C)
+
+Sete revisões adversariais independentes, feitas em 23/08/2026 sobre propostas para Debian, Fedora, Arch, CachyOS, openSUSE, CPU Intel e GPU AMD, convergiram nos **mesmos** pontos de falha. Não são detalhes de distribuição: são invariantes do código atual que qualquer alvo novo encontra no primeiro dia. Toda tarefa de I14, I14B e I14C que ignorar esta seção será reprovada no gate.
+
+**T1. Existem dois portões antes das capabilities, e eles recusam primeiro.**
+`plataforma_carregar` (`lib/platform.sh`, bloco final) faz `return 1` quando `PLATAFORMA_SUPPORT_LEVEL != supported`, e `guard_mutation` (`lib/common.sh:196`) recusa pelo mesmo critério **antes** de consultar `platform_require_capability` (`lib/common.sh:203`). Portanto **habilitar capabilities não habilita nada** enquanto o nível de suporte não for `supported`. Qualquer desenho de "suporte parcial", "provider não qualificado com três capabilities ligadas" ou "diagnóstico mutável" precisa alterar esses dois portões explicitamente, com teste próprio, ou é ficção.
+
+**T2. `guard_mutation` é o ponto único de autorização, e a ordem dele é contrato.**
+A ordem atual é: plataforma mutável, depois `platform_require_capability`, depois `plataforma_validar_cpu_amd` (`lib/common.sh:208`). O eixo de GPU **não existe** nessa cadeia. Acrescentar eixo é acrescentar guarda nesse ponto, nunca espalhar validação pelas etapas.
+
+**T3. A GPU não é presa ao `vfio-pci` no boot, e isso é deliberado.**
+`etapas/30-iommu-vfio.sh:19` registra: "Fiel ao manual: a GPU NÃO é presa ao vfio-pci no boot (GPU única!); a vinculação é dinâmica, feita pelos hooks da etapa 14". Propostas de `force_drivers+=" vfio_pci "`, `rd.driver.pre=vfio-pci`, `MODULES=(vfio_pci)` no mkinitcpio ou blacklist do driver de vídeo **violam o desenho** e deixariam um host de GPU única sem console. `add_drivers` para disponibilizar o módulo é aceitável; `force_drivers` e binding precoce não são. Esta trava vale igualmente para Debian, Fedora, Arch, CachyOS e openSUSE.
+
+**T4. `BOOTLOADER` é enum público fechado, no Bash e no core Python.**
+`etapas/02-detectar-config.sh` reconcilia, escolhe, salva e revalida o valor com `case` fechado em `grub` e `kernelstub` (blocos em torno das linhas 207 a 300), e o schema do core valida o mesmo conjunto. Acrescentar `systemd-boot`, `limine` ou `grub2-suse` **muda contrato público de configuração** e exige migração conforme a seção 3.3, não uma linha nova no `case`.
+
+**T5. `etapas/02-detectar-config.sh` é onde a configuração nasce.**
+Toda proposta que descreve apenas o momento de aplicar, sem tocar a detecção, a pergunta ao operador, a reconciliação e a persistência, está incompleta. Vale para bootloader, backend de rede, identidade QEMU, eixo de CPU e eixo de GPU.
+
+**T6. Caminho e nomes do OVMF variam por distribuição e não são atributo de perfil hoje.**
+Valores confirmados: Debian `/usr/share/OVMF/OVMF_CODE_4M.fd` (não existe `OVMF_CODE.fd` sem sufixo; par de Secure Boot é `OVMF_CODE_4M.ms.fd` com `OVMF_VARS_4M.ms.fd`); Fedora `/usr/share/edk2/ovmf/`; openSUSE `/usr/share/qemu/ovmf-x86_64-*.bin` (não existe `/usr/share/OVMF`); Arch usa o pacote `edk2-ovmf`, e o pacote `ovmf` **não existe**. Preferir a autosseleção do libvirt pelos descritores JSON em `/usr/share/qemu/firmware` a qualquer caminho fixo, e tornar diretório e padrão de nome atributos de perfil com pós-condição por existência real do arquivo escolhido.
+
+**T7. Nome de unidade systemd não é universal.**
+`etapas/61-airlock.sh` usa `ssh` em `systemctl reload ssh` e `systemctl enable --now ssh` (linhas 115, 567 e 568). No openSUSE a unidade é `sshd.service` e **não existe** alias `ssh.service`, então a etapa 20 falharia logo depois de publicar o endurecimento global do sshd, e o próprio rollback falharia pelo mesmo motivo, no pior instante possível. Nome de unidade vira atributo de perfil, usado no apply **e** no rollback.
+
+**T8. Códigos de saída informativos abortam sob `set -euo pipefail`.**
+O `zypper` devolve 100 (update disponível), 101 (segurança), 102 (reboot necessário), 103 (restart do gerenciador), 104 (capability não encontrada), 105 (sinal), 106 (repos pulados) e 107 (script `%post` falhou). Sob `set -euo pipefail` esses valores derrubam o script sem tratamento. Todo provider precisa declarar quais códigos do seu gerenciador são informativos e tratá-los explicitamente.
+
+**T9. `/usr/etc` existe no openSUSE.**
+O Tumbleweed entrega defaults de pacote em `/usr/etc` e reserva `/etc` para override. Verificador que conclui "arquivo ausente" olhando só `/etc` produz falso negativo. Regra para o perfil openSUSE: ler override em `/etc`, cair para `/usr/etc` **apenas como leitura**, escrever **sempre** em `/etc`.
+
+**T10. `apt` está espalhado por sete arquivos.**
+Ocorrências medidas: `etapas/10-atualizar-sistema.sh` (7), `etapas/11-driver-nvidia.sh` (6), `lib/common.sh` (5), `etapas/20-virtualizacao.sh` (5), `etapas/61-airlock.sh` (3), `etapas/12-pacotes-base.sh` (3), `etapas/00-inventario.sh` (2). Qualquer asserção do tipo "nenhuma etapa cita apt" só pode ser ligada depois do cutover completo dessa superfície, incluindo `lib/common.sh` e os ramos `ubuntu-drivers`/`system76` da etapa 5.
+
+**T11. A lista de pacotes da etapa 6 é literal.**
+`etapas/12-pacotes-base.sh` mantém `PACOTES` como literal no topo do arquivo. Tornar `PLATAFORMA_PACOTES_VIRTUALIZACAO` atributo de perfil não resolve a etapa 6; ela precisa de tarefa própria.
+
+**T12. Todo arquivo novo precisa entrar em manifesto de fase.**
+`tests/check-phase-manifest.sh` reprova arquivo untracked fora do manifesto e exige que cada caminho nominal exista. Catálogos de idioma, fixtures de distro, configurações de dracut e módulos novos entram no manifesto da fase que os cria, sem exceção por diretório.
+
+**T13. Rótulo `VERIFICADO` exige fonte nominal e data.**
+Em rolling release (Arch, CachyOS, openSUSE Tumbleweed) um índice de repositório consultado hoje pode não valer amanhã. `VERIFICADO` só se aplica ao que foi lido em artefato oficial citado nominalmente (filelist de pacote, página de manual, arquivo do repositório, fonte do kernel) com a data do acesso. Todo o resto é `ESTIMADO`, e o plano prefere `ESTIMADO` honesto a `VERIFICADO` otimista.
 
 ### REQ-GUARD: guarda global de plataforma e capabilities (P0)
 
@@ -534,6 +729,82 @@ Validar candidato e snapshots; armar traps antes da primeira alteração; public
 **Testes:** sucesso; falha pós-publicação e durante cada ativação; `INT`, `TERM` e `EXIT` em toda janela mutante, sem falso commit; rollback correto e zero-divergente; falha explícita antes e depois de cada ação do próprio rollback, incluindo restauração de arquivo, estado ativo, autostart, XML e consumidores; consumidores; rede homônima não gerenciada; colisões; idempotência; conteúdo/metadados/mtimes e estado final. Rollback não comprovado deve gerar erro grave, preservar evidências e emitir instrução de recuperação manual.
 
 **Aceite:** nenhuma rede parcial e nenhuma recuperação é considerada bem-sucedida sem prova.
+
+---
+
+### REQ-I18N: idioma por catálogo de texto sem alterar comportamento (P1)
+
+**Fases:** contrato na seção 3.10; implementação I9B; gate estático em I10; documentação em I11. Estado: `AUSENTE`.
+
+Toda superfície humana passa por um catálogo de texto (`lang/en.msg`, `lang/pt-BR.msg`, `lang/es.msg`) carregado como **dado inerte**, jamais como código. `en` é o fallback obrigatório e completo. A seleção segue a precedência `PASSTHROUGH_LANG`, chave `IDIOMA` de `passthrough.conf`, `LC_ALL`/`LC_MESSAGES`/`LANG` normalizados, `en`. O fallback é por chave, não por catálogo, e mensagem ausente nunca aborta execução nem altera código de saída.
+
+O canal de máquina definido na seção 3.10 permanece **intraduzível**: payload JSON do protocolo, códigos de saída, categorias de `log_acao`, chaves de configuração, XML/libvirt, nomes de capability, `recovery_id` e marcadores comparados por teste. Format string é fechada por allowlist (`%%` e `%N$s`, posicional obrigatório). Hooks libvirt permanecem Bash puro sem catálogo, fixos em `en`.
+
+**Testes:** paridade de chaves e de placeholders entre os três catálogos; chave órfã; literal humano remanescente fora de `msg`; catálogo hostil com `$(...)`, crase, `${...}`, `%n`, `%` inválido, BOM, CRLF, chave duplicada, linha truncada e encoding inválido, todos inertes; chave ausente no idioma ativo e nos dois; `PASSTHROUGH_I18N_STRICT=1`; suíte completa reexecutada em `pt-BR`, `en` e `es` comparando código de saída, canal de máquina e efeitos; prompts respondidos em cada idioma produzindo a mesma decisão; hook executado sem o repositório presente.
+
+**Aceite:** trocar o idioma não muda nenhum código de saída, nenhuma decisão de fluxo, nenhum byte publicado no host e nenhum byte do canal de máquina; e nenhum catálogo, por mais hostil que seja, executa código.
+
+### REQ-CPU-VENDOR: eixo de fabricante de CPU e topologia híbrida (P1)
+
+**Fases:** modelo em I8 (tarefas I8.7 e I8.9); implementação e qualificação em I14B. Estado: `AUSENTE`.
+
+O bloqueio de Intel vive hoje em **um único ponto**, `lib/platform.sh:723`, chamado por `guard_mutation` em `lib/common.sh:208`. A troca de fabricante em si é pequena e mecânica, porque `boot_params_chaves` (`lib/shell/boot.sh:700`) deriva as chaves de kernel do próprio texto de parâmetros: trocar `amd_iommu=on iommu=pt` por `intel_iommu=on iommu=pt` faz `kernel_param_del`, o rollback e a prova de ausência acompanharem o fabricante **sem nenhuma edição adicional**. Toda a maquinaria transacional de IOMMU/VFIO é neutra quanto ao fabricante.
+
+O custo real é **topologia híbrida**, e ali existe um **defeito latente comprovado**, não uma preocupação teórica:
+
+- `_threads_per_core` (`libexec/passthrough_core/cpu.py:251`) devolve 0 quando os cores têm contagens de siblings diferentes, e `_plan_pinning` recusa em `cpu.py:467`. Em Alder Lake **com SMT ligado** (P-core com 2 siblings, E-core com 1) essa recusa acontece, e é **proteção acidental**.
+- **Com SMT desligado na BIOS**, ajuste comum em passthrough, todos os cores passam a ter 1 sibling, `_threads_per_core` devolve 1, a topologia parece homogênea e o laço puramente ordinal de `cpu.py:519` entrega ao host os primeiros `socket:core` e à VM os últimos, que na enumeração usual do Linux em híbrida são exatamente os **E-cores**.
+- O plano resultante passa em `validate_layout`, passa na prova de siblings inteiros e passa na validação do XML, produzindo uma VM Windows 11 inteiramente pinada em E-cores, em silêncio.
+- Com `host-passthrough` o CPUID exposto ao convidado é o do core onde a vCPU iniciou, então misturar tipos é problema de **correção**, não só de desempenho.
+
+Exigências: modelar o fabricante como fato tipado, com evidência capturada pelo Bash (nunca lida pelo Python); publicar os parâmetros de IOMMU **pelo perfil**, deixando `IOMMU_PARAMS_PADRAO` vazio no `source` e recusando todo consumidor quando vazio, de forma que seja estruturalmente impossível aplicar parâmetro AMD em host Intel por omissão; detectar tipo de core pela fonte autoritativa `/sys/devices/cpu_core/cpus` e `/sys/devices/cpu_atom/cpus` (`/sys/devices/system/cpu/types` **não existe** e `X86_FEATURE_HYBRID_CPU` **não tem string** em `/proc/cpuinfo`, portanto não é detectável por `grep` em flags); acrescentar um `types_fingerprint` separado, **vazio em host uniforme** para não mover o valor já validado em AMD, porque `canonical_text` (`cpu.py:174`) resume apenas `socket:core` e duas topologias híbridas com tipos trocados produziriam o mesmo hash; recusar plano que misture tipos e recusar host híbrido cuja evidência de tipo seja indeterminada.
+
+Nunca introduzir `intel_iommu=igfx_off` por padrão: ele contorna o DMAR e **reduz isolamento**. Só entra com decisão explícita, registrada e justificada.
+
+**Testes:** AMD uniforme continua idêntico, provado por reexecução integral da suíte e da campanha I0 `full`; híbrida com SMT ligado; **híbrida com SMT desligado**, que é a janela silenciosa e o teste mais importante; evidência de tipo ausente, parcial e conflitante; `IOMMU_PARAMS_PADRAO` vazio recusado em todo consumidor; chave `intel_iommu` derivada, removida e restaurada pelo rollback; RMRR presente produzindo diagnóstico próprio e não erro genérico; `igfx_off` recusado por padrão.
+
+**Aceite:** nenhum plano de pinning mistura tipos de core; host híbrido sem evidência de tipo é recusado, nunca planejado; o host AMD já qualificado não muda de comportamento em nenhum byte; e é estruturalmente impossível aplicar o conjunto de parâmetros de um fabricante em host do outro.
+
+### REQ-GPU-VENDOR: eixo de fabricante de GPU e prova de retorno (P1)
+
+**Fases:** modelo em I8 (tarefa I8.8); implementação e qualificação em I14C. Estado: `AUSENTE`.
+
+Hoje NVIDIA é propriedade **implícita**, espalhada por 12 arquivos (`etapas/55-driver-nvidia-vm.sh` 60 ocorrências, `etapas/11-driver-nvidia.sh` 28, `util/atualizar-host.sh` 23, `etapas/50-hooks-gpu-hd1.sh` 21), sem eixo formal. `PLATAFORMA_CAPABILITIES_CONHECIDAS` tem **21** capabilities, três delas ligadas a GPU (`nvidia.driver`, `guest.driver`, `gpu.recover`).
+
+Diferenças estruturais que o eixo precisa absorver:
+
+- **Driver de host:** NVIDIA é proprietário fora da árvore, com quatro módulos (`nvidia`, `nvidia_modeset`, `nvidia_drm`, `nvidia_uvm`) que precisam sair na ordem inversa da dependência, razão de existir do laço de `etapas/50-hooks-gpu-hd1.sh:511`. `amdgpu` é **in-tree e módulo único**, e **não deve** ser descarregado: em APU o mesmo `amdgpu` dirige iGPU e dGPU, e o `modprobe -r` derrubaria a saída de vídeo do host. O caminho AMD é parar o display manager, esperar os nós DRM e deixar o unbind por dispositivo com `managed='yes'`.
+- **Instalação no host:** NVIDIA usa `ubuntu-drivers` ou `system76-driver-nvidia` (`etapas/11-driver-nvidia.sh:62-90`); AMD **não tem nada a instalar**. `amdgpu-pro` fica fora de escopo por não ser qualificável.
+- **Prova de saúde após retomada:** NVIDIA usa `nvidia-smi` (`etapas/50-hooks-gpu-hd1.sh:813`, `util/recuperar-gpu.sh:196`). AMD **não tem equivalente instalado por padrão** (`rocm-smi` e `amdgpu_top` reintroduziriam dependência), então a prova passa a ser por sysfs: driver `amdgpu` ligado ao BDF, nó DRM em `/sys/bus/pci/devices/BDF/drm/card*` e `power_state` igual a `D0`.
+- **O reset bug é bloqueio real, não ressalva.** Reset falho deixa o dispositivo preso em D3hot (`Unable to change power state from D3hot to D0, device inaccessible`), o rebind de `amdgpu` falha, o host pode perder a saída de vídeo e reiniciar sozinho, e em alguns casos só o power cycle físico recupera. Como este projeto tem requisito explícito de **retorno da GPU ao host**, a classificação de reset precisa vir **antes** da promessa, e é obtida por leitura de `/sys/bus/pci/devices/BDF/reset_method` (kernel 5.15 ou superior), que lista em ordem os métodos suportados entre `flr`, `pm`, `bus` e `device_specific`. O projeto apenas **lê** esse arquivo; escrever nele é mutação de host e exigiria regra udev persistente, fora desta frente.
+
+| Família AMD | Estado do reset | Confiança |
+|---|---|---|
+| Polaris 10/11/12 (RX 460 a RX 590) | quebrado; `vendor-reset` cobre via `device_specific`, com relatos de RX 580 falhando mesmo assim | VERIFICADO |
+| Vega 10 (Vega 56/64, Frontier) | quebrado; coberto por `vendor-reset` | VERIFICADO |
+| Vega 20 (Radeon VII, MI100) | quebrado; coberto por `vendor-reset` | VERIFICADO |
+| Navi 10/12/14 (RX 5300 a RX 5700 XT) | quebrado; `vendor-reset` sinaliza o SMU para entrar e sair de BACO no lugar do FLR | VERIFICADO |
+| Navi 21/22 (RX 6000) | em geral funcional no próprio `amdgpu`; `vendor-reset` não cobre nem é necessário; há relatos isolados de RX 6700 XT que não resetam | VERIFICADO |
+| Navi 3x (RX 7000) e RDNA4 (RX 9000) | presumido funcional; classificar como `desconhecido` até a prova de duplo ciclo | ESTIMADO |
+| iGPU de APU (Raven, Renoir, Cezanne, Rembrandt) | **bloqueado por este projeto**: compartilha grupo IOMMU com o complexo raiz, não tem ROM própria e o mesmo `amdgpu` dirige o console do host | ESTIMADO |
+
+**Testes:** NVIDIA continua idêntico em todos os caminhos, provado por reexecução integral; vendor AMD detectado; vendor desconhecido; duas GPUs de fabricantes diferentes; função de áudio sem função de vídeo no mesmo grupo; `reset_method` ausente, contendo `device_specific`, contendo apenas `bus` e ilegível; classificação `desconhecido` recusando a promessa de retorno; ciclo duplo de entrega e retomada; APU recusada antes de qualquer efeito.
+
+**Aceite:** o projeto **nunca** promete retorno da GPU ao host sem ter classificado o reset daquele dispositivo, e o fabricante NVIDIA já qualificado não muda de comportamento em nenhum byte.
+
+### REQ-BOOT-POSCONDICAO: aplicador de bootloader precisa provar que regenerou (P1)
+
+**Fases:** correção em I9 (auditoria de REQ-VERIFY-FAILCLOSED); reforço por perfil em I14. Estado: `PARCIAL`, **defeito ativo no código atual**.
+
+Encontrado na auditoria de 23/08/2026: o rollback do GRUB em `lib/shell/boot.sh:581-585` restaura a fonte, executa `sudo update-grub` e então valida com `sudo cmp -s -- "$backup" "$arq"`, que compara **a fonte com o backup da fonte**. O `grub.cfg` regenerado **nunca é verificado**. Se o aplicador devolver zero sem produzir efeito, a mensagem `"Rollback da fonte GRUB e regeneração do grub.cfg concluídos"` é emitida com o `grub.cfg` ainda contendo os parâmetros novos. Isso é falso sucesso, exatamente o que REQ-VERIFY-FAILCLOSED proíbe.
+
+O risco cresce nos alvos de I14: no openSUSE, `update-bootloader --config` sai com zero sem regenerar nada quando `LOADER_TYPE` está vazio, `none` ou desconhecido, porque `run_script` do `pbl` registra `skipped` e devolve `err=0` sem aviso. Enquanto `update-grub` ausente falha ruidosamente, o `pbl` **silencia**.
+
+Exigência: em **ambos** os caminhos, apply e rollback, capturar a identidade do artefato gerado (conteúdo e mtime) antes e depois; exigir mudança quando a fonte mudou e igualdade semântica quando a fonte foi restaurada; e tratar "aplicador devolveu zero sem efeito" como **erro grave** com instrução de recuperação, nunca como sucesso.
+
+**Testes:** aplicador que devolve zero sem efeito; aplicador ausente; fonte restaurada com artefato divergente; artefato idêntico após restauração; falha antes e depois da regeneração; sinal durante a janela.
+
+**Aceite:** nenhuma mensagem de conclusão de boot é emitida sem prova de que o artefato efetivamente consumido pelo firmware foi regenerado a partir da fonte corrente.
 
 ---
 
@@ -824,6 +1095,9 @@ Transação fail-closed; snapshot+restore por operação; conflito em mudança c
 - [ ] **I8.5:** executar as 11 fixtures de plataforma com a implementação real, determinismo e invariância; comparação diferencial temporária deve ser removida.
 - [ ] **I8.6:** integrar a resolução autoritativa do backend libvirt ao contrato de I3.
 
+- [ ] **I8.7:** formalizar o **eixo de fabricante de CPU** conforme a seção 3.11. `platform.py` modela o vendor como fato tipado com origem da evidência (snapshot de `/proc/cpuinfo` e `lscpu` capturado pelo Bash, nunca lido pelo Python), e a fachada expõe `PLATAFORMA_CPU_VENDOR_SUPORTADO` com motivo próprio. Preservar exatamente o bloqueio atual de Intel: esta fase **modela** o eixo, não habilita fabricante nenhum. Fixtures cobrem `AuthenticAMD`, `GenuineIntel`, vendor ausente, vendor desconhecido e evidência conflitante entre `/proc/cpuinfo` e `lscpu`.
+- [ ] **I8.8:** formalizar o **eixo de fabricante de GPU**, que hoje não existe como eixo e está espalhado por 12 arquivos. Modelar vendor PCI (`0x10de` NVIDIA, `0x1002` AMD, `0x8086` Intel) como fato tipado a partir de snapshot capturado pelo Bash, expor `PLATAFORMA_GPU_VENDOR_SUPORTADO` com motivo próprio, e renomear a capability `nvidia.driver` para `gpu.driver` mantendo `nvidia.driver` como alias aceito durante o cutover, removido em I10. Preservar exatamente o comportamento NVIDIA atual: esta fase **modela** o eixo, não habilita fabricante nenhum. Fixtures cobrem NVIDIA, AMD, Intel, GPU ausente, duas GPUs de fabricantes diferentes e função de áudio sem função de vídeo no mesmo grupo IOMMU.
+
 ### Gate I8
 
 Mesmas operações para Ubuntu/Pop; fixtures não promovem suporte; malícia inerte; detecção sem mutação; desconhecido/imutável fail-closed.
@@ -848,6 +1122,43 @@ Mesmas operações para Ubuntu/Pop; fixtures não promovem suporte; malícia ine
 ### Gate I9
 
 `common.sh` não é monolítico; sem ciclos/efeitos no source; mesmos entrypoints e superfície de privilégio; hooks independentes; estados Windows corretos; Airlock semântico; nenhum verifier com falso sucesso; revisão semântica sem bloqueador.
+
+## I9B: Internacionalização (en, pt-BR, es)
+
+**Pré-condição:** I9 aprovado. Os módulos de `lib/shell/` precisam estar estáveis; extrair strings de um `common.sh` monolítico que será quebrado logo depois duplica o churn no mesmo arquivo.
+
+**Objetivo:** tornar toda a superfície humana traduzível por arquivos de texto, sem alterar uma única decisão de fluxo, código de saída ou byte do canal de máquina. Ver o contrato normativo na seção 3.10.
+
+**Dimensão real medida em 23/08/2026** (use estes números como baseline e reconfirme antes de começar):
+
+| Alvo | Pontos de saída humana | Observação |
+|---|---|---|
+| `etapas/*.sh` (21 arquivos) | 1451 | maiores: `02-detectar-config.sh` (193), `60-rede-bridge.sh` (177), `50-hooks-gpu-hd1.sh` (157), `40-criar-vm.sh` (113), `61-airlock.sh` (105) |
+| `util/*.sh` (6 arquivos) | 179 | maior: `recuperar-gpu.sh` (61) |
+| `lib/*.sh` + `lib/shell/*.sh` | 147 | `common.sh` (99), `boot.sh` (48) |
+| `menu.sh` | 6 | |
+| **Total** | **1783** | contagem de chamadas de `info`/`ok`/`aviso`/`erro`/`titulo`/`falhar`/`v_ok`/`v_falta`/`v_erro` com literal |
+
+**Acoplamento dos testes, medido:** existem **46** chamadas de `assert_text`/`assert_text_any` (44 em `tests/test-i0-mutators.sh`, 2 em `tests/test-atualizar-host-validation.sh`), das quais **12** casam texto humano em português. O restante do português nos testes são mensagens de falha do próprio teste, que são superfície de desenvolvedor e **não** entram no catálogo. Esse acoplamento é pequeno e não justifica adiar a fase.
+
+### Tarefas
+
+- [ ] **I9B.1:** criar `lang/en.msg`, `lang/pt-BR.msg` e `lang/es.msg`. Formato: uma entrada por linha, `CHAVE=valor`, comentários iniciados por `#`, linha vazia ignorada, sem continuação de linha, sem aspas envolventes, UTF-8 sem BOM, terminador LF. Chave casa `^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)*$` e usa namespace por origem (`MENU.`, `CONF.`, `REDE.`, `AIRLOCK.`, `GPU.`, `USB.`, `CPU.`, `BOOT.`, `VM.`, `TRIM.`, `COMMON.`). Justificativa de não usar gettext: `.po`/`.mo` exigem runtime e ferramenta externas, e o plano proíbe dependência nova; `$"..."` do Bash depende de `.mo` compilado e de locale do sistema, o que quebraria o determinismo exigido pela seção 3.8.
+- [ ] **I9B.2:** implementar `lib/shell/i18n.sh` com `i18n_carregar` e `msg CHAVE [args...]`. O carregamento lê o catálogo linha a linha com `while IFS= read -r`, separa a chave com `${linha%%=*}` e o valor com `${linha#*=}`, valida a chave pela expressão acima e popula um array associativo. **Proibido** `source`, `eval`, `declare` a partir do arquivo, substituição de comando e expansão aritmética sobre o valor. Carregar uma vez por processo; sem I/O por mensagem.
+- [ ] **I9B.3:** validar a format string no carregamento: percorrer o valor e aceitar apenas `%%` e `%N$s` com `N` de 1 a 9. Qualquer outro `%` invalida o catálogo inteiro, registra aviso e força fallback para `en`. Provar com fixture hostil contendo `%n`, `%s` simples, `%(`, `%` terminal, `$(id)`, crase, `${IFS}`, `;rm`, CRLF, BOM, chave duplicada, linha truncada e encoding inválido; nenhum caso pode executar nada nem abortar o processo.
+- [ ] **I9B.4:** implementar a precedência de seleção da seção 3.10 e a normalização de locale (`pt_BR.UTF-8` para `pt-BR`, `es_ES@euro` para `es`, desconhecido para `en`). Acrescentar a chave `IDIOMA` ao schema de `passthrough.conf` e a `passthrough.conf.example`, com classe de dado conforme a seção 3.9 e valor padrão vazio (que significa "decidir pelo ambiente").
+- [ ] **I9B.5:** implementar fallback por chave com marcador `!!CHAVE!!`, aviso registrado e erro sob `PASSTHROUGH_I18N_STRICT=1`. Provar que mensagem ausente **nunca** aborta mutador nem altera código de saída.
+- [ ] **I9B.6:** implementar `libexec/passthrough_core/messages.py` e o subcomando correspondente na CLI para **validar e comparar catálogos** (cálculo puro, cabe na fronteira). O Bash não chama Python por mensagem, apenas nos testes e no gate; o custo por mensagem em runtime precisa continuar zero.
+- [ ] **I9B.7:** migrar a superfície humana na ordem `menu.sh` (6), `lib/` (147), `util/` (179) e `etapas/` na ordem do menu (1451). Manter um allowlist explícito em `tests/i18n-pendentes.txt` com os arquivos ainda não migrados; o gate exige que essa lista **encolha monotonicamente** e termine vazia. Nunca manter dois caminhos de mensagem no mesmo arquivo.
+- [ ] **I9B.8:** traduzir prompts interativos (`read -r -p`) de `menu.sh` e `etapas/02-detectar-config.sh` **sem** traduzir as respostas aceitas. As respostas continuam sendo comparadas por valor canônico (`s`/`n` viram um conjunto por idioma mapeado para um booleano interno), jamais por texto traduzido. Provar que responder no idioma ativo e no idioma de fallback produz a mesma decisão.
+- [ ] **I9B.9:** implementar `tests/check-i18n-catalogs.py` e integrá-lo ao gate canônico. O checker reprova: conjunto de chaves divergente entre os três catálogos; chave fora do padrão; chave duplicada; placeholders com índices ou aridade divergentes entre idiomas; `%` fora da allowlist; BOM, CRLF ou byte inválido; chave órfã (no catálogo e não usada no código); literal humano remanescente fora de `msg` em arquivo já migrado.
+- [ ] **I9B.10:** fixar `PASSTHROUGH_LANG=pt-BR` nas suítes existentes para preservar as 12 asserções atuais, e acrescentar uma suíte nova que reexecuta os mesmos cenários sob `en` e `es` verificando **apenas** código de saída, canal de máquina e efeitos no host. Isso prova a invariante central: idioma não muda comportamento.
+- [ ] **I9B.11:** garantir que os hooks libvirt continuem Bash puro e autossuficientes. Hook **não** carrega catálogo e **não** depende do diretório do repositório; suas mensagens permanecem fixas em `en`, com justificativa registrada, porque rodam fora da sessão do operador.
+- [ ] **I9B.12:** acrescentar `tests/manifests/i9b-files.txt` e registrar todos os arquivos novos.
+
+### Gate I9B
+
+Três catálogos com o mesmo conjunto de chaves e placeholders compatíveis; `tests/i18n-pendentes.txt` vazio; nenhum literal humano fora de `msg` fora dos hooks; catálogo hostil inerte e comprovado; ausência de chave não aborta e não muda status; a suíte roda idêntica em `pt-BR`, `en` e `es` quanto a código de saída, canal de máquina e efeitos; nenhum item do canal de máquina foi traduzido; hooks permanecem independentes; segunda execução no-op; gate canônico aprovado.
 
 ## I10: Convergência, remoção de legado e CI completa
 
@@ -969,17 +1280,115 @@ Só começa após o marco `BASE_QUALIFICADA` (I0 a I13 completos, com as campanh
 
 Contrato mínimo de qualquer provider (capabilities explícitas e recusa de função ausente): 1) pacotes/repositórios; 2) cmdline/bootloader/initramfs; 3) backend libvirt e usuário QEMU; 4) driver NVIDIA compatível; 5) OVMF/UEFI; 6) AppArmor/SELinux; 7) bridge/rede e rollback; 8) UFW/firewalld; 9) reboot, pós-condições e rollback; 10) fixtures usando a biblioteca/provider real, instalação descartável e campanha operacional. Cada distro mutável repete **integralmente I13.1 a I13.13**.
 
+### Valores de perfil pesquisados por distribuição (23/08/2026)
+
+Estes valores são **ponto de partida pesquisado**, não fato qualificado. Cada um precisa ser reconfirmado no host real da campanha, e em rolling release a validade tem prazo (trava T13). Os atributos são os do bloco `case "$PLATAFORMA_ID"` de `lib/platform.sh`.
+
+| Atributo | Debian | Fedora Workstation | Arch / CachyOS | openSUSE Tumbleweed |
+|---|---|---|---|---|
+| `PLATAFORMA_PERFIL` | `debian` | `fedora` | `arch` / `cachyos` | `opensuse-tumbleweed` |
+| `PLATAFORMA_GERENCIADOR_PACOTES` | `apt` | `dnf` | `pacman` | `zypper` |
+| `PLATAFORMA_QEMU_PACOTE` | `qemu-system-x86` | `qemu-kvm` | `qemu-desktop` ou `qemu-full` | **`qemu-x86`** |
+| `PLATAFORMA_QEMU_COMANDO` | `qemu-system-x86_64` | `qemu-system-x86_64` | `qemu-system-x86_64` | `qemu-system-x86_64` |
+| `PLATAFORMA_QEMU_USUARIO_PADRAO` | `libvirt-qemu` | `qemu` | confirmar (`nobody` é o padrão histórico do Arch) | `qemu` |
+| `PLATAFORMA_QEMU_USUARIOS` | `libvirt-qemu qemu` | `qemu` | confirmar | **`qemu`** apenas |
+| `PLATAFORMA_NVIDIA_ESTRATEGIA` | `debian-nvidia-driver` | RPMFusion `akmod-nvidia` ou repo CUDA, escolha explícita | `nvidia-dkms`, `nvidia` ou `nvidia-open` | `opensuse-repos-nvidia` |
+| `PLATAFORMA_BOOT_BACKENDS` | `grub` | BLS via `grubby` | **detectar** GRUB ou systemd-boot; CachyOS acrescenta Limine | `grub2-suse` via `LOADER_TYPE` |
+| `PLATAFORMA_INITRAMFS_BACKEND` | `update-initramfs` | `dracut` | **detectar** `mkinitcpio` ou `dracut` | `dracut` |
+| `PLATAFORMA_LIBVIRT_SERVICOS` | `libvirtd virtqemud` | modular | confirmar | `virtqemud libvirtd` |
+| `PLATAFORMA_LIBVIRT_GRUPO` / `KVM_GRUPO` | `libvirt` / `kvm` | `libvirt` / `kvm` | confirmar | `libvirt` / `kvm` |
+| Diretório OVMF | `/usr/share/OVMF/OVMF_CODE_4M.fd` | `/usr/share/edk2/ovmf/` | pacote `edk2-ovmf` | `/usr/share/qemu/ovmf-x86_64-*.bin` |
+| Backend de rede | `systemd-networkd` (decisão de projeto) | NetworkManager (`nmcli`) | detectar networkd ou NM | **`networkmanager` ou `wicked`** |
+| Firewall | `ufw` (não é o padrão; nftables é) | `firewalld` | nenhum por padrão | `firewalld` |
+| LSM | AppArmor | **SELinux enforcing** | AppArmor opcional | **SELinux enforcing por padrão** desde o snapshot 20250211 |
+
+**Correção normativa:** a linha de I14.5 abaixo dizia "AppArmor" para openSUSE. Desde o snapshot 20250211 o instalador do Tumbleweed entrega **SELinux enforcing** como padrão em instalações novas, com AppArmor disponível por escolha manual e mantido em instalações antigas. O LSM do openSUSE é resolvido em **runtime**, nunca constante de perfil.
+
+### Armadilhas específicas por alvo, já pesquisadas
+
+**Debian:** `qemu-kvm` **não existe** (o valor do perfil Pop!_OS é inutilizável); não há `ubuntu-drivers` nem `system76-driver-nvidia`, o driver vem de `nvidia-driver` em `non-free`, exigindo os componentes `contrib non-free non-free-firmware`, e a instalação padrão do trixie habilita apenas `main` e `non-free-firmware`; não existe `OVMF_CODE.fd` sem sufixo; o Debian **não tem netplan** e não tem backend de rede único, então escolher `systemd-networkd` é decisão de projeto que precisa ser declarada como tal; `ufw` existe em `main` mas não vem instalado, e o framework padrão desde o Debian 10 é nftables.
+
+**Fedora Workstation:** DNF5 é o padrão desde o Fedora 41 e `groupinstall` foi **removido**, então emitir `dnf groupinstall` quebra por sintaxe; o `dracut` roda com `hostonly=yes` por padrão, razão pela qual `add_drivers` sozinho pode não bastar e a verificação precisa ser por `lsinitrd -k <kver> | grep vfio`, **nunca** pelo código de saída do `dracut`; a cmdline mora em BLS, manipulada por `grubby`, não em `grub.cfg`; SELinux precisa permanecer **enforcing**, e `setenforce 0` não conta como suporte; preferir a autosseleção de firmware do libvirt aos caminhos fixos de OVMF.
+
+**Arch e CachyOS:** o pacote `ovmf` **não existe**, é `edk2-ovmf`; `mkinitcpio` e `dracut` ambos declaram `provides=initramfs` e podem coexistir, então a detecção precisa de desempate ou recusa dura; o hook `modconf` do mkinitcpio só importa se o projeto passar a usar `options`/`softdep`, e hoje ele usa `/etc/modules-load.d/vfio.conf`, lido pelo `systemd-modules-load` já no sistema real; CachyOS tem dez variantes de kernel (`linux-cachyos` EEVDF é o padrão, mais `-bore`, `-bmq`, `-eevdf`, `-hardened`, `-lts`, `-rc`, `-rt-bore`, `-server`, `-deckify`) com headers em `<pkgbase>-headers` e repositórios `cachyos-v3`/`cachyos-v4`, e o hook `limine-mkinitcpio` depende de `mkinitcpio` e reescreve as entradas por `limine-entry-tool`; adicionar `systemd-boot` ou `limine` esbarra na trava T4.
+
+**openSUSE Tumbleweed:** `qemu-kvm` **não existe** no OSS (existem `qemu`, `qemu-x86` e `qemu-tools`); `mkinitrd` **não está** no OSS e o comando canônico é `dracut --regenerate-all --force`; `swtpm-tools` **não existe** como pacote separado, os utilitários vêm no próprio `swtpm`; a unidade do sshd é `sshd.service` sem alias `ssh.service` (trava T7); os códigos de saída 100 a 107 do `zypper` abortam sob `set -euo pipefail` (trava T8); existe a divisão `/usr/etc` versus `/etc` (trava T9); `update-bootloader --config` pode sair com zero sem regenerar nada (REQ-BOOT-POSCONDICAO); e o Snapper com raiz Btrfs é uma **oportunidade real** de rollback de sistema, desde que a existência da raiz Btrfs e da config `root` seja comprovada e a ausência bloqueie a etapa em vez de degradar em silêncio.
+
 Requisitos específicos por target:
 
 - [ ] **I14.1 Debian:** APT/repositórios Debian, GRUB/update-initramfs, networkd ou backend explícito, NVIDIA sem `ubuntu-drivers`, libvirt/QEMU/AppArmor/OVMF/firewall comprovados.
 - [ ] **I14.2 Fedora Workstation:** DNF, dracut+BLS, NetworkManager, firewalld e repositório NVIDIA explicitamente escolhido; SELinux deve permanecer enforcing, com contextos, relabel persistente e políticas/booleans estritamente necessários, testes positivo/negativo e rollback. `setenforce 0` não conta como suporte.
 - [ ] **I14.3 Arch Linux:** Pacman, mkinitcpio ou dracut detectado, GRUB ou systemd-boot detectado, rede/firewall/libvirt/QEMU/OVMF/NVIDIA.
 - [ ] **I14.4 CachyOS:** tudo de Arch mais kernels/headers próprios, Limine, compatibilidade NVIDIA/kernel/initramfs.
-- [ ] **I14.5 openSUSE Tumbleweed:** `zypper dup`, natureza rolling release, dracut, update-bootloader, NetworkManager ou Wicked com rollback, firewalld, AppArmor, libvirt/OVMF/NVIDIA por snapshot qualificado.
+- [ ] **I14.5 openSUSE Tumbleweed:** `zypper dup`, natureza rolling release, dracut, update-bootloader, NetworkManager ou Wicked com rollback, firewalld, **SELinux enforcing** (padrão do instalador desde o snapshot 20250211; AppArmor apenas em instalação antiga ou escolha manual, resolvido em runtime e nunca constante de perfil), libvirt/OVMF/NVIDIA por snapshot qualificado.
 - [ ] **I14.6 Fedora Silverblue:** manter diagnóstico ostree/imutabilidade; recusar todo mutador antes de `sudo`; testar menu, execução direta e bibliotecas com conteúdo/metadados/mtimes invariantes. Não implementar mutação tradicional.
 
 **Aceite individual:** dez domínios completos, capabilities, fixtures reais, instalação descartável, matriz exata e repetição aprovada de I13.1 a I13.13 para a combinação. Só então remover `PLANEJADO` daquele target.
 **Aceite de I14/plano integral:** os cinco providers mutáveis possuem evidência própria e I14.6 está aprovado; somente então registrar `EXPANSAO_TOTAL_QUALIFICADA`.
+
+## I14B: Eixo CPU Intel
+
+**Pré-condição:** `BASE_QUALIFICADA`, mais as tarefas I8.7 e I8.9 aprovadas. Alvo da trilha de expansão; **um alvo por vez**. Cumpre integralmente REQ-CPU-VENDOR e a seção 4.0.
+
+**Custo relativo: o mais baixo dos oito alvos.** A troca de fabricante é mecânica e concentrada; o que custa é a topologia híbrida.
+
+| AMD | Intel | Onde |
+|---|---|---|
+| `amd_iommu=on iommu=pt` | `intel_iommu=on iommu=pt` | `lib/shell/boot.sh:696` |
+| chave derivada `amd_iommu` | chave derivada `intel_iommu`, **automática** | `boot_params_chaves`, `lib/shell/boot.sh:700` |
+| flag `svm` | flag `vmx` | `etapas/01-verificar-bios.sh:16` e `:74` |
+| prefixo `AMD-Vi:` | prefixo `DMAR:` | `etapas/30-iommu-vfio.sh:191`, `util/atualizar-host.sh:113`, `etapas/01-verificar-bios.sh:89` |
+| módulo `kvm_amd` (`npt`, `avic`) | módulo `kvm_intel` (`ept`, `unrestricted_guest`, `enable_apicv`, `vpid`) | diagnóstico apenas, nunca condição de mutação |
+| firmware: "SVM Mode" | firmware: "Intel VT-x" **e** "VT-d", tipicamente em menus separados | `etapas/01-verificar-bios.sh` |
+| sem bloqueio por firmware | **RMRR** pode tornar o dispositivo inelegível | modo de falha exclusivo do caminho Intel |
+| topologia uniforme | **híbrida P-core/E-core** a partir de Alder Lake | `libexec/passthrough_core/cpu.py` |
+
+Notas de exatidão: `amd_iommu` oficialmente **não tem** valor `on` (o driver liga sozinho pelo IVRS do firmware); o projeto usa `amd_iommu=on` como marcador determinístico e isso continua correto. `iommu=pt` é arquitetural x86 e **não** muda por fabricante. Em Intel, `CONFIG_INTEL_IOMMU_DEFAULT_ON=y` torna `intel_iommu=on` redundante na prática, mas o projeto exige exatidão literal na cmdline, então permanece obrigatório como marcador.
+
+### Tarefas
+
+- [ ] **I14B.1:** substituir `plataforma_validar_cpu_amd` por `plataforma_validar_cpu_suportada`, resolvendo por nível de suporte do eixo, não por igualdade literal a `AuthenticAMD`. Manter o nome antigo apenas como alias durante o cutover, removido no fim da fase. Ponto único: `lib/platform.sh:723`, consumido por `lib/common.sh:208` e por `etapas/30-iommu-vfio.sh:28` e `:99`.
+- [ ] **I14B.2:** esvaziar `IOMMU_PARAMS_PADRAO` no `source` (`lib/shell/boot.sh:696`) e passar a preenchê-lo pelo perfil de CPU. Todo consumidor recusa com diagnóstico próprio quando o valor está vazio, incluindo `boot_estado_iommu` (`:720`) e `iommu_vfio_transacao` (`:1028`), **antes** do primeiro snapshot. Isso torna estruturalmente impossível aplicar parâmetro de um fabricante em host do outro por omissão de código.
+- [ ] **I14B.3:** tornar prefixo de dmesg, flag de virtualização e evidência positiva atributos de perfil. Evidência Intel reconhecível: `IOMMU enabled` e `Intel(R) Virtualization Technology for Directed I/O`. Não reaproveitar regex de evidência negativa AMD em host Intel: isso bloquearia host Intel saudável.
+- [ ] **I14B.4:** implementar a detecção de tipo de core em `cpu.py` pela fonte autoritativa `/sys/devices/cpu_core/cpus` e `/sys/devices/cpu_atom/cpus`, capturada pelo Bash e entregue por payload. **Não** existe `/sys/devices/system/cpu/types` neste kernel, e `X86_FEATURE_HYBRID_CPU` **não tem string** em `/proc/cpuinfo`, portanto detecção por `grep` em flags é impossível. A coluna `CLUSTER` do `lscpu` é sinal auxiliar plausível, jamais fonte autoritativa. Evidência ausente, parcial ou conflitante produz estado tipado e **recusa**, nunca default.
+- [ ] **I14B.5:** acrescentar `types_fingerprint` separado do `canonical_text` (`cpu.py:174`), **vazio em host uniforme**, de forma a não mover nenhum valor já validado em AMD. Sem isso, duas topologias híbridas com tipos trocados produzem o mesmo hash.
+- [ ] **I14B.6:** fechar a janela silenciosa de SMT desligado descrita em REQ-CPU-VENDOR. `_plan_pinning` passa a exigir que o conjunto entregue à VM seja de **tipo único**, e o laço ordinal de `cpu.py:519` deixa de ser ordinal em host híbrido. Este é o item central da fase e o teste obrigatório é **híbrida com SMT desligado**.
+- [ ] **I14B.7:** estender o isolamento (`isolcpus`, `nohz_full`, `rcu_nocbs`) para híbrida: a sintaxe **não muda**, a política muda. O conjunto isolado precisa ser de tipo único e o housekeeping precisa reter core do tipo alvo. Cobre `etapas/53-cpu-isolation.sh` e `etapas/52-cpu-pinning-hugepages.sh`.
+- [ ] **I14B.8:** cobrir `etapas/02-detectar-config.sh`, onde o plano de CPU nasce (trava T5). Detecção, pergunta ao operador, reconciliação e persistência precisam conhecer o eixo e o tipo de core.
+- [ ] **I14B.9:** tratar RMRR como diagnóstico próprio. Mensagem exata do kernel: `Device is ineligible for IOMMU domain attach due to platform RMRR requirement`. Aparece apenas no bind ou no start da VM, então precisa de pós-condição própria e mensagem acionável, nunca erro genérico.
+- [ ] **I14B.10:** manter `intel_iommu=igfx_off` **fora** do padrão, com recusa explícita e justificativa registrada, porque reduz isolamento.
+- [ ] **I14B.11:** reexecutar integralmente a suíte e a campanha I0 `full` em host AMD, provando byte a byte que o suporte existente não regrediu.
+- [ ] **I14B.12:** repetir integralmente I13.1 a I13.13 em host Intel real, incluindo os dois reboots. Sem isso o eixo permanece `PLANEJADO`.
+
+### Gate I14B
+
+Eixo formalizado e recusando por padrão; AMD idêntico byte a byte; parâmetro vazio recusado em todo consumidor; tipo de core detectado pela fonte autoritativa; **híbrida com SMT desligado recusa em vez de pinar em E-cores**; `types_fingerprint` vazio em host uniforme; RMRR com diagnóstico próprio; `igfx_off` fora do padrão; campanha real registrada ou eixo permanece `PLANEJADO`.
+
+## I14C: Eixo GPU AMD
+
+**Pré-condição:** `BASE_QUALIFICADA`, mais a tarefa I8.8 aprovada. Alvo da trilha de expansão. Cumpre integralmente REQ-GPU-VENDOR e a seção 4.0.
+
+**Custo relativo: alto.** Não é troca de nome de driver: o ciclo de vida do dispositivo é diferente, e o reset bug é um bloqueio de segurança operacional, não uma ressalva de rodapé.
+
+### Tarefas
+
+- [ ] **I14C.1:** criar o eixo de GPU em `lib/platform.sh` espelhando o eixo de CPU, com vendor PCI (`0x10de` NVIDIA, `0x1002` AMD, `0x8086` Intel) resolvido a partir de snapshot capturado pelo Bash, e acrescentar a guarda correspondente em `guard_mutation` (`lib/common.sh`, na cadeia da linha 208), que hoje **não tem** eixo de GPU.
+- [ ] **I14C.2:** renomear `nvidia.driver` para `gpu.driver` em `PLATAFORMA_CAPABILITIES_CONHECIDAS` (que tem **21** entradas, não 22), mantendo `nvidia.driver` como alias aceito durante o cutover e removido em I10. Revisar também `guest.driver` e `gpu.recover`, que são as outras duas capabilities do eixo.
+- [ ] **I14C.3:** acrescentar ao `SCHEMA` de `libexec/passthrough_core/config.py` toda chave nova de configuração desta fase, com classe de dado conforme a seção 3.9. Chave sem entrada no schema é recusada pelo parser, então esta tarefa **precede** qualquer uso.
+- [ ] **I14C.4:** implementar o caminho de liberação AMD sem `modprobe -r`. O laço de quatro módulos de `etapas/50-hooks-gpu-hd1.sh:511` é específico de NVIDIA. Em AMD: parar o display manager, esperar os nós DRM e deixar o unbind por dispositivo com `managed='yes'`. Justificativa registrada: em APU o mesmo `amdgpu` dirige iGPU e dGPU.
+- [ ] **I14C.5:** implementar a prova de saúde AMD por sysfs, já que não há equivalente a `nvidia-smi` instalado por padrão: driver `amdgpu` ligado ao BDF, nó DRM em `/sys/bus/pci/devices/BDF/drm/card*` e `power_state` igual a `D0`. Substitui `etapas/50-hooks-gpu-hd1.sh:813` e `util/recuperar-gpu.sh:196` por caminho resolvido pelo eixo.
+- [ ] **I14C.6:** implementar a **classificação de reset** por leitura de `/sys/bus/pci/devices/BDF/reset_method` (kernel 5.15 ou superior), com os estados `funcional`, `quebrado`, `coberto-por-vendor-reset` e `desconhecido`, conforme a tabela de famílias de REQ-GPU-VENDOR. Classificação diferente de `funcional` **impede** a promessa de retorno da GPU e exige aceite explícito do operador antes de qualquer entrega. O projeto apenas lê o arquivo; escrever é mutação de host e fica fora desta frente.
+- [ ] **I14C.7:** recusar iGPU de APU AMD antes de qualquer efeito, com diagnóstico próprio: compartilha grupo IOMMU com o complexo raiz, não tem ROM própria e dirige o console do host.
+- [ ] **I14C.8:** tratar `romfile` de vBIOS como caminho de primeira classe, não exceção. A necessidade é **mais frequente** em AMD quando a placa é a GPU de boot, que é exatamente o cenário deste projeto. Documentar que o dump só é confiável com a placa não inicializada pelo firmware.
+- [ ] **I14C.9:** emitir o vendor nos hooks de entrega e retomada (`gerar_start` e `gerar_release` de `etapas/50-hooks-gpu-hd1.sh`), de forma que o hook gerado seja autossuficiente e não redescubra o fabricante em tempo de execução.
+- [ ] **I14C.10:** tratar o driver do convidado. NVIDIA usa instalador com `setup.exe -s -noreboot` e catálogo público consultável (`libexec/passthrough_core/nvidia_lookup.py`); a AMD **não tem catálogo público consultável** e o Adrenalin é auto-extrator, invocado por `Setup.exe -INSTALL`. **Não** usar `-BOOT`, que reinicia o convidado. Se a instalação não interativa não se provar confiável, converter a etapa 16 em passo **manual documentado** para AMD, em vez de prometer automação não qualificável.
+- [ ] **I14C.11:** decidir por teste se o convidado AMD precisa de `hyperv vendor_id` e de estado oculto, dado que os drivers de vídeo AMD fazem detecção rudimentar de máquina virtual. Registrar a decisão com evidência; não copiar a configuração NVIDIA por analogia.
+- [ ] **I14C.12:** reexecutar integralmente a suíte e a campanha I0 `full` em host NVIDIA, provando que o fabricante existente não regrediu, e acrescentar `tests/manifests/i14c-files.txt`.
+- [ ] **I14C.13:** repetir integralmente I13.1 a I13.13 em host com GPU Radeon real, com **ciclo duplo** de entrega e retomada. Sem isso o eixo permanece `PLANEJADO`.
+
+### Gate I14C
+
+Eixo formalizado e presente em `guard_mutation`; NVIDIA idêntico byte a byte; nenhum `modprobe -r` no caminho AMD; saúde provada por sysfs; **reset classificado antes de qualquer promessa de retorno**; APU recusada antes de efeito; schema de config completo; hooks emitem o vendor; driver do convidado automatizado com prova ou convertido em passo manual documentado; campanha real com ciclo duplo registrada ou eixo permanece `PLANEJADO`.
 
 ---
 
@@ -1228,6 +1637,11 @@ README, guia, o índice `commands-list.md`, os documentos `commands-list/*.md`, 
 | QUAL-UBUNTU-POP | campanha 00-70 | I13 | não substitui | obrigatória por combinação |
 | PROVIDERS | dez domínios por distro | I14 | fixtures reais | campanha por combinação |
 
+| REQ-I18N | catálogo en/pt-BR/es sem mudar comportamento | I9B | paridade de chaves, catálogo hostil inerte, suíte em 3 idiomas | revisão humana de tradução |
+| REQ-CPU-VENDOR | eixo de CPU e topologia híbrida | I8 (modelo)/I14B | fixtures de vendor e de tipo de core, SMT desligado | host Intel real I14B |
+| REQ-GPU-VENDOR | eixo de GPU e prova de retorno | I8 (modelo)/I14C | fixtures de vendor, reset_method, APU recusada | GPU Radeon real I14C |
+| REQ-BOOT-POSCONDICAO | aplicador prova que regenerou | I9 | aplicador zero-sem-efeito, fonte restaurada com artefato divergente | bootloaders reais I13/I14 |
+
 ### 10.1 Rastreabilidade de componentes atuais para módulos-alvo
 
 | Origem atual | Destino principal | Fase |
@@ -1327,6 +1741,21 @@ Além da base estável: provider nos dez domínios, capabilities, fixtures usand
 
 ---
 
+### 11.4 Novo eixo de hardware completo
+
+Um eixo de hardware (fabricante de CPU ou de GPU) só sai de `PLANEJADO` quando, para a **combinação exata testada**:
+
+- o eixo está formalizado conforme a seção 3.11, com fato tipado, motivo próprio de recusa e capability rebaixada quando incompatível;
+- todo parâmetro, módulo, caminho de `/sys` e atributo de XML específico do fabricante é resolvido por perfil, nunca por literal espalhado;
+- o fabricante anterior continua passando integralmente, provado por reexecução da suíte e da campanha I0 `full`;
+- as fixtures cobrem o fabricante novo, o antigo, ausência, desconhecido e conflito de evidência;
+- a campanha de I13.1 a I13.13 foi repetida **integralmente** em hardware real com esse fabricante, incluindo os dois reboots e o ciclo completo de entrega e retorno do dispositivo;
+- o registro nomeia CPU/GPU exata, kernel, firmware, versão de driver e limitações conhecidas.
+
+Fixture aprovada, parser que reconhece o vendor e código presente **não** qualificam. Um eixo implementado e não qualificado permanece recusado por padrão e é reportado como tal, exatamente como `debian` e `arch` são hoje no eixo de distribuição.
+
+---
+
 ## 12. Registro obrigatório de execução
 
 Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
@@ -1352,6 +1781,9 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I5 (tentativa 3) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | campanha I0 `full` | **REPROVADO (rc=1)** | `INT etapa 11/4 (esperado=130; obtido=1)`: a transação do GRUB preservava o código do sinal dentro do subshell, mas o `falhar` seguinte o convertia em `1`. Só apareceu agora porque `kernel_param_add` deixou de ser efeito sintético do harness. Corrigido propagando `130`/`143` em `_grub_aplicar_cmdline` e `_kernelstub_aplicar_estado` | logs da sessão | preservar o código do sinal e reexecutar |
 | I5 (tentativa 4) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | campanha I0 `full` | **REPROVADO (rc=1)** | `sinal INT na etapa 11/6 deixou estado persistente parcial`: o intermediário do `vfio.conf` era criado fora da janela protegida e sobrevivia ao sinal. Corrigido movendo a criação/escrita do intermediário do GRUB para dentro do subshell com trap e descartando o intermediário do `vfio.conf` no rollback; ambas as correções foram confirmadas por mutação injetada | logs da sessão | fechar a janela do intermediário e reexecutar |
 | I5 | 2026-08-17 | `8b34a4c` + working tree | `libexec/passthrough_core/cpu.py`, `libexec/passthrough_core/cli.py`, `lib/shell/boot.sh` (novo, com o bloco de boot movido de `lib/common.sh`), `lib/common.sh`, `etapas/{02,30,52,53}`, `tests/python/test_cpu.py`, `tests/test-i5-cpu-boot.sh`, `tests/{test-i0-mutators,test-cpu-hugepages,test-bios-output,test-runtime-lifecycles,test-snapshot-safety,test-ubuntu-audit-regressions}.sh`, `tests/lib/{mutator-harness.sh,mutator-dispatch.py}`, `tests/manifests/i5-files.txt`, `tests/run-gate-i1.sh`, este plano | `python3 -I -S -B tests/python/run_tests.py` = 503 casos; `bash tests/test-i5-cpu-boot.sh` (12 grupos); suíte shell 16/16; campanha I0 `full` sem skips com o oráculo da etapa 11 reescrito sobre a transação real de boot (42 grupos de cenários, eram 40); gate canônico completo aprovado (rc=0): manifesto I5 com 86 arquivos nominais, 16 testes da suíte, `bash -n` em 53 arquivos, `compileall` em 2 árvores mais `py_compile` em 26 arquivos sem bytecode residual, whitespace de 86 arquivos untracked; duas mutações injetadas em `lib/shell/boot.sh` reprovadas | APROVADO; revisão semântica APPROVE, bloqueadores 0 | dois reboots reais seguem `[H]` em I13; validadores de lista de CPU continuam em Bash por serem de runtime; parsing de cmdline/GRUB permanece em Bash com justificativa registrada (seção 2.3); `FSTAB` não foi roteado por `caminho_sistema` nesta fase; a etapa 11 `--verificar` passou a devolver `2` quando a persistência não é legível sem privilégio | seção 5 (fase I5, resultado do gate), `scratchpad/gate-i5-final.log` | executar I6 |
+| Auditoria | 2026-08-23 | `2b10ae7` + working tree | nenhum arquivo de produção alterado | verificação por leitura de `etapas/51-usb-passthrough.sh:411`, `etapas/61-airlock.sh:230-296` e `:565`, `libexec/passthrough_core/domain_xml.py:582`, `lib/common.sh:2393/:2430/:3199`, busca por consumidores de `windows-install`, busca por `recovery_id`, existência de `platform.py`/`check-python-boundary.py`/`check-plan-traceability.py`, conferência da tabela de numeração contra `menu.sh`; contagem de saída humana (1783) e de `assert_text` (46, sendo 12 em PT) | I0-I5 CONFIRMADAS; I6-I14 CONFIRMADAS ABERTAS; plano **não** defasado no essencial; 2 pontos defasados corrigidos (REQ-IOMMU-TX na seção 16 e README na seção 1.4) | 27 commits entre 18/08 e 23/08 alteraram toda a árvore sem linha no registro; **o Gate I5 deixou de valer como baseline** | seção 1.5 | executar I6.0 antes de I6.1 |
+| I6.0 | | | | `bash tests/run-gate-i1.sh` + campanha I0 `full` | **bloqueador aberto** | revalidar baseline pós-commits | | executar I6 |
+
 | I6 | | | | | não iniciado | | | próxima fase |
 | I7 | | | | | não iniciado | | | aguarda I6 (harness I0 pronto) |
 | I8 | | | | | não iniciado | | | aguarda I7 |
@@ -1368,6 +1800,10 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I14.4 CachyOS | | | | | PLANEJADO | ordem a registrar | | aguarda target anterior |
 | I14.5 openSUSE Tumbleweed | | | | | PLANEJADO | ordem a registrar | | aguarda target anterior |
 | I14.6 Silverblue | | | | | diagnóstico pendente | sem mutação | | aguarda base/guarda |
+| I9B | | | | | não iniciado | i18n en/pt-BR/es | | aguarda I9 |
+| I14B Intel | | | | | PLANEJADO | exige host Intel | | trilha de expansão |
+| I14C GPU AMD | | | | | PLANEJADO | exige GPU Radeon | | trilha de expansão |
+
 | EXPANSAO_TOTAL_QUALIFICADA | | | | | pendente | exige todos os targets I14 | | encerramento integral |
 
 ---
@@ -1430,7 +1866,7 @@ Uma fase só termina quando:
 - [~] REQ-GUARD aprovado em todo mutador, menu e execução direta (parte I1 feita; falta o resolver Python de I8 e a prova real I13/I14).
 - [x] REQ-CONF-ISO aprovado sem abrir/privilegiar caminho legado (I4; prova em host descartável é opcional).
 - [~] REQ-TRIM-TX aprovado com sinais e rollback semântico (código e matriz hermética aprovados em I3; blocos/alocação reais são `[H]` de I13).
-- [ ] REQ-IOMMU-TX aprovado, separando ativo/persistente.
+- [~] REQ-IOMMU-TX aprovado, separando ativo/persistente (código `CONFORME` e **aprovado em I5**, conforme o catálogo da seção 4; a caixa estava desatualizada e foi corrigida na auditoria de 23/08/2026. Os dois reboots reais continuam `[H]` em I13).
 - [~] REQ-LIBVIRT-BACKEND aprovado em backend monolítico/modular (resolução autoritativa e matriz por fixture aprovadas em I3; libvirt real é `[H]` de I13).
 - [~] REQ-HOOKS-TX aprovado incluindo opções XML (opções dentro da transação, rollback comprovado e idempotência exata aprovados em I3; ciclo real de GPU/display é `[H]` de I13).
 - [~] REQ-WINDOWS-STATE separa instalação/power/agent (metadata durável vinculada ao QCOW2 pronta e testada em I3; a decisão e os três eixos entram em I4/I9).
@@ -1440,6 +1876,11 @@ Uma fase só termina quando:
 - [ ] REQ-DISK-IDENTITY impede workingDisk igual a HD1 físico.
 - [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (a etapa 15 já recusa VID:PID duplicado em vez de escolher por ordem; serial/porta e revalidação antes do attach são de I6).
 - [ ] REQ-NET-TX não deixa estado parcial e prova recuperação.
+
+- [ ] REQ-BOOT-POSCONDICAO: nenhum aplicador de bootloader declara sucesso sem provar regeneração.
+- [ ] REQ-I18N: idioma não altera código de saída, fluxo, canal de máquina nem byte publicado.
+- [ ] REQ-CPU-VENDOR: nenhum plano de pinning mistura tipos de core; híbrida sem evidência é recusada.
+- [ ] REQ-GPU-VENDOR: nenhuma promessa de retorno da GPU sem classificação de reset.
 
 ### Arquitetura híbrida
 
@@ -1480,6 +1921,9 @@ Uma fase só termina quando:
 - [ ] Marco `BASE_QUALIFICADA` registrado após I0-I13.
 - [ ] Todos os cinco providers mutáveis de I14 implementados e qualificados, um por vez, com repetição integral de I13.1-I13.13.
 - [ ] Silverblue permanece diagnóstico somente e invariável sob mutadores; I14.6 aprovado.
+- [ ] Eixo CPU Intel (I14B) implementado, com AMD idêntico byte a byte, ou permanece `PLANEJADO`.
+- [ ] Eixo GPU AMD (I14C) implementado, com NVIDIA idêntico byte a byte, ou permanece `PLANEJADO`.
+
 - [ ] Marco `EXPANSAO_TOTAL_QUALIFICADA` registrado.
 - [ ] Limitações de hardware estão explícitas.
 - [ ] Não há temporários, dados reais ou segredos na working tree rastreada, no index nem em arquivos untracked; todos os novos pertencem ao manifesto.
