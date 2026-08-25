@@ -726,13 +726,36 @@ modo_dispositivos() {
         mapfile -t LINHAS < <(LC_ALL=C lsusb)
         [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
         # Os rótulos só decoram a lista; a identidade continua saindo de $LINHAS.
+        # A cor sai das constantes de lib/common.sh, que ficam VAZIAS quando não
+        # há terminal. Por isso cada marca também é texto: em captura, log e
+        # pipe a informação continua legível sem depender de escape ANSI.
+        # Uma única leitura do XML por rodada serve às marcas da lista e à
+        # pré-checagem de duplicidade mais abaixo. A transação relê o domínio e
+        # refaz o fingerprint por conta própria, então ela continua sendo a
+        # autoridade sobre mudança concorrente, não esta observação.
+        listar_usb_xml \
+            || falhar "O XML USB atual é inválido; nenhuma mutação foi iniciada: ${USB_XML_ERRO:-erro desconhecido}."
+        XML_USB_ATUAL="$USB_XML_LISTA"
+        USB_PARES_NO_XML=""
+        while IFS= read -r USB_XML_LINHA; do
+            [ -n "$USB_XML_LINHA" ] || continue
+            usb_linha_ler "$USB_XML_LINHA"
+            [ -n "$USB_LINHA_VENDOR" ] && [ -n "$USB_LINHA_PRODUCT" ] || continue
+            USB_PARES_NO_XML+="${USB_LINHA_VENDOR#0x}:${USB_LINHA_PRODUCT#0x}"$'\n'
+        done <<< "$XML_USB_ATUAL"
         ROTULOS=()
         for LINHA in "${LINHAS[@]}"; do
             ROTULO="$LINHA"
-            if [[ "$LINHA" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+): ]]; then
+            if [[ "$LINHA" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+):[[:space:]]+ID[[:space:]]+([0-9a-fA-F]{4}):([0-9a-fA-F]{4}) ]]; then
+                PAR_LINHA="${BASH_REMATCH[3],,}:${BASH_REMATCH[4],,}"
                 DONO="$(usb_coberto_por_controladora \
                     "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" || true)"
-                [ -z "$DONO" ] || ROTULO="$LINHA  $'\033[0;33m'[já vai à VM pela controladora $DONO]$'\033[0m'"
+                case $'\n'"$USB_PARES_NO_XML" in
+                    *$'\n'"$PAR_LINHA"$'\n'*)
+                        ROTULO="${C_VERDE}${LINHA}${C_RESET}  ${C_VERDE}[já anexado à VM]${C_RESET}" ;;
+                esac
+                [ -z "$DONO" ] \
+                    || ROTULO+="  ${C_AMARELO}[já vai à VM pela controladora $DONO]${C_RESET}"
             fi
             ROTULOS+=("$ROTULO")
         done
@@ -763,9 +786,6 @@ modo_dispositivos() {
         [ "$USB_IDENTIDADE_KIND" != port ] \
             || info "Fallback por porta física comprovada: $USB_IDENTIDADE_PORT"
 
-        listar_usb_xml \
-            || falhar "O XML USB atual é inválido; nenhuma mutação foi iniciada: ${USB_XML_ERRO:-erro desconhecido}."
-        XML_USB_ATUAL="$USB_XML_LISTA"
         JA_PRESENTE=0
         BUS_XML=""
         DEVICE_XML=""

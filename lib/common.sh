@@ -2447,14 +2447,17 @@ escolher_da_lista() {
     local pergunta="$1" permitir_nenhum="$2"
     shift 2
     local itens=("$@") i min=1 padrao=""
+    # Índice em largura fixa, alinhado à direita com espaço em vez de zero: em
+    # lista longa (USB, discos, controladoras) os rótulos caem todos na mesma
+    # coluna, e as opções fixas abaixo respeitam o mesmo recuo.
     for i in "${!itens[@]}"; do
-        printf '  %d) %s\n' "$((i + 1))" "${itens[$i]}" >&2
+        printf '  %5d) %s\n' "$((i + 1))" "${itens[$i]}" >&2
     done
     if [ "$permitir_nenhum" = "sim" ]; then
-        printf '  0) não selecionar item\n' >&2
+        printf '  %5d) não selecionar item\n' 0 >&2
         min=0
     fi
-    printf '  v) voltar ao menu principal\n  q) sair\n' >&2
+    printf '  %5s) voltar ao menu principal\n  %5s) sair\n' v q >&2
     [ "${#itens[@]}" -eq 1 ] && [ "$min" -eq 1 ] && padrao=1
     perguntar_inteiro "$pergunta" "$padrao" "$min" "${#itens[@]}"
 }

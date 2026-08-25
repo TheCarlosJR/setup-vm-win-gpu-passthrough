@@ -829,7 +829,7 @@ fi
 
 echo "Interfaces físicas elegíveis:"
 for IDX_REDE in "${!DESCRICOES_REDE[@]}"; do
-    printf '  %d) %s\n' "$((IDX_REDE + 1))" "${DESCRICOES_REDE[$IDX_REDE]}"
+    printf '  %5d) %s\n' "$((IDX_REDE + 1))" "${DESCRICOES_REDE[$IDX_REDE]}"
 done
 if [ -n "$UPLINK_IPV4_EFETIVO" ]; then
     if interface_fisica_elegivel "$UPLINK_IPV4_EFETIVO"; then
