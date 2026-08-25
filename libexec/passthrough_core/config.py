@@ -61,6 +61,7 @@ _MAC = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 _QCOW2_SIZE = re.compile(r"^[1-9][0-9]*[KMGTPE]$")
 _CPU_LIST = re.compile(r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$")
 _DECIMAL = re.compile(r"^[0-9]+$")
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 # Metacaracteres recusados em caminho absoluto, exatamente como no Bash.
 _PATH_FORBIDDEN = set("$`\"'\\;|&<>#") | {"\n", "\r", "\t"}
@@ -228,9 +229,24 @@ SCHEMA: dict[str, tuple[Callable[[str], bool], str, str]] = {
     ),
     "DM_SERVICE": (_pattern(_SYSTEMD_UNIT), PUBLIC, "unidade systemd"),
     "NVME_DEVICE": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
+    "SYSTEM_DISK_FINGERPRINT": (
+        _pattern(_HEX_DIGEST),
+        LOCAL_IDENTIFIER,
+        "SHA-256 da identidade física do disco do sistema",
+    ),
     "WORKING_DISK_PATH": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
+    "WORKING_DISK_FINGERPRINT": (
+        _pattern(_HEX_DIGEST),
+        LOCAL_IDENTIFIER,
+        "SHA-256 da identidade física do workingDisk",
+    ),
     "WORKING_DISK_DISPENSADO": (_enum("sim", "nao"), PUBLIC, "sim ou nao"),
     "HD1_BY_ID_PATH": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
+    "HD1_DISK_FINGERPRINT": (
+        _pattern(_HEX_DIGEST),
+        LOCAL_IDENTIFIER,
+        "SHA-256 da identidade física do HD1",
+    ),
     "HD1_DISPENSADO": (_enum("sim", "nao"), PUBLIC, "sim ou nao"),
     "QCOW2_PATH": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
     "QCOW2_TAMANHO": (_pattern(_QCOW2_SIZE), PUBLIC, "tamanho como 250G"),

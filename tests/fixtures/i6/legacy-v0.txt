@@ -1,0 +1,22 @@
+== CPU ==
+Architecture: x86_64
+CPU(s): 8
+On-line CPU(s) list: 0-7
+Thread(s) per core: 2
+Core(s) per socket: 4
+Socket(s): 1
+Model name: Fixture CPU
+== RAM ==
+Memory Device
+        Size: 32768 MB
+== BASEBOARD ==
+fixture board
+== BIOS ==
+fixture bios
+== PCI ==
+01:00.0 VGA compatible controller [0300]: Fixture GPU [1234:5678]
+== BLOCK DEVICES ==
+NAME SIZE TYPE MODEL SERIAL
+sda 1G disk Fixture_Disk SER001
+== IOMMU/DMAR (pré-configuração) ==
+fixture iommu

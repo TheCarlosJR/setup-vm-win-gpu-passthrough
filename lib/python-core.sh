@@ -651,32 +651,35 @@ python_core_config() {
     return "$_pc_cf_rc"
 }
 
-# --- Candidatos XML -----------------------------------------------------------
+# --- Arquivos candidatos ------------------------------------------------------
 
-python_core_candidato() {
-    # Gera um candidato XML e o entrega em um arquivo pertencente ao Bash.
-    #
-    #   $1 = nome do array de allowlist de pares da resposta
-    #   $2 = prefixo das variáveis de destino
-    #   $3 = nome do array de pares do payload
-    #   $4 = caminho absoluto do arquivo de destino
-    #   demais = opções extras do subcomando
-    #
-    # O core escreve somente no temporário controlado 0600 criado aqui; o
-    # conteúdo é então copiado para o destino do chamador, que continua sendo
-    # quem valida com virt-xml-validate e quem define no libvirt. Em qualquer
-    # falha o temporário é removido e o destino não é tocado, então uma geração
-    # recusada nunca deixa candidato parcial no lugar do anterior.
-    local _pc_cs_allowlist="${1:-}" _pc_cs_prefixo="${2:-}"
-    local _pc_cs_array="${3:-}" _pc_cs_destino="${4:-}"
-    local _pc_cs_temporario="" _pc_cs_payload="" _pc_cs_rc=0
-    if [ -z "$_pc_cs_allowlist" ] || [ -z "$_pc_cs_array" ] || [ -z "$_pc_cs_destino" ]; then
-        PYTHON_CORE_ERRO="Uso: python_core_candidato ALLOWLIST PREFIXO PAYLOAD DESTINO [opções]"
+python_core_arquivo_saida() {
+    # Gera um arquivo por um subcomando autorizado e o entrega ao Bash.
+    #   $1 = allowlist; $2 = prefixo; $3 = subcomando; $4 = payload;
+    #   $5 = destino absoluto; demais = opções extras.
+    # O core só escreve no temporário 0600 criado pela ponte. O destino do
+    # chamador é tocado apenas depois de resposta integralmente validada.
+    local _pc_as_allowlist="${1:-}" _pc_as_prefixo="${2:-}"
+    local _pc_as_subcomando="${3:-}" _pc_as_array="${4:-}"
+    local _pc_as_destino="${5:-}" _pc_as_temporario="" _pc_as_payload=""
+    local _pc_as_rc=0
+    if [ -z "$_pc_as_allowlist" ] || [ -z "$_pc_as_subcomando" ] \
+        || [ -z "$_pc_as_array" ] || [ -z "$_pc_as_destino" ]; then
+        PYTHON_CORE_ERRO="Uso: python_core_arquivo_saida ALLOWLIST PREFIXO SUBCOMANDO PAYLOAD DESTINO [opções]"
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_USO
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     fi
-    case "$_pc_cs_destino" in
+    case "$_pc_as_subcomando" in
+        domain-candidate|inventory-normalize) ;;
+        *)
+            PYTHON_CORE_ERRO="Subcomando sem autorização para produzir arquivo."
+            PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_USO
+            _python_core_emitir_erro
+            return "$PYTHON_CORE_STATUS"
+            ;;
+    esac
+    case "$_pc_as_destino" in
         /*) ;;
         *)
             PYTHON_CORE_ERRO="O destino do candidato precisa ser um caminho absoluto."
@@ -685,55 +688,72 @@ python_core_candidato() {
             return "$PYTHON_CORE_STATUS"
             ;;
     esac
-    if [ -L "$_pc_cs_destino" ] \
-        || { [ -e "$_pc_cs_destino" ] && [ ! -f "$_pc_cs_destino" ]; }; then
+    if [ -L "$_pc_as_destino" ] \
+        || { [ -e "$_pc_as_destino" ] && [ ! -f "$_pc_as_destino" ]; }; then
         PYTHON_CORE_ERRO="O destino do candidato precisa ser um arquivo regular, não link nem diretório."
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_USO
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     fi
-    if [ ! -d "${_pc_cs_destino%/*}" ]; then
+    if [ ! -d "${_pc_as_destino%/*}" ]; then
         PYTHON_CORE_ERRO="O diretório do destino do candidato não existe."
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_USO
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     fi
-    shift 4
+    shift 5
     python_core_verificar_instalacao || {
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_CAPABILITY
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     }
-    if ! _python_core_escrever_payload_pares "$_pc_cs_array" _pc_cs_payload; then
+    if ! _python_core_escrever_payload_pares "$_pc_as_array" _pc_as_payload; then
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_USO
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     fi
-    if ! python_core_temporario_novo _pc_cs_temporario; then
-        python_core_temporario_remover "$_pc_cs_payload"
+    if ! python_core_temporario_novo _pc_as_temporario; then
+        python_core_temporario_remover "$_pc_as_payload"
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_INTERNO
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     fi
-    _python_core_pares_comum /dev/null "$_pc_cs_allowlist" "$_pc_cs_prefixo" \
-        domain-candidate --payload-format=pairs \
-        "--input-file=$_pc_cs_payload" "--output-file=$_pc_cs_temporario" "$@" \
-        || _pc_cs_rc=$?
-    python_core_temporario_remover "$_pc_cs_payload"
-    if [ "$_pc_cs_rc" -ne 0 ]; then
-        python_core_temporario_remover "$_pc_cs_temporario"
-        return "$_pc_cs_rc"
+    _python_core_pares_comum /dev/null "$_pc_as_allowlist" "$_pc_as_prefixo" \
+        "$_pc_as_subcomando" --payload-format=pairs \
+        "--input-file=$_pc_as_payload" "--output-file=$_pc_as_temporario" "$@" \
+        || _pc_as_rc=$?
+    python_core_temporario_remover "$_pc_as_payload"
+    if [ "$_pc_as_rc" -ne 0 ]; then
+        python_core_temporario_remover "$_pc_as_temporario"
+        return "$_pc_as_rc"
     fi
-    if ! cat -- "$_pc_cs_temporario" > "$_pc_cs_destino"; then
+    if ! cat -- "$_pc_as_temporario" > "$_pc_as_destino"; then
         PYTHON_CORE_ERRO="Não foi possível publicar o candidato no destino informado."
         PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_PERSISTENCIA
-        python_core_temporario_remover "$_pc_cs_temporario"
+        python_core_temporario_remover "$_pc_as_temporario"
         _python_core_emitir_erro
         return "$PYTHON_CORE_STATUS"
     fi
-    python_core_temporario_remover "$_pc_cs_temporario"
+    chmod 600 -- "$_pc_as_destino" 2>/dev/null || {
+        PYTHON_CORE_ERRO="Não foi possível restringir o arquivo candidato a 0600."
+        PYTHON_CORE_STATUS=$PYTHON_CORE_EXIT_PERSISTENCIA
+        rm -f -- "$_pc_as_destino"
+        python_core_temporario_remover "$_pc_as_temporario"
+        _python_core_emitir_erro
+        return "$PYTHON_CORE_STATUS"
+    }
+    python_core_temporario_remover "$_pc_as_temporario"
     PYTHON_CORE_STATUS=0
     return 0
+}
+
+python_core_candidato() {
+    # Alias compatível para o candidato XML histórico.
+    local _pc_cs_allowlist="${1:-}" _pc_cs_prefixo="${2:-}"
+    local _pc_cs_array="${3:-}" _pc_cs_destino="${4:-}"
+    shift 4 || true
+    python_core_arquivo_saida "$_pc_cs_allowlist" "$_pc_cs_prefixo" \
+        domain-candidate "$_pc_cs_array" "$_pc_cs_destino" "$@"
 }
 
 # --- Disponibilidade ----------------------------------------------------------

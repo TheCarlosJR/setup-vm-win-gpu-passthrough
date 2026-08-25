@@ -642,7 +642,7 @@ executar_mutacao 'leitura aceita snapshot simbólico' \
 
 executar_mutacao 'destino do candidato não é publicado' \
     lib/python-core.sh \
-    'if ! cat -- "$_pc_cs_temporario" > "$_pc_cs_destino"; then' \
+    'if ! cat -- "$_pc_as_temporario" > "$_pc_as_destino"; then' \
     'if false; then'
 
 passo

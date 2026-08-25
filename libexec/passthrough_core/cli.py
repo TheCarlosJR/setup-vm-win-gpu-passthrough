@@ -22,7 +22,16 @@ import stat
 import sys
 from typing import Any, BinaryIO, Callable, Mapping
 
-from . import config, cpu, domain_xml, network_xml, nvidia_lookup, protocol, qemu_image
+from . import (
+    config,
+    cpu,
+    domain_xml,
+    inventory,
+    network_xml,
+    nvidia_lookup,
+    protocol,
+    qemu_image,
+)
 from .errors import (
     EXIT_INTERNAL,
     EXIT_OK,
@@ -51,7 +60,9 @@ USAGE = (
     "  domain-compare, domain-fingerprint, domain-metadata, domain-candidate,\n"
     "  network-inspect, network-overlap, nvidia-product-match,\n"
     "  nvidia-download-info, qemu-image-inspect,\n"
-    "  cpu-topology, cpu-layout, cpu-plan, cpu-memory\n"
+    "  cpu-topology, cpu-layout, cpu-plan, cpu-memory,\n"
+    "  inventory-parse, inventory-diff, inventory-disk-plan,\n"
+    "  inventory-usb-resolve, inventory-normalize\n"
     "  passthrough_core_cli.py [--traceback] SUBCOMANDO-DE-CONFIG\n"
     "      --dir-fd=N (--stdin | --input-file=CAMINHO) [--format=json|pairs]\n"
     "  Subcomandos de configuração: config-load, config-publish,\n"
@@ -667,6 +678,10 @@ _PURE_COMMANDS: dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] = {
     "domain-snapshot-internal": domain_xml.snapshot_internal_state,
     "domain-usb-hostdev": domain_xml.usb_hostdev_list,
     "domain-validate-cpu": domain_xml.validate_cpu_pinning,
+    "inventory-diff": inventory.diff_command,
+    "inventory-disk-plan": inventory.disk_plan_command,
+    "inventory-parse": inventory.parse_command,
+    "inventory-usb-resolve": inventory.usb_resolve_command,
     "network-inspect": network_xml.inspect_network,
     "network-overlap": network_xml.network_overlap,
     "nvidia-download-info": nvidia_lookup.download_info,
@@ -729,14 +744,13 @@ def _make_pure_command(
     return command
 
 
-def _command_domain_candidate(arguments: list[str], streams: Streams) -> bytes:
-    """Gera o XML candidato e o publica no arquivo controlado da ponte.
-
-    O texto do candidato nunca vai para stdout: stdout carrega só medidas
-    (mudou ou não, quantas operações, fingerprints antes/depois e digest), de
-    modo que o Bash valide o arquivo com `virt-xml-validate` e compare
-    fingerprints sem precisar interpretar XML.
-    """
+def _command_file_output(
+    name: str,
+    producer: Callable[[Mapping[str, Any]], tuple[Mapping[str, Any], str]],
+    arguments: list[str],
+    streams: Streams,
+) -> bytes:
+    """Executa um produtor puro e publica seu texto em saída controlada."""
     flags, values = _parse_options(
         arguments,
         frozenset({"--stdin"}),
@@ -747,15 +761,36 @@ def _command_domain_candidate(arguments: list[str], streams: Streams) -> bytes:
     chosen_format = _resolve_format(values)
     if "--output-file" not in values:
         raise UsageError(
-            "domain-candidate exige --output-file=CAMINHO controlado pela ponte."
+            "%s exige --output-file=CAMINHO controlado pela ponte." % name
         )
     payload = _read_transport(flags, values, streams)
-    data, candidate = domain_xml.build_candidate(payload)
+    data, candidate = producer(payload)
+    if not isinstance(data, Mapping) or not isinstance(candidate, str):
+        raise InternalError("O produtor de arquivo devolveu resposta inválida.")
     written = _write_controlled_output(values["--output-file"], candidate)
     enriched = dict(data)
     enriched["bytes_written"] = written
     enriched["sha256"] = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
-    return _render(protocol.build_response("domain-candidate", enriched), chosen_format)
+    return _render(protocol.build_response(name, enriched), chosen_format)
+
+
+def _command_inventory_normalize(arguments: list[str], streams: Streams) -> bytes:
+    return _command_file_output(
+        "inventory-normalize", inventory.render_report, arguments, streams
+    )
+
+
+def _command_domain_candidate(arguments: list[str], streams: Streams) -> bytes:
+    """Gera o XML candidato e o publica no arquivo controlado da ponte.
+
+    O texto do candidato nunca vai para stdout: stdout carrega só medidas
+    (mudou ou não, quantas operações, fingerprints antes/depois e digest), de
+    modo que o Bash valide o arquivo com `virt-xml-validate` e compare
+    fingerprints sem precisar interpretar XML.
+    """
+    return _command_file_output(
+        "domain-candidate", domain_xml.build_candidate, arguments, streams
+    )
 
 
 def _command_config_schema(arguments: list[str], streams: Streams) -> bytes:
@@ -860,6 +895,7 @@ SUBCOMMANDS: dict[str, Callable[[list[str], Streams], bytes]] = {
     "config-publish": _command_config_publish,
     "config-schema": _command_config_schema,
     "domain-candidate": _command_domain_candidate,
+    "inventory-normalize": _command_inventory_normalize,
     "payload-probe": _command_payload_probe,
     "version": _command_version,
 }
