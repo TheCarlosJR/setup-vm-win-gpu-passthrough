@@ -245,6 +245,85 @@ class UsbTests(unittest.TestCase):
         with self.assertRaises(DataError):
             domain_xml.usb_hostdev_list({"xml": fx.domain(hostdevs=ruim)})
 
+    def _usb_operation(self, state: str = "present", bus: str = "1", device: str = "7") -> dict:
+        options = {
+            "state": state, "identity_kind": "serial", "identity_sha256": "a" * 64,
+            "vendor": "046d", "product": "c52b", "bus": bus, "device": device,
+        }
+        if state == "absent":
+            options.update({"bus": "", "device": ""})
+        return {"xml": fx.domain(), "operations": [{"op": "usb-hostdev", "options": options}]}
+
+    def test_candidato_usb_presente_idempotente_e_renumerado(self) -> None:
+        dados, candidato = domain_xml.build_candidate(self._usb_operation())
+        self.assertEqual(dados["changed"], 1)
+        projetado = domain_xml.usb_hostdev_list({"xml": candidato})
+        self.assertEqual(projetado["usb_count"], 1)
+        self.assertEqual(projetado["usb_0_identity_kind"], "serial")
+        self.assertEqual(projetado["usb_0_identity_sha256"], "a" * 64)
+        self.assertEqual((projetado["usb_0_bus"], projetado["usb_0_device"]), ("1", "7"))
+
+        payload = self._usb_operation()
+        payload["xml"] = candidato
+        dados_2, candidato_2 = domain_xml.build_candidate(payload)
+        self.assertEqual(dados_2["changed"], 0)
+        self.assertEqual(candidato_2, candidato)
+
+        payload["operations"][0]["options"].update({"bus": "4", "device": "22"})
+        dados_3, candidato_3 = domain_xml.build_candidate(payload)
+        self.assertEqual(dados_3["changed"], 1)
+        projetado_3 = domain_xml.usb_hostdev_list({"xml": candidato_3})
+        self.assertEqual((projetado_3["usb_0_bus"], projetado_3["usb_0_device"]), ("4", "22"))
+
+    def test_candidato_usb_remove_exatamente_binding(self) -> None:
+        _dados, candidato = domain_xml.build_candidate(self._usb_operation())
+        payload = self._usb_operation("absent")
+        payload["xml"] = candidato
+        removido, xml_removido = domain_xml.build_candidate(payload)
+        self.assertEqual(removido["changed"], 1)
+        self.assertEqual(domain_xml.usb_hostdev_list({"xml": xml_removido})["usb_count"], 0)
+        payload["xml"] = xml_removido
+        no_op, _ = domain_xml.build_candidate(payload)
+        self.assertEqual(no_op["changed"], 0)
+
+    def test_dois_bindings_estaveis_do_mesmo_par_nao_sao_ambiguos(self) -> None:
+        _first, xml_first = domain_xml.build_candidate(self._usb_operation())
+        second = self._usb_operation(bus="2", device="8")
+        second["xml"] = xml_first
+        second["operations"][0]["options"]["identity_sha256"] = "b" * 64
+        _data, xml_second = domain_xml.build_candidate(second)
+        projected = domain_xml.usb_hostdev_list({"xml": xml_second})
+        self.assertEqual(projected["usb_count"], 2)
+        self.assertEqual(projected["ambiguous_pairs"], 0)
+
+    def test_migra_hostdev_legado_com_alias_e_endereco_sem_duplicar(self) -> None:
+        legacy = (
+            "<hostdev mode='subsystem' type='usb' managed='yes'><source>"
+            "<vendor id='0x046d'/><product id='0xc52b'/>"
+            "<address bus='1' device='7'/></source><alias name='hostdev0'/></hostdev>"
+        )
+        payload = self._usb_operation()
+        payload["xml"] = fx.domain(hostdevs=legacy)
+        _data, migrated = domain_xml.build_candidate(payload)
+        projected = domain_xml.usb_hostdev_list({"xml": migrated})
+        self.assertEqual(projected["usb_count"], 1)
+        self.assertEqual(projected["usb_0_identity_sha256"], "a" * 64)
+        self.assertNotEqual(projected["usb_0_alias"], "hostdev0")
+
+    def test_metadata_usb_orfa_e_duplicada_recusadas(self) -> None:
+        metadata = (
+            "<metadata><v:passthrough xmlns:v='%s'><v:usb-bindings>"
+            "<v:usb-binding alias='ua-vmpass-usb-aaaaaaaaaaaaaaaaaaaa' identity-kind='serial' "
+            "identity-sha256='%s' vendor='0x046d' product='0xc52b'/>"
+            "</v:usb-bindings></v:passthrough></metadata>"
+            % (domain_xml.METADATA_NAMESPACE, "a" * 64)
+        )
+        with self.assertRaises(DataError):
+            domain_xml.usb_hostdev_list({"xml": fx.domain(metadata=metadata)})
+        duplicada = metadata.replace("</v:usb-bindings>", metadata.split("<v:usb-bindings>", 1)[1].split("</v:usb-bindings>", 1)[0] + "</v:usb-bindings>")
+        with self.assertRaises(DataError):
+            domain_xml.usb_hostdev_list({"xml": fx.domain(metadata=duplicada)})
+
 
 class InterfaceTests(unittest.TestCase):
     def test_uma_nic_identificada_por_mac(self) -> None:

@@ -34,6 +34,8 @@ METADATA_NAMESPACE = "https://github.com/vm-passthrough/metadata/1"
 METADATA_PREFIX = "vmpass"
 METADATA_ROOT = "{%s}passthrough" % METADATA_NAMESPACE
 METADATA_INSTALL = "{%s}windows-install" % METADATA_NAMESPACE
+METADATA_USB_BINDINGS = "{%s}usb-bindings" % METADATA_NAMESPACE
+METADATA_USB_BINDING = "{%s}usb-binding" % METADATA_NAMESPACE
 
 _BDF = re.compile(r"^([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$")
 _MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
@@ -574,19 +576,47 @@ def disk_block_state(payload: Mapping[str, Any]) -> dict:
 
 
 def usb_hostdev_list(payload: Mapping[str, Any]) -> dict:
-    """Enumera hostdevs USB com discriminadores explícitos.
-
-    Além de vendor/product, projeta serial e endereço físico quando o XML os
-    declara. Isso permite que a etapa 15 mostre por que uma seleção é ambígua
-    em vez de escolher pela ordem de enumeração (REQ-USB-IDENTITY começa aqui;
-    o fluxo completo é de I6).
-    """
+    """Enumera hostdevs USB e vincula metadata I6 por alias estável."""
     xml = _require_text(payload, "xml")
     root = xmlutil.parse_document(xml, DOMAIN_ROOT, "XML de domínio")
     devices = _devices(root)
+    metadata = xmlutil.at_most_one(root, "metadata", "XML de domínio")
+    bindings_by_alias: dict[str, dict[str, str]] = {}
+    binding_identities: set[str] = set()
+    if metadata is not None:
+        own = xmlutil.direct(metadata, METADATA_ROOT)
+        if len(own) > 1:
+            raise DataError("metadata do projeto duplicada no XML do domínio.")
+        if own:
+            containers = xmlutil.direct(own[0], METADATA_USB_BINDINGS)
+            if len(containers) > 1:
+                raise DataError("metadata de bindings USB duplicada.")
+            if containers:
+                for binding in xmlutil.direct(containers[0], METADATA_USB_BINDING):
+                    alias_name = binding.get("alias", "")
+                    digest = binding.get("identity-sha256", "")
+                    kind = binding.get("identity-kind", "")
+                    vendor_meta = binding.get("vendor", "")
+                    product_meta = binding.get("product", "")
+                    if not alias_name or alias_name in bindings_by_alias:
+                        raise DataError("binding USB com alias ausente ou duplicado.")
+                    if digest in binding_identities:
+                        raise DataError("binding USB com identidade física duplicada.")
+                    if _HEX_DIGEST.match(digest) is None or kind not in ("serial", "port"):
+                        raise DataError("binding USB com identidade inválida.")
+                    if _USB_ID.match(vendor_meta) is None or _USB_ID.match(product_meta) is None:
+                        raise DataError("binding USB com VID/PID inválido.")
+                    bindings_by_alias[alias_name] = {
+                        "identity_kind": kind,
+                        "identity_sha256": digest,
+                        "vendor": vendor_meta.lower(),
+                        "product": product_meta.lower(),
+                    }
+                    binding_identities.add(digest)
     data: dict[str, Any] = {}
     order = 0
-    pairs_seen: dict[str, int] = {}
+    pair_bindings: dict[str, list[bool]] = {}
+    matched_aliases: set[str] = set()
     for index, hostdev in enumerate(xmlutil.direct(devices, "hostdev")):
         if hostdev.get("type") != "usb":
             continue
@@ -595,26 +625,50 @@ def usb_hostdev_list(payload: Mapping[str, Any]) -> dict:
         vendor = xmlutil.at_most_one(source, "vendor", context)
         product = xmlutil.at_most_one(source, "product", context)
         address = xmlutil.at_most_one(source, "address", context)
-        vendor_id = xmlutil.attribute(vendor, "id")
-        product_id = xmlutil.attribute(product, "id")
+        alias_node = xmlutil.at_most_one(hostdev, "alias", context)
+        vendor_id = xmlutil.attribute(vendor, "id").lower()
+        product_id = xmlutil.attribute(product, "id").lower()
+        alias_name = xmlutil.attribute(alias_node, "name")
+        if bool(vendor_id) != bool(product_id):
+            raise DataError("%s: vendor e product precisam aparecer juntos." % context)
         if vendor_id and _USB_ID.match(vendor_id) is None:
             raise DataError("%s: vendor id fora do formato 0xNNNN." % context)
         if product_id and _USB_ID.match(product_id) is None:
             raise DataError("%s: product id fora do formato 0xNNNN." % context)
-        if not vendor_id and address is None:
+        bus = xmlutil.attribute(address, "bus")
+        device = xmlutil.attribute(address, "device")
+        if bool(bus) != bool(device) or bus and (
+            re.fullmatch(r"(?:0x[0-9A-Fa-f]+|[0-9]+)", bus) is None
+            or re.fullmatch(r"(?:0x[0-9A-Fa-f]+|[0-9]+)", device) is None
+        ):
+            raise DataError("%s: endereço bus/device inválido ou incompleto." % context)
+        if not vendor_id and not bus:
             raise DataError(
                 "%s: sem vendor/product nem endereço; discriminador ausente." % context
             )
+        binding = bindings_by_alias.get(alias_name)
+        if binding:
+            matched_aliases.add(alias_name)
+            if binding["vendor"] != vendor_id or binding["product"] != product_id:
+                raise DataError("binding USB diverge do VID/PID do hostdev.")
         key = "%s:%s" % (vendor_id, product_id)
-        pairs_seen[key] = pairs_seen.get(key, 0) + 1
+        pair_bindings.setdefault(key, []).append(binding is not None)
         data["usb_%d_vendor" % order] = vendor_id
         data["usb_%d_product" % order] = product_id
-        data["usb_%d_bus" % order] = xmlutil.attribute(address, "bus")
-        data["usb_%d_device" % order] = xmlutil.attribute(address, "device")
+        data["usb_%d_bus" % order] = bus
+        data["usb_%d_device" % order] = device
         data["usb_%d_managed" % order] = hostdev.get("managed", "")
+        data["usb_%d_alias" % order] = alias_name
+        data["usb_%d_identity_kind" % order] = binding["identity_kind"] if binding else ""
+        data["usb_%d_identity_sha256" % order] = binding["identity_sha256"] if binding else ""
         order += 1
+    orphaned = set(bindings_by_alias) - matched_aliases
+    if orphaned:
+        raise DataError("metadata USB órfã no XML do domínio.")
     data["usb_count"] = order
-    data["ambiguous_pairs"] = sum(1 for count in pairs_seen.values() if count > 1)
+    data["ambiguous_pairs"] = sum(
+        1 for bound in pair_bindings.values() if len(bound) > 1 and not all(bound)
+    )
     return data
 
 
@@ -1254,6 +1308,195 @@ def _operation_install_metadata(root: ET.Element, options: Mapping[str, Any]) ->
     return xmlutil.fingerprint(root) != before
 
 
+def _operation_usb_hostdev(root: ET.Element, options: Mapping[str, Any]) -> bool:
+    """Converge um hostdev USB ligado à identidade I6 em metadata namespaced."""
+    allowed = {
+        "state", "identity_kind", "identity_sha256", "vendor", "product",
+        "bus", "device",
+    }
+    extra = set(options) - allowed
+    if extra:
+        raise DataError("opção desconhecida na operação usb-hostdev: %s" % safe_label(sorted(extra)[0]))
+    state = _require_text(options, "state")
+    if state not in ("present", "absent"):
+        raise DataError("state de usb-hostdev precisa ser present ou absent.")
+    kind = _require_text(options, "identity_kind")
+    digest = _require_text(options, "identity_sha256")
+    vendor = _require_text(options, "vendor").lower()
+    product = _require_text(options, "product").lower()
+    if kind not in ("serial", "port") or _HEX_DIGEST.match(digest) is None:
+        raise DataError("identidade estável inválida na operação usb-hostdev.")
+    if not vendor.startswith("0x"):
+        vendor = "0x" + vendor
+    if not product.startswith("0x"):
+        product = "0x" + product
+    if _USB_ID.match(vendor) is None or _USB_ID.match(product) is None:
+        raise DataError("VID/PID inválido na operação usb-hostdev.")
+    bus = _optional_text(options, "bus")
+    device = _optional_text(options, "device")
+    if state == "present":
+        if not bus.isdigit() or not device.isdigit() or int(bus) <= 0 or int(device) <= 0:
+            raise DataError("usb-hostdev present exige bus/device decimais positivos.")
+    elif bus or device:
+        raise DataError("usb-hostdev absent não aceita bus/device efêmeros.")
+
+    before = xmlutil.fingerprint(root)
+    devices = _devices(root)
+    alias_name = "ua-vmpass-usb-" + digest[:20]
+    metadata = xmlutil.at_most_one(root, "metadata", "XML de domínio")
+    own: ET.Element | None = None
+    bindings: ET.Element | None = None
+    binding_matches: list[ET.Element] = []
+    bound_aliases: set[str] = set()
+    if metadata is not None:
+        own_nodes = xmlutil.direct(metadata, METADATA_ROOT)
+        if len(own_nodes) > 1:
+            raise DataError("metadata do projeto duplicada no XML do domínio.")
+        own = own_nodes[0] if own_nodes else None
+        if own is not None:
+            binding_nodes = xmlutil.direct(own, METADATA_USB_BINDINGS)
+            if len(binding_nodes) > 1:
+                raise DataError("metadata de bindings USB duplicada.")
+            bindings = binding_nodes[0] if binding_nodes else None
+            if bindings is not None:
+                for node in xmlutil.direct(bindings, METADATA_USB_BINDING):
+                    node_digest = node.get("identity-sha256", "")
+                    node_alias = node.get("alias", "")
+                    if node_alias:
+                        bound_aliases.add(node_alias)
+                    if node_digest == digest or node_alias == alias_name:
+                        binding_matches.append(node)
+    if len(binding_matches) > 1:
+        raise DataError("identidade USB duplicada na metadata.")
+
+    hostdev_matches: list[ET.Element] = []
+    address_owners: list[ET.Element] = []
+    for hostdev in xmlutil.direct(devices, "hostdev"):
+        if hostdev.get("type") != "usb":
+            continue
+        alias_node = xmlutil.at_most_one(hostdev, "alias", "hostdev USB")
+        if xmlutil.attribute(alias_node, "name") == alias_name:
+            hostdev_matches.append(hostdev)
+        source = xmlutil.at_most_one(hostdev, "source", "hostdev USB")
+        address = xmlutil.at_most_one(source, "address", "hostdev USB") if source is not None else None
+        if state == "present" and xmlutil.attribute(address, "bus") == bus and xmlutil.attribute(address, "device") == device:
+            address_owners.append(hostdev)
+    if len(hostdev_matches) > 1:
+        raise DataError("alias USB duplicado no XML do domínio.")
+
+    if state == "absent":
+        if not binding_matches and not hostdev_matches:
+            return False
+        if len(binding_matches) != 1 or len(hostdev_matches) != 1:
+            raise DataError("binding USB órfão ou cardinalidade divergente na remoção.")
+        devices.remove(hostdev_matches[0])
+        assert bindings is not None
+        bindings.remove(binding_matches[0])
+        if not xmlutil.elements(bindings):
+            assert own is not None
+            own.remove(bindings)
+        return xmlutil.fingerprint(root) != before
+
+    if binding_matches:
+        if address_owners and (len(address_owners) != 1 or address_owners[0] not in hostdev_matches):
+            raise DataError("bus/device USB atual já pertence a outro hostdev.")
+        binding = binding_matches[0]
+        if binding.get("alias") != alias_name or binding.get("identity-kind") != kind \
+            or binding.get("vendor", "").lower() != vendor or binding.get("product", "").lower() != product:
+            raise DataError("metadata USB existente diverge da identidade pedida.")
+        if len(hostdev_matches) != 1:
+            raise DataError("metadata USB existente não possui exatamente um hostdev.")
+        hostdev = hostdev_matches[0]
+        source = xmlutil.exactly_one(hostdev, "source", "hostdev USB gerenciado")
+        vendor_node = xmlutil.exactly_one(source, "vendor", "hostdev USB gerenciado")
+        product_node = xmlutil.exactly_one(source, "product", "hostdev USB gerenciado")
+        if vendor_node.get("id", "").lower() != vendor or product_node.get("id", "").lower() != product:
+            raise DataError("hostdev USB existente diverge do binding.")
+        address = xmlutil.at_most_one(source, "address", "hostdev USB gerenciado")
+        if address is None:
+            address = ET.SubElement(source, "address")
+        address.set("bus", bus)
+        address.set("device", device)
+        hostdev.set("managed", "yes")
+    else:
+        if hostdev_matches:
+            raise DataError("hostdev USB com alias gerenciado mas sem metadata.")
+        legacy_matches: list[ET.Element] = []
+        legacy_address_matches: list[ET.Element] = []
+        for candidate in xmlutil.direct(devices, "hostdev"):
+            if candidate.get("type") != "usb":
+                continue
+            candidate_alias = xmlutil.at_most_one(candidate, "alias", "hostdev USB legado")
+            candidate_alias_name = xmlutil.attribute(candidate_alias, "name")
+            # Alias ligado a outra identidade I6 nunca pode ser adotado. Alias
+            # libvirt legado sem metadata, porém, é apenas decoração e pode ser
+            # renomeado de forma cardinalizada.
+            if candidate_alias_name in bound_aliases:
+                continue
+            candidate_source = xmlutil.exactly_one(candidate, "source", "hostdev USB legado")
+            candidate_vendor = xmlutil.at_most_one(candidate_source, "vendor", "hostdev USB legado")
+            candidate_product = xmlutil.at_most_one(candidate_source, "product", "hostdev USB legado")
+            if xmlutil.attribute(candidate_vendor, "id").lower() == vendor \
+                and xmlutil.attribute(candidate_product, "id").lower() == product:
+                legacy_matches.append(candidate)
+                candidate_address = xmlutil.at_most_one(
+                    candidate_source, "address", "hostdev USB legado"
+                )
+                if xmlutil.attribute(candidate_address, "bus") == bus \
+                    and xmlutil.attribute(candidate_address, "device") == device:
+                    legacy_address_matches.append(candidate)
+
+        legacy_match: ET.Element | None = None
+        if len(legacy_address_matches) == 1:
+            legacy_match = legacy_address_matches[0]
+        elif len(legacy_address_matches) > 1:
+            raise DataError("mais de um hostdev USB legado possui o mesmo endereço atual.")
+        elif len(legacy_matches) == 1:
+            legacy_match = legacy_matches[0]
+        elif len(legacy_matches) > 1:
+            raise DataError("mais de um hostdev USB legado possui o mesmo VID/PID sem endereço discriminador.")
+
+        if address_owners and (
+            len(address_owners) != 1 or address_owners[0] is not legacy_match
+        ):
+            raise DataError("bus/device USB atual já pertence a outro hostdev.")
+
+        if legacy_match is not None:
+            hostdev = legacy_match
+            source = xmlutil.exactly_one(hostdev, "source", "hostdev USB legado")
+            address = xmlutil.at_most_one(source, "address", "hostdev USB legado")
+            if address is None:
+                address = ET.SubElement(source, "address")
+            address.set("bus", bus)
+            address.set("device", device)
+            candidate_alias = xmlutil.at_most_one(hostdev, "alias", "hostdev USB legado")
+            if candidate_alias is None:
+                ET.SubElement(hostdev, "alias", {"name": alias_name})
+            else:
+                candidate_alias.set("name", alias_name)
+            hostdev.set("managed", "yes")
+        else:
+            hostdev = ET.SubElement(devices, "hostdev", {"mode": "subsystem", "type": "usb", "managed": "yes"})
+            source = ET.SubElement(hostdev, "source")
+            ET.SubElement(source, "vendor", {"id": vendor})
+            ET.SubElement(source, "product", {"id": product})
+            ET.SubElement(source, "address", {"bus": bus, "device": device})
+            ET.SubElement(hostdev, "alias", {"name": alias_name})
+        if metadata is None:
+            metadata = xmlutil.ensure_one(root, "metadata", _ANCHORS_METADATA)
+        if own is None:
+            own = ET.SubElement(metadata, METADATA_ROOT)
+        if bindings is None:
+            bindings = ET.SubElement(own, METADATA_USB_BINDINGS)
+        ET.SubElement(bindings, METADATA_USB_BINDING, {
+            "alias": alias_name, "identity-kind": kind, "identity-sha256": digest,
+            "vendor": vendor, "product": product,
+        })
+    # A projeção completa precisa continuar cardinalizada depois da edição.
+    usb_hostdev_list({"xml": xmlutil.serialize(root)})
+    return xmlutil.fingerprint(root) != before
+
+
 OPERATIONS: dict[str, Callable[[ET.Element, Mapping[str, Any]], bool]] = {
     "anti-code43": _operation_anti_code43,
     "cpu-pinning": _operation_cpu_pinning,
@@ -1262,6 +1505,7 @@ OPERATIONS: dict[str, Callable[[ET.Element, Mapping[str, Any]], bool]] = {
     "nic-source": _operation_nic_source,
     "remove-hugepages": _operation_remove_hugepages,
     "remove-video": _operation_remove_video,
+    "usb-hostdev": _operation_usb_hostdev,
 }
 
 OPERATION_NAMES = tuple(sorted(OPERATIONS))
