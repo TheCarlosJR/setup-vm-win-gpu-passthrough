@@ -171,6 +171,29 @@ verificar() {
     else
         v_falta "Disco da VM ainda não decidido (caminho ou opção 0)."
     fi
+
+    # Configuração anterior a I6 continua legível, mas não recebe identidade
+    # física por inferência silenciosa. O operador precisa redetectar.
+    if [ -z "${SYSTEM_DISK_FINGERPRINT:-}" ] \
+        || { [ -n "${WORKING_DISK_PATH:-}" ] && [ -z "${WORKING_DISK_FINGERPRINT:-}" ]; } \
+        || { [ -n "${HD1_BY_ID_PATH:-}" ] && [ -z "${HD1_DISK_FINGERPRINT:-}" ]; }; then
+        v_indeterminado "Identidades físicas I6 de sistema/workingDisk/HD1 ausentes; execute --redetectar."
+    else
+        local raiz_source system_members working_members="" hd1_members=""
+        raiz_source="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+        system_members="$(discos_fisicos_de "$raiz_source" 2>/dev/null || true)"
+        if [ -n "${WORKING_DISK_PATH:-}" ] && validar_working_disk_montado "$WORKING_DISK_PATH"; then
+            working_members="$(discos_fisicos_de "$WORKING_DISK_SOURCE" 2>/dev/null || true)"
+        fi
+        [ -z "${HD1_BY_ID_PATH:-}" ] || hd1_members="$(readlink -f -- "$HD1_BY_ID_PATH" 2>/dev/null || true)"
+        if [ -n "$system_members" ] \
+            && inventario_planejar_papeis_disco "$system_members" "$working_members" "$hd1_members" \
+                "$SYSTEM_DISK_FINGERPRINT" "${WORKING_DISK_FINGERPRINT:-}" "${HD1_DISK_FINGERPRINT:-}"; then
+            v_ok "Identidades físicas dos três papéis de disco permanecem distintas e convergidas."
+        else
+            v_indeterminado "Identidade física de disco não pôde ser revalidada: ${INVENTARIO_ERRO:-evidência insuficiente}."
+        fi
+    fi
     v_fim
 }
 MODO_EXECUCAO="$(modo_execucao_etapa02 "${1:-}")" \
@@ -199,6 +222,7 @@ if ! comparar_inventario_com_hardware "$INVENTARIO_USADO"; then
     [ -z "$INVENTARIO_DIFERENCAS" ] || while IFS= read -r diferenca; do erro "  - $diferenca"; done <<< "$INVENTARIO_DIFERENCAS"
     falhar "O passthrough.conf foi preservado. Execute novamente a opção 1 antes de reconfigurar."
 fi
+INVENTARIO_DECISION_INICIAL="$INVENTARIO_DECISION_FINGERPRINT"
 info "Inventário de hardware utilizado: $INVENTARIO_USADO"
 
 # Reconciliar o valor antigo antes do reset evita que uma migração de backend
@@ -227,6 +251,16 @@ ja_definido() {
 }
 
 aviso "As escolhas atuais da configuração central serão descartadas e refeitas desde 1/8 Identidade."
+declare -a CAPTURA_REVALIDACAO_I6=()
+TMP_REVALIDACAO_I6="$(umask 077; mktemp "${TMPDIR:-/tmp}/inventario-revalidacao.XXXXXXXX")" \
+    || falhar "Não foi possível reservar a revalidação do inventário."
+coletar_snapshot_inventario CAPTURA_REVALIDACAO_I6 \
+    || { rm -f -- "$TMP_REVALIDACAO_I6"; falhar "Não foi possível revalidar o inventário antes do reset."; }
+inventario_normalizar_snapshot CAPTURA_REVALIDACAO_I6 "$TMP_REVALIDACAO_I6" \
+    || { rm -f -- "$TMP_REVALIDACAO_I6"; falhar "Revalidação do inventário recusada: $INVENTARIO_ERRO"; }
+rm -f -- "$TMP_REVALIDACAO_I6"
+[ "$INVENTARIO_DECISION_FINGERPRINT" = "$INVENTARIO_DECISION_INICIAL" ] \
+    || falhar "O hardware mudou antes do reset; passthrough.conf foi preservado. Execute novamente a etapa 1."
 backup_e_resetar_config_etapa02
 if [ -n "$BACKUP_CONFIG_ETAPA02" ]; then
     info "Backup da configuração anterior: $BACKUP_CONFIG_ETAPA02"
@@ -406,9 +440,11 @@ fi
 # ----------------------------------------------------------------------------
 titulo "Etapa 3.5/8 Discos"
 info "O disco físico que contém a montagem '/' será apenas registrado e protegido das escolhas da VM."
-DISCO_RAIZ="$(disco_raiz || true)"
-if [ -n "$DISCO_RAIZ" ]; then
-    ok "Disco físico que contém '/': $DISCO_RAIZ (somente registrado e protegido; não será alterado nem oferecido à VM)"
+DISCOS_RAIZ="$(discos_raiz || true)"
+DISCO_RAIZ=""
+IFS= read -r DISCO_RAIZ <<< "$DISCOS_RAIZ"
+if [ -n "$DISCOS_RAIZ" ]; then
+    ok "Discos físicos que contêm '/': $(tr '\n' ' ' <<< "$DISCOS_RAIZ" | sed 's/[[:space:]]*$//') (somente registrados e protegidos; não serão alterados nem oferecidos à VM)"
 else
     aviso "Não consegui identificar o disco físico que contém '/'."
     aviso "As travas automáticas ficam mais fracas: confira modelo/serial com muito cuidado; nada será alterado nesta escolha."
@@ -418,18 +454,16 @@ lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL,TRAN
 echo
 
 # 5a. Disco do sistema
+NVME_ESCOLHIDO=""
 if ja_definido NVME_DEVICE; then
-    info "Disco físico que contém '/' já registrado e protegido: $NVME_DEVICE"
+    NVME_ESCOLHIDO="$NVME_DEVICE"
+    info "Disco físico que contém '/' já registrado e protegido: $NVME_ESCOLHIDO"
 else
     if [ -n "$DISCO_RAIZ" ]; then
-        salvar_conf NVME_DEVICE "$DISCO_RAIZ"
-        ok "Disco físico que contém '/' registrado e protegido: $NVME_DEVICE"
+        NVME_ESCOLHIDO="$DISCO_RAIZ"
+        ok "Disco físico que contém '/' registrado e protegido: $NVME_ESCOLHIDO"
     else
-        mapfile -t DISCOS < <(lsblk -dn -o NAME,SIZE,MODEL | awk '{print "/dev/"$0}')
-        [ "${#DISCOS[@]}" -gt 0 ] || falhar "Nenhum disco listado por lsblk."
-        echo "Qual disco físico contém a montagem '/' do Linux?"
-        IDX="$(escolher_da_lista 'Disco do sistema (número)' nao "${DISCOS[@]}")"
-        salvar_conf NVME_DEVICE "$(awk '{print $1}' <<< "${DISCOS[$((IDX - 1))]}")"
+        falhar "Não foi possível resolver integralmente os discos físicos da raiz; a fase I6 bloqueia seleção manual ambígua."
     fi
 fi
 
@@ -446,10 +480,15 @@ montagem no fstab.
 Digite 0 para dispensar o workingDisk. A dispensa explícita será salva e os
 consumidores que precisarem de armazenamento exigirão um caminho alternativo.
 EXPLICA_WORKING_DISK
+WORKING_ESCOLHIDO=""
+WORKING_DISPENSA=""
+WORKING_SOURCE_ESCOLHIDA=""
 while :; do
     CAMINHO="$(perguntar 'Caminho absoluto do workingDisk já montado (ou 0 para dispensar)' '/mnt/workingDisk')"
     if [ "$CAMINHO" = 0 ]; then
-        salvar_conf_lote WORKING_DISK_PATH "" WORKING_DISK_DISPENSADO "sim"
+        WORKING_ESCOLHIDO=""
+        WORKING_DISPENSA="sim"
+        WORKING_SOURCE_ESCOLHIDA=""
         info "workingDisk dispensado explicitamente; nenhum mountpoint foi criado ou alterado."
         break
     fi
@@ -470,16 +509,24 @@ while :; do
     info "Diagnóstico: source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE"
     confirmar "Registrar esse mountpoint externo como workingDisk?" \
         || cancelar_etapa "Escolha do workingDisk cancelada; nenhuma decisão de armazenamento foi salva."
-    salvar_conf_lote WORKING_DISK_PATH "$WORKING_DISK" WORKING_DISK_DISPENSADO ""
+    WORKING_ESCOLHIDO="$WORKING_DISK"
+    WORKING_DISPENSA=""
+    WORKING_SOURCE_ESCOLHIDA="$WORKING_DISK_SOURCE"
     break
 done
 
 # 5c. Disco físico inteiro e exclusivo da VM (HD1) - opcional
+HD1_ESCOLHIDO=""
+HD1_DISPENSA=""
+HD1_ALVO_ESCOLHIDO=""
 if ja_definido HD1_BY_ID_PATH; then
+    HD1_ESCOLHIDO="$HD1_BY_ID_PATH"
     [ "${HD1_DISPENSADO:-}" != "sim" ] \
         || falhar "Configuração contraditória: HD1_BY_ID_PATH definido e HD1_DISPENSADO=sim. Rode --redetectar."
-    info "HD1_BY_ID_PATH já definido: $HD1_BY_ID_PATH"
+    HD1_ALVO_ESCOLHIDO="$(readlink -f -- "$HD1_ESCOLHIDO" 2>/dev/null || true)"
+    info "HD1_BY_ID_PATH já definido: $HD1_ESCOLHIDO"
 elif [ "$REDETECTAR" -eq 0 ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
+    HD1_DISPENSA="sim"
     info "Sem disco físico adicional da VM (dispensa salva; use --redetectar para rever)."
 else
     titulo "Segundo disco físico pai inteiro da VM (HD1 opcional)"
@@ -545,14 +592,16 @@ EXPLICA_HD1
     if [ "$IDX" -eq 0 ]; then
         info "Nenhum disco físico adicional; a VM manterá somente o QCOW2."
         info "A dispensa fica salva até você executar esta etapa com --redetectar."
-        salvar_conf_lote HD1_BY_ID_PATH "" HD1_DISPENSADO "sim"
+        HD1_ESCOLHIDO=""
+        HD1_DISPENSA="sim"
+        HD1_ALVO_ESCOLHIDO=""
     else
         HD1="${CANDIDATOS[$((IDX - 1))]}"
         HD1_ALVO="$(readlink -f "$HD1")"
         # Travas finais, mesmo com a lista já filtrada.
         [ -n "$DISCO_RAIZ" ] && [ "$HD1_ALVO" = "$DISCO_RAIZ" ] \
             && falhar "O caminho escolhido aponta para o disco da RAIZ do Linux. Abortado."
-        SISTEMA_REAL="$(readlink -f -- "${NVME_DEVICE:-}" 2>/dev/null || true)"
+        SISTEMA_REAL="$(readlink -f -- "$NVME_ESCOLHIDO" 2>/dev/null || true)"
         [ -n "$SISTEMA_REAL" ] && [ "$HD1_ALVO" = "$SISTEMA_REAL" ] \
             && falhar "O caminho escolhido aponta para o disco do sistema. Abortado."
         if disco_em_uso_pelo_host "$HD1_ALVO"; then
@@ -573,9 +622,68 @@ EXPLICA_HD1
         confirmar_digitando AUTORIZAR \
             "Autorizar $HD1 ($HD1_ALVO) como disco físico adicional da VM?" \
             || cancelar_etapa "Disco não autorizado; a decisão de HD1 não foi salva."
-        salvar_conf_lote HD1_BY_ID_PATH "$HD1" HD1_DISPENSADO ""
+        HD1_ESCOLHIDO="$HD1"
+        HD1_DISPENSA=""
+        HD1_ALVO_ESCOLHIDO="$HD1_ALVO"
     fi
 fi
+
+# I6: os três papéis são autorizados como um único plano relacional. Caminhos
+# são apenas localizadores; os fingerprints persistidos são a identidade física
+# usada para detectar alias, troca de mídia e renomeação /dev/sdX.
+SYSTEM_MEMBERS="$DISCOS_RAIZ"
+[ -n "$SYSTEM_MEMBERS" ] \
+    || falhar "Não foi possível resolver todos os ancestrais físicos do sistema."
+WORKING_MEMBERS=""
+if [ -n "$WORKING_ESCOLHIDO" ]; then
+    WORKING_MEMBERS="$(discos_fisicos_de "$WORKING_SOURCE_ESCOLHIDA" 2>/dev/null)" \
+        || falhar "Não foi possível resolver os ancestrais físicos do workingDisk."
+    [ -n "$WORKING_MEMBERS" ] || falhar "O workingDisk não resolveu para disco físico estável."
+fi
+HD1_MEMBERS="$HD1_ALVO_ESCOLHIDO"
+inventario_planejar_papeis_disco "$SYSTEM_MEMBERS" "$WORKING_MEMBERS" "$HD1_MEMBERS" \
+    || falhar "Plano físico de discos recusado: $INVENTARIO_ERRO"
+SYSTEM_FP="$INVENTARIO_SYSTEM_FINGERPRINT"
+WORKING_FP="$INVENTARIO_WORKING_FINGERPRINT"
+HD1_FP="$INVENTARIO_HD1_FINGERPRINT"
+
+# Reobserva localizadores e identidades imediatamente antes do único commit.
+SYSTEM_MEMBERS_ATUAL="$(discos_raiz 2>/dev/null)" \
+    || falhar "A raiz deixou de resolver para todos os discos físicos durante a confirmação."
+[ "$SYSTEM_MEMBERS_ATUAL" = "$SYSTEM_MEMBERS" ] \
+    || falhar "Os ancestrais físicos do sistema mudaram durante a confirmação."
+if [ -n "$WORKING_ESCOLHIDO" ]; then
+    validar_working_disk_montado "$WORKING_ESCOLHIDO" \
+        || falhar "O workingDisk mudou antes da persistência: $WORKING_DISK_ERRO"
+    [ "$WORKING_DISK_SOURCE" = "$WORKING_SOURCE_ESCOLHIDA" ] \
+        || falhar "A origem do workingDisk mudou durante a confirmação."
+    WORKING_MEMBERS_ATUAL="$(discos_fisicos_de "$WORKING_DISK_SOURCE" 2>/dev/null)" \
+        || falhar "O workingDisk deixou de resolver para discos físicos."
+else
+    WORKING_MEMBERS_ATUAL=""
+fi
+if [ -n "$HD1_ESCOLHIDO" ]; then
+    HD1_ALVO_ATUAL="$(readlink -f -- "$HD1_ESCOLHIDO" 2>/dev/null || true)"
+    [ "$HD1_ALVO_ATUAL" = "$HD1_ALVO_ESCOLHIDO" ] \
+        || falhar "O alvo persistente do HD1 mudou durante a confirmação."
+else
+    HD1_ALVO_ATUAL=""
+fi
+inventario_planejar_papeis_disco \
+    "$SYSTEM_MEMBERS_ATUAL" "$WORKING_MEMBERS_ATUAL" "$HD1_ALVO_ATUAL" \
+    "$SYSTEM_FP" "$WORKING_FP" "$HD1_FP" \
+    || falhar "Revalidação física dos discos recusada: $INVENTARIO_ERRO"
+
+salvar_conf_lote \
+    NVME_DEVICE "$NVME_ESCOLHIDO" \
+    SYSTEM_DISK_FINGERPRINT "$SYSTEM_FP" \
+    WORKING_DISK_PATH "$WORKING_ESCOLHIDO" \
+    WORKING_DISK_FINGERPRINT "$WORKING_FP" \
+    WORKING_DISK_DISPENSADO "$WORKING_DISPENSA" \
+    HD1_BY_ID_PATH "$HD1_ESCOLHIDO" \
+    HD1_DISK_FINGERPRINT "$HD1_FP" \
+    HD1_DISPENSADO "$HD1_DISPENSA"
+ok "Papéis físicos sistema/workingDisk/HD1 persistidos sem interseções."
 
 # ----------------------------------------------------------------------------
 # 6. CPU: topologia e plano de pinning (aplicado pela etapa 17)

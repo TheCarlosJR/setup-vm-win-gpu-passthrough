@@ -62,18 +62,21 @@ limpar_temporarios_inventario() {
 }
 trap limpar_temporarios_inventario EXIT INT TERM
 
-{
-    echo "== HARDWARE IDENTITY =="; normalizar_identidade_hardware_atual
-    echo "== CPU ==";        LC_ALL=C lscpu
-    echo "== RAM ==";        sudo dmidecode --type memory
-    echo "== BASEBOARD =="; sudo dmidecode -t baseboard
-    echo "== BIOS ==";       sudo dmidecode -t bios
-    echo "== PCI ==";        LC_ALL=C lspci -Dnnk
-    echo "== BLOCK DEVICES =="; LC_ALL=C lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
-    echo "== IOMMU/DMAR (pré-configuração) =="
-    MENSAGENS_IOMMU="$(sudo dmesg | grep -i -e DMAR -e IOMMU || true)"
-    printf '%s\n' "${MENSAGENS_IOMMU:-(vazio: normal antes da etapa 11)}"
-} | tee "$TMP_INVENTARIO"
+MEMORIA_DMI="$(sudo dmidecode --type memory 2>/dev/null)" \
+    || falhar "Não foi possível capturar a memória por SMBIOS/DMI."
+BASEBOARD_DMI="$(sudo dmidecode -t baseboard 2>/dev/null)" \
+    || falhar "Não foi possível capturar a placa-base por SMBIOS/DMI."
+BIOS_DMI="$(sudo dmidecode -t bios 2>/dev/null)" \
+    || falhar "Não foi possível capturar o firmware por SMBIOS/DMI."
+MENSAGENS_IOMMU="$(sudo dmesg 2>/dev/null | grep -i -e DMAR -e IOMMU || true)"
+MENSAGENS_IOMMU="${MENSAGENS_IOMMU:-(vazio: normal antes da etapa 11)}"
+declare -a CAPTURA_INVENTARIO=()
+coletar_snapshot_inventario CAPTURA_INVENTARIO \
+    "$MEMORIA_DMI" "$BASEBOARD_DMI" "$BIOS_DMI" "$MENSAGENS_IOMMU" \
+    || falhar "Não foi possível capturar os fatos do inventário."
+inventario_normalizar_snapshot CAPTURA_INVENTARIO "$TMP_INVENTARIO" \
+    || falhar "A coleta não produziu um inventário normalizado: $INVENTARIO_ERRO"
+cat -- "$TMP_INVENTARIO"
 
 validar_inventario_principal "$TMP_INVENTARIO" \
     || falhar "A coleta não produziu um inventário completo: $INVENTARIO_ERRO"

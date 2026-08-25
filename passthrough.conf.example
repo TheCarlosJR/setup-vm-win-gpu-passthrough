@@ -36,14 +36,17 @@ IOMMU_GROUP_GPU=""               # preenchido automaticamente após a etapa 30
 DM_SERVICE=""
 
 # --- Discos e workingDisk externo (Capítulos 5, 11 e 19) ---------------------
-NVME_DEVICE=""                   # formato: /dev/<disco>, detectado pela etapa 02
+NVME_DEVICE=""                   # localizador atual do disco do sistema
+SYSTEM_DISK_FINGERPRINT=""       # SHA-256 da identidade física normalizada
 WORKING_DISK_PATH="/mnt/workingDisk"
                                  # caminho absoluto opcional, já montado pelo
                                  # operador; o projeto nunca cria/monta a base
+WORKING_DISK_FINGERPRINT=""      # vazio somente quando o papel foi dispensado
 WORKING_DISK_DISPENSADO=""       # "sim" quando você escolheu 0
 HD1_BY_ID_PATH=""                # disco INTEIRO entregue à VM (/dev/disk/by-id/...)
                                  # ex.: o pai /dev/sdb, incluindo /dev/sdb1
                                  # VAZIO = nenhum: a VM usa somente o QCOW2
+HD1_DISK_FINGERPRINT=""          # SHA-256 da identidade física normalizada
 HD1_DISPENSADO=""                # "sim" quando você escolheu 0 (sem disco físico)
                                  # a opção 3 sempre pergunta novamente
 

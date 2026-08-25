@@ -162,10 +162,14 @@ verificar() {
             v_falta "Uso do HD1 ainda não decidido na etapa 3."
         elif disco_estado_xml "$HD1_BY_ID_PATH" \
              && [ "$DISCO_XML_SOURCE" = 1 ] && [ "$DISCO_XML_EXATO" = 1 ]; then
-            if validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}"; then
-                v_ok "HD1 exato no XML e seguro no estado atual: $HD1_BY_ID_PATH."
-            else
+            if ! validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}"; then
                 v_falta "$DISCO_VM_ERRO"
+            elif [ -z "${SYSTEM_DISK_FINGERPRINT:-}" ] || [ -z "${HD1_DISK_FINGERPRINT:-}" ]; then
+                v_indeterminado "Identidades físicas I6 de sistema/HD1 ausentes; execute a etapa 3 com --redetectar."
+            elif inventario_revalidar_papeis_disco_configurados; then
+                v_ok "HD1 exato no XML, livre e com identidade física I6 convergida: $HD1_BY_ID_PATH."
+            else
+                v_falta "Identidade física do HD1 recusada: $INVENTARIO_ERRO"
             fi
         else
             v_falta "HD1 ausente, duplicado ou com atributos diferentes dos autorizados."
@@ -334,6 +338,7 @@ CAB
         printf 'HD1_BY_ID=%q\n' "${HD1_BY_ID_PATH:-}"
         printf 'DISCO_SISTEMA=%q\n' "${NVME_DEVICE:-}"
         printf 'HD1_IDENTIDADE=%q\n' "${HD1_IDENTIDADE:-}"
+        printf 'HD1_FINGERPRINT=%q\n' "${HD1_DISK_FINGERPRINT:-}"
         emitir_hook_log_fn prepare
         cat <<'CORPO'
 STATE_DIR=/run/libvirt-gpu-passthrough
@@ -585,9 +590,9 @@ install -d -m 0700 "$STATE_DIR"
 [ ! -e "$STATE_FILE" ] || falha "estado anterior ainda existe: $STATE_FILE; execute a recuperação"
 STATE_TMP="$(mktemp "$STATE_DIR/.${VM_NAME}.XXXXXX")" || falha "não foi possível criar estado"
 chmod 0600 "$STATE_TMP"
-printf 'DM_WAS_ACTIVE=%s\nGPU_DRIVER=nvidia\nAUDIO_DRIVER=%s\nHD1_ALVO=%s\nHD1_DEVNO=%s\nHD1_IDENTIDADE=%s\n' \
+printf 'DM_WAS_ACTIVE=%s\nGPU_DRIVER=nvidia\nAUDIO_DRIVER=%s\nHD1_ALVO=%s\nHD1_DEVNO=%s\nHD1_IDENTIDADE=%s\nHD1_FINGERPRINT=%s\n' \
     "$DM_WAS_ACTIVE" "${GPU_AUDIO_PCI:+snd_hda_intel}" \
-    "${SNAP_ALVO:-}" "${SNAP_DEVNO:-}" "${SNAP_IDENTIDADE:-}" > "$STATE_TMP"
+    "${SNAP_ALVO:-}" "${SNAP_DEVNO:-}" "${SNAP_IDENTIDADE:-}" "${HD1_FINGERPRINT:-}" > "$STATE_TMP"
 mv -f -- "$STATE_TMP" "$STATE_FILE"
 hook_log "estado registrado em $STATE_FILE (DM_WAS_ACTIVE=$DM_WAS_ACTIVE)"
 trap rollback_prepare ERR
@@ -624,6 +629,7 @@ CAB
         printf 'GPU_AUDIO_PCI=%q\n' "$audio_pci"
         printf 'HD1_BY_ID=%q\n' "${HD1_BY_ID_PATH:-}"
         printf 'HD1_IDENTIDADE=%q\n' "${HD1_IDENTIDADE:-}"
+        printf 'HD1_FINGERPRINT=%q\n' "${HD1_DISK_FINGERPRINT:-}"
         emitir_hook_log_fn start
         cat <<'CORPO'
 STATE_FILE="/run/libvirt-gpu-passthrough/${VM_NAME}.state"
@@ -632,11 +638,13 @@ STATE_FILE="/run/libvirt-gpu-passthrough/${VM_NAME}.state"
 HD1_ALVO_ESTADO=""
 HD1_DEVNO_ESTADO=""
 HD1_IDENTIDADE_ESTADO=""
+HD1_FINGERPRINT_ESTADO=""
 while IFS='=' read -r chave valor; do
     case "$chave" in
         HD1_ALVO) HD1_ALVO_ESTADO="$valor" ;;
         HD1_DEVNO) HD1_DEVNO_ESTADO="$valor" ;;
         HD1_IDENTIDADE) HD1_IDENTIDADE_ESTADO="$valor" ;;
+        HD1_FINGERPRINT) HD1_FINGERPRINT_ESTADO="$valor" ;;
         DM_WAS_ACTIVE|GPU_DRIVER|AUDIO_DRIVER) : ;;
         *) echo "[hook start] chave de estado desconhecida: $chave" >&2; exit 1 ;;
     esac
@@ -660,7 +668,8 @@ validar_hd1_antes_qemu() {
     identidade="$(identidade_disco "$alvo")" || return 1
     [ "$alvo" = "$HD1_ALVO_ESTADO" ] && [ "$devno" = "$HD1_DEVNO_ESTADO" ] \
         && [ "$identidade" = "$HD1_IDENTIDADE_ESTADO" ] \
-        && [ "$identidade" = "$HD1_IDENTIDADE" ] || return 1
+        && [ "$identidade" = "$HD1_IDENTIDADE" ] \
+        && [ "$HD1_FINGERPRINT_ESTADO" = "$HD1_FINGERPRINT" ] || return 1
     saida="$(lsblk -nlo NAME,MOUNTPOINTS -- "$alvo" 2>/dev/null)" || return 1
     ! awk 'NF>1 && $2!="" {achou=1} END {exit !achou}' <<< "$saida"
 }
@@ -776,7 +785,7 @@ while IFS='=' read -r chave valor; do
         DM_WAS_ACTIVE) DM_WAS_ACTIVE="$valor" ;;
         GPU_DRIVER) GPU_DRIVER="$valor" ;;
         AUDIO_DRIVER) AUDIO_DRIVER="$valor" ;;
-        HD1_ALVO|HD1_DEVNO|HD1_IDENTIDADE) : ;;
+        HD1_ALVO|HD1_DEVNO|HD1_IDENTIDADE|HD1_FINGERPRINT) : ;;
         *) dizer_erro "chave de estado desconhecida: $chave"; exit 1 ;;
     esac
 done < "$STATE_FILE"
@@ -916,6 +925,8 @@ titulo "Etapa 14: hooks dinâmicos e HD1 físico (VM: $VM_NAME)"
 # Todos os preflights ocorrem antes da primeira mutação.
 HD1_IDENTIDADE=""
 if [ -n "${HD1_BY_ID_PATH:-}" ]; then
+    inventario_revalidar_papeis_disco_configurados \
+        || falhar "Identidade física de sistema/workingDisk/HD1 recusada: $INVENTARIO_ERRO"
     validar_disco_fisico_vm "$HD1_BY_ID_PATH" "${NVME_DEVICE:-}" \
         || falhar "$DISCO_VM_ERRO"
     ALVO_HD1="$DISCO_VM_ALVO"

@@ -131,27 +131,47 @@ USB_XML_PERMITIDAS=(
     "${CORE_PARES_ENVELOPE[@]}"
     USB_COUNT AMBIGUOUS_PAIRS
     'USB_#_VENDOR' 'USB_#_PRODUCT' 'USB_#_BUS' 'USB_#_DEVICE' 'USB_#_MANAGED'
+    'USB_#_ALIAS' 'USB_#_IDENTITY_KIND' 'USB_#_IDENTITY_SHA256'
 )
 USB_AMBIGUOS=0
+USB_XML_ERRO=""
+USB_XML_LISTA=""
 listar_usb_xml() {
-    # A enumeração vem do core Python: cada hostdev USB precisa ter pelo menos
-    # um discriminador (vendor/product ou endereço físico) e a resposta informa
-    # quantos pares VID:PID estão duplicados. Nada é escolhido por ordem.
-    local xml total indice vendor produto nome_vendor nome_produto
+    # Preenche USB_XML_LISTA no shell atual. Cada linha usa TAB e sentinela '-'
+    # para preservar campos opcionais; erro nunca vira lista vazia silenciosa.
+    local xml total indice vendor produto kind digest bus device alias linha
+    local nome_vendor nome_produto nome_kind nome_digest nome_bus nome_device nome_alias
     local -a payload=()
     USB_AMBIGUOS=0
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 0
+    USB_XML_ERRO=""
+    USB_XML_LISTA=""
+    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" \
+        || { USB_XML_ERRO="Não foi possível ler o XML inativo da VM."; return 1; }
     payload=(xml "$xml")
     python_core_pares_payload USB_XML_PERMITIDAS USBX_ domain-usb-hostdev payload \
-        2>/dev/null || return 0
+        2>/dev/null || { USB_XML_ERRO="${PYTHON_CORE_ERRO:-O core recusou o XML USB.}"; return 1; }
     USB_AMBIGUOS="$USBX_AMBIGUOUS_PAIRS"
     total="$USBX_USB_COUNT"
     for (( indice = 0; indice < total; indice++ )); do
-        nome_vendor="USBX_USB_${indice}_VENDOR"
-        nome_produto="USBX_USB_${indice}_PRODUCT"
-        vendor="${!nome_vendor}"
-        produto="${!nome_produto}"
-        printf '%s %s\n' "$vendor" "$produto"
+        nome_vendor="USBX_USB_${indice}_VENDOR"; nome_produto="USBX_USB_${indice}_PRODUCT"
+        nome_kind="USBX_USB_${indice}_IDENTITY_KIND"; nome_digest="USBX_USB_${indice}_IDENTITY_SHA256"
+        nome_bus="USBX_USB_${indice}_BUS"; nome_device="USBX_USB_${indice}_DEVICE"; nome_alias="USBX_USB_${indice}_ALIAS"
+        vendor="${!nome_vendor}"; produto="${!nome_produto}"; kind="${!nome_kind}"; digest="${!nome_digest}"
+        bus="${!nome_bus}"; device="${!nome_device}"; alias="${!nome_alias}"
+        printf -v linha '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+            "${vendor:--}" "${produto:--}" "${kind:--}" "${digest:--}" \
+            "${bus:--}" "${device:--}" "${alias:--}"
+        USB_XML_LISTA+="$linha"$'\n'
+    done
+}
+
+usb_linha_ler() {
+    local linha="${1:-}" nome
+    IFS=$'\t' read -r USB_LINHA_VENDOR USB_LINHA_PRODUCT USB_LINHA_KIND \
+        USB_LINHA_DIGEST USB_LINHA_BUS USB_LINHA_DEVICE USB_LINHA_ALIAS <<< "$linha"
+    for nome in USB_LINHA_VENDOR USB_LINHA_PRODUCT USB_LINHA_KIND USB_LINHA_DIGEST \
+        USB_LINHA_BUS USB_LINHA_DEVICE USB_LINHA_ALIAS; do
+        [ "${!nome}" != - ] || printf -v "$nome" '%s' ""
     done
 }
 
@@ -164,29 +184,51 @@ verificar() {
         v_falta "VM '$VM_NAME' não existe."
         v_fim
     fi
-    local qtd tem_algo=0 estado_vm=""
+    local qtd=0 tem_algo=0 estado_vm="" usb_xml_lista=""
     # Com a VM comprovadamente desligada, o verify também prova o RETORNO ao
-    # host: dispositivos individuais visíveis no lsusb e controladora fora do
-    # vfio-pci. Com a VM ligada, o lado do host fica mudo por definição.
+    # host: dispositivos individuais reobservados por identidade estável e
+    # controladora fora do vfio-pci. Com a VM ligada, o lado do host fica mudo.
     estado_vm="$(LC_ALL=C $VIRSH domstate "$VM_NAME" 2>/dev/null || true)"
-    qtd="$($VIRSH dumpxml --inactive "$VM_NAME" | grep -c "hostdev mode='subsystem' type='usb'" || true)"
+    if listar_usb_xml; then
+        usb_xml_lista="$USB_XML_LISTA"
+        qtd="$(printf '%s' "$usb_xml_lista" | sed '/^$/d' | wc -l)"
+    else
+        tem_algo=1
+        v_indeterminado "Não foi possível inspecionar identidades USB no XML: ${USB_XML_ERRO:-erro desconhecido}."
+    fi
     if [ "${qtd:-0}" -ge 1 ]; then
         v_ok "Dispositivos USB em passthrough no XML: $qtd."
         tem_algo=1
-        if [ "$estado_vm" = "shut off" ] && command -v lsusb >/dev/null 2>&1; then
-            local par listagem par_vendor par_produto
-            listagem="$(lsusb 2>/dev/null || true)"
-            while read -r par_vendor par_produto; do
-                [ -n "$par_vendor" ] && [ -n "$par_produto" ] || continue
-                par="${par_vendor#0x}:${par_produto#0x}"
-                if grep -qiF "ID $par" <<< "$listagem"; then
-                    v_ok "USB $par visível no host com a VM desligada: retornou/permanece no host."
+        if [ "$estado_vm" = "shut off" ]; then
+            local par par_vendor par_produto par_kind par_digest par_bus par_device par_alias linha
+            local usb_xml_lista usb_captura=""
+            usb_xml_lista="$USB_XML_LISTA"
+            if ! command -v udevadm >/dev/null 2>&1; then
+                    v_indeterminado "udevadm indisponível; não é possível provar as identidades USB devolvidas ao host."
+                elif ! usb_captura="$(LC_ALL=C udevadm info --export-db 2>/dev/null)"; then
+                    v_indeterminado "udevadm falhou; nenhuma identidade USB foi considerada comprovada."
                 else
-                    v_indeterminado "USB $par não aparece no lsusb com a VM desligada: desconectado fisicamente ou não retornou ao host."
+                    while IFS= read -r linha; do
+                        [ -n "$linha" ] || continue
+                        usb_linha_ler "$linha"
+                        par_vendor="$USB_LINHA_VENDOR"; par_produto="$USB_LINHA_PRODUCT"
+                        par_kind="$USB_LINHA_KIND"; par_digest="$USB_LINHA_DIGEST"
+                        par_bus="$USB_LINHA_BUS"; par_device="$USB_LINHA_DEVICE"; par_alias="$USB_LINHA_ALIAS"
+                        [ -n "$par_vendor" ] && [ -n "$par_produto" ] || continue
+                        par="${par_vendor#0x}:${par_produto#0x}"
+                        if [ -z "$par_digest" ]; then
+                            v_indeterminado "USB $par é legado e não possui identidade serial/porta persistida; migre pela etapa 15."
+                        elif inventario_resolver_usb "$usb_captura" resolve \
+                                "${par_vendor#0x}" "${par_produto#0x}" "$par_kind" "$par_digest" \
+                                "$par_bus" "$par_device"; then
+                            v_ok "USB $par com identidade $par_kind persistida foi reobservado unicamente no host."
+                        else
+                            v_indeterminado "USB $par não teve a identidade persistida comprovada no host: ${USB_IDENTIDADE_ERRO:-ausente ou ambígua}."
+                        fi
+                    done <<< "$usb_xml_lista"
                 fi
-            done < <(listar_usb_xml)
+            fi
         fi
-    fi
     if [ -n "${USB_CTRL_PCI_IDS:-}" ]; then
         tem_algo=1
         local -a bdfs=() ids=()
@@ -242,7 +284,7 @@ verificar() {
 guard_mutation usb.configure || exit 1
 exigir_nao_root
 exigir_sudo
-exigir_comando lsusb lspci
+exigir_comando lsusb lspci udevadm virt-xml-validate
 python_core_disponivel \
     || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 exigir_conf VM_NAME
@@ -403,135 +445,314 @@ modo_remover_controladora() {
 }
 
 # --- Modo dispositivos individuais ---------------------------------------------
+USB_TRANSACAO_ERRO=""
+capturar_usb_udev() {
+    LC_ALL=C udevadm info --export-db 2>/dev/null
+}
+
+usb_aplicar_candidato() {
+    # usb_aplicar_candidato ESTADO KIND SHA VID PID [BUS DEVICE]
+    local estado="${1:-}" kind="${2:-}" digest="${3:-}" vendor="${4:-}" product="${5:-}"
+    local bus="${6:-}" device="${7:-}" captura="" captura_revalidada=""
+    local original candidato observado atual xml_check fp_original fp_check
+    local aplicacao_iniciada=0
+    USB_TRANSACAO_ERRO=""
+    original="$(mktemp)"; candidato="$(mktemp)"; observado="$(mktemp)"; xml_check="$(mktemp)" \
+        || { USB_TRANSACAO_ERRO="Não foi possível reservar temporários da transação USB."; return 1; }
+    chmod 600 -- "$original" "$candidato" "$observado" "$xml_check" || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="Não foi possível restringir temporários USB."
+        return 1
+    }
+    $VIRSH dumpxml --inactive "$VM_NAME" > "$original" 2>/dev/null || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="Não foi possível capturar o XML inativo original."
+        return 1
+    }
+    xml_dominio_fingerprint "$original" || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="XML original inválido: $XML_DOMINIO_ERRO"
+        return 1
+    }
+    fp_original="$XML_DOMINIO_FINGERPRINT"
+
+    if [ "$estado" = present ]; then
+        captura="$(capturar_usb_udev)" || {
+            rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+            USB_TRANSACAO_ERRO="Falha ao reobservar USB antes do candidato."
+            return 1
+        }
+        inventario_resolver_usb "$captura" resolve "$vendor" "$product" "$kind" "$digest" "$bus" "$device" || {
+            rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+            USB_TRANSACAO_ERRO="Identidade USB não pôde ser revalidada: $USB_IDENTIDADE_ERRO"
+            return 1
+        }
+        bus="$USB_IDENTIDADE_BUS"; device="$USB_IDENTIDADE_DEVICE"
+    else
+        bus=""; device=""
+    fi
+
+    xml_candidato_usb "$original" "$candidato" "$estado" "$kind" "$digest" \
+        "$vendor" "$product" "$bus" "$device" || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="Candidato USB recusado: $XML_CANDIDATO_ERRO"
+        return 1
+    }
+    [ "$XML_CANDIDATO_FINGERPRINT_ANTES" = "$fp_original" ] || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="O XML mudou durante a geração do candidato."
+        return 1
+    }
+    if [ "$XML_CANDIDATO_MUDOU" = 0 ]; then
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        return 0
+    fi
+    virt-xml-validate "$candidato" domain >/dev/null 2>&1 || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="O schema libvirt recusou o candidato USB."
+        return 1
+    }
+
+    if [ "$estado" = present ]; then
+        captura_revalidada="$(capturar_usb_udev)" || {
+            rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+            USB_TRANSACAO_ERRO="Falha ao reobservar USB imediatamente antes do define."
+            return 1
+        }
+        inventario_resolver_usb "$captura_revalidada" resolve "$vendor" "$product" "$kind" "$digest" "$bus" "$device" || {
+            rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+            USB_TRANSACAO_ERRO="Identidade USB mudou antes do define: $USB_IDENTIDADE_ERRO"
+            return 1
+        }
+        [ "$USB_IDENTIDADE_RENUMBERED" = 0 ] || {
+            rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+            USB_TRANSACAO_ERRO="USB renumerou durante a confirmação; execute novamente para regenerar o candidato."
+            return 1
+        }
+    fi
+    # O backup acontece antes da última comparação. Ele pode reler o domínio,
+    # portanto nenhuma leitura ou efeito externo fica entre a revalidação final
+    # abaixo e o define protegido pelos traps.
+    xml_backup "$VM_NAME"
+    $VIRSH dumpxml --inactive "$VM_NAME" > "$xml_check" 2>/dev/null \
+        || { rm -f -- "$original" "$candidato" "$observado" "$xml_check"; USB_TRANSACAO_ERRO="Não foi possível reler o XML antes do define."; return 1; }
+    xml_dominio_fingerprint "$xml_check" || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="XML concorrente inválido antes do define."
+        return 1
+    }
+    fp_check="$XML_DOMINIO_FINGERPRINT"
+    [ "$fp_check" = "$fp_original" ] || {
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        USB_TRANSACAO_ERRO="O XML foi alterado por outro processo; nada foi sobrescrito."
+        return 1
+    }
+
+    : > "$xml_check"
+    local fp_candidato="$XML_CANDIDATO_FINGERPRINT_DEPOIS" janela_rc=0 resultado=""
+    if (
+        USB_TX_ESTADO=PREPARED
+
+        usb_tx_rollback() {
+            local fp_atual="" rc_compare=0
+            if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$observado" 2>/dev/null \
+                || ! xml_dominio_fingerprint "$observado"; then
+                printf '%s\n' unproven > "$xml_check"
+                return 1
+            fi
+            fp_atual="$XML_DOMINIO_FINGERPRINT"
+            if [ "$fp_atual" = "$fp_original" ]; then
+                printf '%s\n' unchanged > "$xml_check"
+                return 0
+            fi
+            if [ -z "$fp_candidato" ] || [ "$fp_atual" != "$fp_candidato" ]; then
+                # Outro processo publicou um terceiro estado depois do nosso
+                # define. Restaurar o snapshot antigo apagaria trabalho alheio.
+                printf '%s\n' conflict > "$xml_check"
+                return 2
+            fi
+            if ! $VIRSH define --validate "$original" >/dev/null 2>&1 \
+                || ! $VIRSH dumpxml --inactive "$VM_NAME" > "$observado" 2>/dev/null; then
+                printf '%s\n' unproven > "$xml_check"
+                return 1
+            fi
+            xml_dominio_equivalente "$original" "$observado" full || rc_compare=$?
+            if [ "$rc_compare" -eq 0 ]; then
+                printf '%s\n' restored > "$xml_check"
+                return 0
+            fi
+            printf '%s\n' unproven > "$xml_check"
+            return 1
+        }
+
+        usb_tx_finalizar() {
+            local rc=$? rollback_rc=0
+            trap - EXIT INT TERM
+            if [ "$USB_TX_ESTADO" != COMMITTED ]; then
+                usb_tx_rollback || rollback_rc=$?
+                [ "$rollback_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=1
+            fi
+            exit "$rc"
+        }
+
+        # Traps armados antes do primeiro efeito. PREPARED também passa pelo
+        # rollback, que primeiro prova se o domínio ainda está no original.
+        trap usb_tx_finalizar EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+
+        if ! $VIRSH define --validate "$candidato" >/dev/null 2>&1; then
+            exit 1
+        fi
+        USB_TX_ESTADO=APPLIED
+        if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$observado" 2>/dev/null \
+            || ! xml_dominio_equivalente "$candidato" "$observado" full; then
+            exit 1
+        fi
+        USB_TX_ESTADO=VERIFIED
+        USB_TX_ESTADO=COMMITTED
+        printf '%s\n' committed > "$xml_check"
+        trap - EXIT INT TERM
+        exit 0
+    ); then
+        rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+        return 0
+    else
+        janela_rc=$?
+    fi
+
+    IFS= read -r resultado < "$xml_check" 2>/dev/null || resultado="unproven"
+    case "$resultado" in
+        restored)
+            USB_TRANSACAO_ERRO="A mutação USB falhou e o XML original foi restaurado e comprovado."
+            ;;
+        unchanged)
+            USB_TRANSACAO_ERRO="A mutação USB falhou antes de produzir efeito; o XML original foi comprovado."
+            ;;
+        conflict)
+            USB_TRANSACAO_ERRO="CONFLITO: o XML mudou depois do efeito; rollback automático recusado para não apagar trabalho concorrente. Os XMLs temporários foram preservados para recuperação manual."
+            # Preservar evidência é mais seguro que apagar snapshots em conflito.
+            return "$janela_rc"
+            ;;
+        *)
+            USB_TRANSACAO_ERRO="A mutação USB falhou e a restauração do XML não pôde ser comprovada. Os XMLs temporários foram preservados para recuperação manual."
+            return "$janela_rc"
+            ;;
+    esac
+    rm -f -- "$original" "$candidato" "$observado" "$xml_check"
+    return "$janela_rc"
+}
+
 modo_remover_dispositivos() {
     titulo "Etapa 15: remover USB passthrough da VM $VM_NAME"
-    mapfile -t ATUAIS < <(listar_usb_xml | sed '/^$/d')
+    local lista_usb=""
+    listar_usb_xml \
+        || falhar "Não foi possível enumerar o XML USB: ${USB_XML_ERRO:-erro desconhecido}."
+    lista_usb="$USB_XML_LISTA"
+    mapfile -t ATUAIS < <(printf '%s\n' "$lista_usb" | sed '/^$/d')
     [ "${#ATUAIS[@]}" -gt 0 ] || { info "Nenhum hostdev USB no XML."; exit 0; }
-    # REQ-USB-IDENTITY começa aqui: um par VID:PID duplicado no XML não pode ser
-    # removido por ordem de enumeração. O fluxo completo (serial/porta) é de I6.
-    [ "$USB_AMBIGUOS" = 0 ] \
-        || falhar "O XML possui $USB_AMBIGUOS par(es) VID:PID duplicados; a remoção automática seria ambígua. Edite o XML manualmente."
     DESCRICOES=()
     for a in "${ATUAIS[@]}"; do
-        DESCRICOES+=("vendor=$(cut -d' ' -f1 <<<"$a") product=$(cut -d' ' -f2 <<<"$a")")
+        usb_linha_ler "$a"
+        VEND="$USB_LINHA_VENDOR"; PROD="$USB_LINHA_PRODUCT"; KIND="$USB_LINHA_KIND"
+        DIGEST="$USB_LINHA_DIGEST"; BUS="$USB_LINHA_BUS"; DEVICE="$USB_LINHA_DEVICE"; ALIAS="$USB_LINHA_ALIAS"
+        if [ -z "$DIGEST" ]; then
+            DESCRICOES+=("LEGADO sem identidade estável: ${VEND}:${PROD} (migração necessária)")
+        else
+            DESCRICOES+=("${VEND}:${PROD} identidade=$KIND endereço atual=${BUS:-?}:${DEVICE:-?}")
+        fi
     done
     ESCOLHA="$(escolher_da_lista 'Qual remover? (número)' nao "${DESCRICOES[@]}")"
     SEL="${ATUAIS[$((ESCOLHA-1))]}"
-    VEND="$(cut -d' ' -f1 <<<"$SEL")"; PROD="$(cut -d' ' -f2 <<<"$SEL")"
-    xml_backup "$VM_NAME"
-    TMP="$(mktemp)"
-    cat > "$TMP" <<XML
-<hostdev mode='subsystem' type='usb' managed='yes'>
-  <source>
-    <vendor id='$VEND'/>
-    <product id='$PROD'/>
-  </source>
-</hostdev>
-XML
-    $VIRSH detach-device "$VM_NAME" "$TMP" --config
-    rm -f "$TMP"
-    ok "Removido da configuração persistente: $VEND:$PROD (vale no próximo boot da VM)."
+    usb_linha_ler "$SEL"
+    VEND="$USB_LINHA_VENDOR"; PROD="$USB_LINHA_PRODUCT"; KIND="$USB_LINHA_KIND"
+    DIGEST="$USB_LINHA_DIGEST"; BUS="$USB_LINHA_BUS"; DEVICE="$USB_LINHA_DEVICE"; ALIAS="$USB_LINHA_ALIAS"
+    [ -n "$DIGEST" ] \
+        || falhar "Hostdev legado sem serial/porta persistidos. Selecione o dispositivo conectado no modo individual para migrá-lo antes de remover."
+    confirmar "Remover exatamente esta identidade USB persistida do próximo boot da VM?" || cancelar_etapa
+    usb_aplicar_candidato absent "$KIND" "$DIGEST" "${VEND#0x}" "${PROD#0x}" \
+        || falhar "$USB_TRANSACAO_ERRO"
+    ok "Identidade USB removida da configuração persistente."
     exit 0
 }
 
 modo_dispositivos() {
-titulo "Etapa 15: USB passthrough por dispositivo (VM: $VM_NAME)"
-info "Para portas inteiras com hotplug nativo, use o modo controladora."
-mapfile -t LINHAS < <(lsusb)
-[ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
-echo
-aviso "O dispositivo escolhido fica EXCLUSIVO da VM enquanto ela estiver ligada."
-aviso "A seleção usa apenas vendor:product: unidades idênticas têm o mesmo par e qualquer uma pode ser capturada pela VM."
-aviso "Recomendado: um segundo teclado/receptor no host. Sem ele, a recuperação é por SSH ou botão POWER (troubleshooting.md)."
-info "Itens em verde já estão selecionados; escolher um deles de novo REMOVE a seleção."
+    titulo "Etapa 15: USB passthrough por dispositivo (VM: $VM_NAME)"
+    info "Para portas inteiras com hotplug nativo, use o modo controladora."
+    exigir_vm_desligada "$VM_NAME"
+    aviso "Cada dispositivo é autorizado por serial; sem serial, somente por porta física comprovada."
+    aviso "Bus/device servem apenas para localizar a observação atual e nunca são a identidade persistida."
 
-par_da_linha() {
-    # vendor:product (minúsculo) extraído de uma linha do lsusb; vazio se falhar.
-    grep -oE 'ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}' <<< "$1" | awk '{print tolower($2)}'
-}
+    while :; do
+        mapfile -t LINHAS < <(LC_ALL=C lsusb)
+        [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
+        echo
+        echo "Dispositivos USB conectados agora (0 = terminar):"
+        ESCOLHA="$(escolher_da_lista 'Dispositivo para configurar' sim "${LINHAS[@]}")"
+        [ "$ESCOLHA" -eq 0 ] && break
+        LINHA="${LINHAS[$((ESCOLHA-1))]}"
+        if [[ ! "$LINHA" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+):[[:space:]]+ID[[:space:]]+([0-9a-fA-F]{4}):([0-9a-fA-F]{4}) ]]; then
+            erro "Não consegui extrair endereço e VID:PID da linha escolhida."
+            continue
+        fi
+        BUS_ATUAL="$((10#${BASH_REMATCH[1]}))"
+        DEVICE_ATUAL="$((10#${BASH_REMATCH[2]}))"
+        VEND="${BASH_REMATCH[3],,}"; PROD="${BASH_REMATCH[4],,}"
+        USB_CAPTURA="$(capturar_usb_udev)" \
+            || falhar "udevadm não forneceu a captura USB necessária."
+        if ! inventario_resolver_usb "$USB_CAPTURA" select "$VEND" "$PROD" "" "" "$BUS_ATUAL" "$DEVICE_ATUAL"; then
+            erro "Seleção USB bloqueada: ${USB_IDENTIDADE_ERRO:-evidência serial/porta ausente ou ambígua}."
+            continue
+        fi
+        info "Identidade comprovada: tipo=$USB_IDENTIDADE_KIND, VID:PID=$VEND:$PROD."
+        [ "$USB_IDENTIDADE_KIND" != port ] \
+            || info "Fallback por porta física comprovada: $USB_IDENTIDADE_PORT"
 
-usb_hostdev_xml() {
-    # Gera o hostdev USB de vendor $1 / product $2 no arquivo $3.
-    cat > "$3" <<XML
-<hostdev mode='subsystem' type='usb' managed='yes'>
-  <source>
-    <vendor id='0x$1'/>
-    <product id='0x$2'/>
-  </source>
-</hostdev>
-XML
-}
+        listar_usb_xml \
+            || falhar "O XML USB atual é inválido; nenhuma mutação foi iniciada: ${USB_XML_ERRO:-erro desconhecido}."
+        XML_USB_ATUAL="$USB_XML_LISTA"
+        JA_PRESENTE=0
+        BUS_XML=""
+        DEVICE_XML=""
+        while IFS= read -r USB_XML_LINHA; do
+            [ -n "$USB_XML_LINHA" ] || continue
+            usb_linha_ler "$USB_XML_LINHA"
+            SHA_XML="$USB_LINHA_DIGEST"
+            BUS_EXISTENTE="$USB_LINHA_BUS"
+            DEVICE_EXISTENTE="$USB_LINHA_DEVICE"
+            [ -n "$SHA_XML" ] || continue
+            if [ "$SHA_XML" = "$USB_IDENTIDADE_SHA256" ]; then
+                JA_PRESENTE=$((JA_PRESENTE + 1))
+                BUS_XML="$BUS_EXISTENTE"
+                DEVICE_XML="$DEVICE_EXISTENTE"
+            fi
+        done <<< "$XML_USB_ATUAL"
+        [ "$JA_PRESENTE" -le 1 ] \
+            || falhar "A mesma identidade USB aparece mais de uma vez no XML; nenhuma mutação foi iniciada."
 
-# Pares já anexados ao XML da VM: começam marcados como selecionados.
-declare -A SELECIONADOS=()
-while read -r VEND_XML PROD_XML; do
-    [ -n "$VEND_XML" ] && [ -n "$PROD_XML" ] || continue
-    VEND_XML="${VEND_XML,,}"; PROD_XML="${PROD_XML,,}"
-    SELECIONADOS["${VEND_XML#0x}:${PROD_XML#0x}"]=1
-done < <(listar_usb_xml)
-
-while :; do
-    echo
-    echo "Dispositivos USB conectados agora (0 = terminar):"
-    EXIBICAO=()
-    for LINHA in "${LINHAS[@]}"; do
-        PAR="$(par_da_linha "$LINHA")"
-        if [ -n "$PAR" ] && [ -n "${SELECIONADOS[$PAR]:-}" ]; then
-            EXIBICAO+=("${C_VERDE}${LINHA}  [selecionado]${C_RESET}")
+        if [ "$JA_PRESENTE" -eq 1 ]; then
+            if [ "$BUS_XML" = "$USB_IDENTIDADE_BUS" ] && [ "$DEVICE_XML" = "$USB_IDENTIDADE_DEVICE" ]; then
+                info "Esta identidade USB já está configurada no endereço observado; nenhuma alteração é necessária."
+                continue
+            fi
+            aviso "A identidade USB reapareceu em ${USB_IDENTIDADE_BUS}:${USB_IDENTIDADE_DEVICE} (antes ${BUS_XML:-?}:${DEVICE_XML:-?})."
+            confirmar "Atualizar somente o endereço efêmero desta identidade no próximo boot?" || continue
+            usb_aplicar_candidato present "$USB_IDENTIDADE_KIND" "$USB_IDENTIDADE_SHA256" \
+                "$VEND" "$PROD" "$USB_IDENTIDADE_BUS" "$USB_IDENTIDADE_DEVICE" \
+                || falhar "$USB_TRANSACAO_ERRO"
+            ok "Mesma identidade USB reconhecida após renumeração; endereço efêmero atualizado."
         else
-            EXIBICAO+=("$LINHA")
+            confirmar "Adicionar exatamente esta identidade USB ao próximo boot da VM?" || continue
+            usb_aplicar_candidato present "$USB_IDENTIDADE_KIND" "$USB_IDENTIDADE_SHA256" \
+                "$VEND" "$PROD" "$USB_IDENTIDADE_BUS" "$USB_IDENTIDADE_DEVICE" \
+                || falhar "$USB_TRANSACAO_ERRO"
+            ok "Identidade USB persistida por $USB_IDENTIDADE_KIND; candidato validado e pós-condição comprovada."
         fi
     done
-    ESCOLHA="$(escolher_da_lista 'Dispositivo para alternar a seleção' sim "${EXIBICAO[@]}")"
-    [ "$ESCOLHA" -eq 0 ] && break
-    LINHA="${LINHAS[$((ESCOLHA-1))]}"
-    PAR="$(par_da_linha "$LINHA")"
-    if [ -z "$PAR" ]; then
-        erro "Não consegui extrair vendor:product de: $LINHA"
-        continue
-    fi
-    VEND="${PAR%%:*}"; PROD="${PAR##*:}"
 
-    if [ -n "${SELECIONADOS[$PAR]:-}" ]; then
-        echo "Já selecionado: $LINHA  (vendor=0x$VEND product=0x$PROD)"
-        confirmar "Remover a seleção (o dispositivo volta ao host no próximo boot da VM)?" || continue
-        # REQ-USB-IDENTITY: um par duplicado no XML não pode ser removido às
-        # cegas; o mesmo critério do modo --remover vale para o toggle.
-        QTD_PAR="$(listar_usb_xml | grep -cix "0x$VEND 0x$PROD" || true)"
-        if [ "${QTD_PAR:-0}" -gt 1 ]; then
-            erro "O XML tem $QTD_PAR hostdevs com o par 0x$VEND:0x$PROD; a remoção seria ambígua. Edite o XML manualmente."
-            continue
-        fi
-        if [ "${QTD_PAR:-0}" -eq 0 ]; then
-            aviso "O par 0x$VEND:0x$PROD já não está no XML (removido por fora); atualizando a lista."
-            unset 'SELECIONADOS[$PAR]'
-            continue
-        fi
-        xml_backup "$VM_NAME"
-        TMP="$(mktemp)"
-        usb_hostdev_xml "$VEND" "$PROD" "$TMP"
-        $VIRSH detach-device "$VM_NAME" "$TMP" --config
-        rm -f "$TMP"
-        unset 'SELECIONADOS[$PAR]'
-        ok "Seleção removida (vale a partir do próximo boot da VM): 0x$VEND:0x$PROD"
-        continue
-    fi
-
-    echo "Selecionado: $LINHA  (vendor=0x$VEND product=0x$PROD)"
-    confirmar "Confirmar?" || continue
-
-    xml_backup "$VM_NAME"
-    TMP="$(mktemp)"
-    usb_hostdev_xml "$VEND" "$PROD" "$TMP"
-    $VIRSH attach-device "$VM_NAME" "$TMP" --config
-    rm -f "$TMP"
-    SELECIONADOS["$PAR"]=1
-    ok "Anexado (vale a partir do próximo boot da VM): 0x$VEND:0x$PROD"
-done
-
-echo
-info "Verificação dentro do Windows: Get-PnpDevice -Class Keyboard, Mouse, AudioEndpoint"
-ok "Etapa 15 concluída."
+    echo
+    info "Verificação dentro do Windows: Get-PnpDevice -Class Keyboard, Mouse, AudioEndpoint"
+    ok "Etapa 15 concluída."
 }
 
 # --- Despacho: argumento explícito ou pergunta interativa (padrão do menu) ------
@@ -547,7 +768,7 @@ case "${1:-}" in
             info "Nenhuma controladora inteira em passthrough ainda."
         fi
         ESCOLHA_MODO="$(escolher_da_lista 'O que você quer fazer?' nao \
-            'Passar dispositivos individuais (vendor:product; ex.: Bluetooth onboard)' \
+            'Passar dispositivos individuais (identidade estável por serial/porta)' \
             'Passar uma controladora USB inteira (hotplug nativo nas portas dela)' \
             'Remover dispositivos individuais do XML' \
             'Devolver a controladora inteira ao host')"

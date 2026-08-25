@@ -20,7 +20,13 @@ verificar() {
     elif [ -z "$WORKING_DISK" ]; then
         v_falta "workingDisk ainda não configurado nem dispensado; execute a etapa 3."
     elif validar_working_disk_montado "$WORKING_DISK"; then
-        v_ok "workingDisk ativo em $WORKING_DISK (source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE)."
+        if [ -z "${WORKING_DISK_FINGERPRINT:-}" ] || [ -z "${SYSTEM_DISK_FINGERPRINT:-}" ]; then
+            v_indeterminado "Identidade física I6 do workingDisk/sistema ausente; execute a etapa 3 com --redetectar."
+        elif inventario_revalidar_papeis_disco_configurados; then
+            v_ok "workingDisk ativo e identidade física convergida em $WORKING_DISK (source=$WORKING_DISK_SOURCE; fstype=$WORKING_DISK_FSTYPE)."
+        else
+            v_falta "Identidade física do workingDisk recusada: $INVENTARIO_ERRO"
+        fi
     else
         v_falta "$WORKING_DISK_ERRO"
     fi
@@ -38,12 +44,16 @@ if [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
 fi
 [ -n "$WORKING_DISK" ] \
     || falhar "workingDisk não configurado. Execute a etapa 3 e informe um mountpoint já ativo ou escolha 0."
-exigir_comando mountpoint findmnt
+exigir_comando mountpoint findmnt lsblk udevadm
+python_core_disponivel \
+    || falhar "O core Python do projeto não respondeu: ${PYTHON_CORE_ERRO:-diagnóstico ausente}."
 
 titulo "Etapa 8: preflight do workingDisk externo"
-info "Verificação somente leitura: caminho seguro, diretório existente e mountpoint exato."
+info "Verificação somente leitura: caminho seguro, mountpoint exato e identidade física I6."
 validar_working_disk_montado "$WORKING_DISK" || falhar "$WORKING_DISK_ERRO"
+inventario_revalidar_papeis_disco_configurados \
+    || falhar "Identidade física do workingDisk recusada: $INVENTARIO_ERRO"
 info "Caminho: $WORKING_DISK"
 info "Source: $WORKING_DISK_SOURCE"
 info "Filesystem: $WORKING_DISK_FSTYPE"
-ok "workingDisk disponível; nenhuma montagem ou configuração persistente foi criada."
+ok "workingDisk disponível e fisicamente convergido; nenhuma montagem ou configuração persistente foi criada."

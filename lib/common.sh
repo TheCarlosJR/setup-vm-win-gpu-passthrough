@@ -411,14 +411,26 @@ resolver_ultimo_inventario() {
 }
 
 validar_inventario_principal() {
-    local arquivo="${1:-}" secao
+    local arquivo="${1:-}" conteudo
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" VALID ERROR SCHEMA_VERSION SOURCE_FORMAT COVERAGE
+        CPU_STATE MEMORY_STATE PCI_STATE DISKS_STATE USB_STATE INTERFACES_STATE BOOT_STATE
+        SNAPSHOT_FINGERPRINT IDENTITY_FINGERPRINT DECISION_FINGERPRINT
+    ) payload=()
     INVENTARIO_ERRO=""
     [ -f "$arquivo" ] && [ ! -L "$arquivo" ] && [ -r "$arquivo" ] && [ -s "$arquivo" ] \
         || { INVENTARIO_ERRO="Inventário inválido, vazio ou ilegível: ${arquivo:-vazio}"; return 1; }
-    for secao in '== CPU ==' '== RAM ==' '== PCI ==' '== BLOCK DEVICES =='; do
-        grep -Fqx -- "$secao" "$arquivo" \
-            || { INVENTARIO_ERRO="Inventário incompleto: seção '$secao' ausente em $arquivo."; return 1; }
-    done
+    conteudo="$(<"$arquivo")" || { INVENTARIO_ERRO="Inventário não pôde ser lido."; return 1; }
+    payload=(report_text "$conteudo")
+    python_core_pares_payload permitidas INVP_ inventory-parse payload 2>/dev/null || {
+        INVENTARIO_ERRO="${PYTHON_CORE_ERRO:-Inventário truncado, inconsistente ou fora do schema I6.}"
+        return 1
+    }
+    [ "$INVP_VALID" = 1 ] || {
+        INVENTARIO_ERRO="${INVP_ERROR:-Inventário inválido.}"
+        return 1
+    }
+    INVENTARIO_DECISION_FINGERPRINT="$INVP_DECISION_FINGERPRINT"
 }
 
 INVENTARIO_PUBLICADO=""
@@ -461,178 +473,360 @@ publicar_inventario_completo() {
     printf '%s\n' "$arquivo"
 }
 
-normalizar_identidade_hardware_atual() {
-    # Formato estável, deliberadamente sem drivers, montagens, nomes /dev/sdX
-    # ou outros dados voláteis. LC_ALL=C torna rótulos e ordenação previsíveis.
-    local lscpu_saida chave valor ram_kib
-    lscpu_saida="$(LC_ALL=C lscpu)" || return 1
-    for chave in Architecture 'CPU(s)' 'On-line CPU(s) list' 'Thread(s) per core' \
-                 'Core(s) per socket' 'Socket(s)' 'Model name'; do
-        valor="$(awk -F: -v chave="$chave" '$1 == chave {sub(/^[[:space:]]+/, "", $2); print $2; exit}' <<< "$lscpu_saida")"
-        printf 'CPU|%s|%s\n' "$chave" "$valor"
+INVENTARIO_DECISION_FINGERPRINT=""
+INVENTARIO_SYSTEM_FINGERPRINT=""
+INVENTARIO_WORKING_FINGERPRINT=""
+INVENTARIO_HD1_FINGERPRINT=""
+INVENTARIO_CONFLITOS_DISCO=0
+INVENTARIO_UDEV_STATE="unavailable"
+INVENTARIO_UDEV_REASON="probe_missing"
+
+_inventario_capturar_topologia_disco() {
+    # Preenche o array de pares indicado com capturas de bloco já realizadas
+    # pelo Bash. O Python recebe somente texto e nunca abre /dev ou /sys.
+    local nome_array="${1:-}" block_json="" udev_db="" by_id_map=""
+    local by_id_dir="" alias alvo major
+    local -n destino="$nome_array"
+    INVENTARIO_UDEV_STATE="unavailable"
+    INVENTARIO_UDEV_REASON="probe_missing"
+    block_json="$(LC_ALL=C lsblk --json --bytes \
+        -o NAME,KNAME,PATH,TYPE,MAJ:MIN,PKNAME,SIZE,MODEL,SERIAL,WWN,MOUNTPOINTS 2>/dev/null)" \
+        || return 1
+    if command -v udevadm >/dev/null 2>&1; then
+        if udev_db="$(LC_ALL=C udevadm info --export-db 2>/dev/null)"; then
+            INVENTARIO_UDEV_STATE="present"
+            INVENTARIO_UDEV_REASON=""
+        else
+            INVENTARIO_UDEV_STATE="error"
+            INVENTARIO_UDEV_REASON="probe_failed"
+            udev_db=""
+        fi
+    fi
+    by_id_dir="$(caminho_sistema /dev/disk/by-id 2>/dev/null || true)"
+    if [ -d "$by_id_dir" ]; then
+        while IFS= read -r alias; do
+            [ -L "$alias" ] || continue
+            alvo="$(readlink -f -- "$alias" 2>/dev/null || true)"
+            [ -n "$alvo" ] || continue
+            major="$(LC_ALL=C lsblk -dnro MAJ:MIN -- "$alvo" 2>/dev/null | head -n1)"
+            [[ "$major" =~ ^[0-9]+:[0-9]+$ ]] || continue
+            by_id_map+="${alias##*/}"$'\t'"$major"$'\n'
+        done < <(find "$by_id_dir" -maxdepth 1 -type l ! -name '*-part*' -print 2>/dev/null | LC_ALL=C sort)
+    fi
+    destino+=(
+        block_json "$block_json"
+        block_by_id_map "$by_id_map"
+        udev_database "$udev_db"
+    )
+}
+
+coletar_snapshot_inventario() {
+    # Captura fatos do host sem interpretar o domínio. Estados distinguem
+    # ausência, indisponibilidade, erro e coleção vazia; o core valida todas as
+    # combinações e produz o relatório canônico.
+    local nome_array="${1:-}" memory_report="${2:-}" baseboard_report="${3:-}"
+    local bios_report="${4:-}" iommu_report="${5:-}"
+    local cpu_data="" memory_data="" pci_data="" interfaces_data="" boot_data=""
+    local udev_db="" meminfo="" firmware="bios" bootloader="unknown"
+    local cpu_state=present cpu_reason="" memory_state=present memory_reason=""
+    local pci_state=present pci_reason="" disks_state=present disks_reason=""
+    local usb_state=present usb_reason="" interfaces_state=present interfaces_reason=""
+    local boot_state=present boot_reason=""
+    local -a pares=(schema_version 1)
+    local -n destino="$nome_array"
+
+    INVENTARIO_UDEV_STATE="unavailable"
+    INVENTARIO_UDEV_REASON="probe_missing"
+    cpu_data="$(LC_ALL=C lscpu 2>/dev/null)" || { cpu_state=error; cpu_reason=probe_failed; cpu_data=""; }
+    [ -n "$cpu_data" ] || { cpu_state=error; cpu_reason=malformed_capture; }
+    meminfo="$(caminho_sistema /proc/meminfo 2>/dev/null || true)"
+    if [ -r "$meminfo" ]; then
+        memory_data="$(<"$meminfo")" || { memory_state=error; memory_reason=probe_failed; memory_data=""; }
+    else
+        memory_state=unavailable; memory_reason=permission_denied
+    fi
+    pci_data="$(LC_ALL=C lspci -Dnn 2>/dev/null)" || { pci_state=error; pci_reason=probe_failed; pci_data=""; }
+    if [ "$pci_state" = present ] && [ -z "$pci_data" ]; then pci_state=empty; fi
+
+    if ! _inventario_capturar_topologia_disco pares; then
+        disks_state=error; disks_reason=probe_failed
+        pares+=(block_json "" block_by_id_map "" udev_database "")
+    fi
+    local i
+    for (( i=0; i<${#pares[@]}; i+=2 )); do
+        [ "${pares[$i]}" != udev_database ] || udev_db="${pares[$((i+1))]}"
     done
-    ram_kib="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)"
-    [[ "$ram_kib" =~ ^[0-9]+$ ]] || return 1
-    printf 'RAM_MIB|%s\n' "$((ram_kib / 1024))"
-    LC_ALL=C lspci -Dnn | awk '
-        {
-            bdf=$1; classe=""; id=""
-            for (i=2; i<=NF; i++) {
-                if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]:$/ && classe == "") {
-                    classe=$i; gsub(/[\[\]:]/, "", classe)
-                } else if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]/) {
-                    id=$i; gsub(/[\[\]]/, "", id)
-                }
-            }
-            if (bdf != "" && classe != "" && id != "") print "PCI|" bdf "|" classe "|" id
-        }
-    ' | LC_ALL=C sort
-    LC_ALL=C lsblk -bdnP -o SIZE,MODEL,SERIAL,TYPE | awk '
-        /TYPE="disk"/ {
-            linha=$0; sub(/^SIZE=/, "BYTES=", linha)
-            gsub(/[[:space:]]+/, " ", linha); print "DISK|" linha
-        }
-    ' | LC_ALL=C sort
-}
-
-extrair_identidade_inventario() {
-    local arquivo="$1" identidade
-    identidade="$(awk '/^== HARDWARE IDENTITY ==$/ {captura=1; next} /^== / {if (captura) exit} captura && /^(CPU\||RAM_MIB\||PCI\||DISK\|)/ {print}' "$arquivo")"
-    if [ -n "$identidade" ]; then
-        printf '%s\n' "$identidade"
-        return 0
+    if [ -n "$udev_db" ]; then
+        # Overrides de teste podem fornecer a captura diretamente.
+        INVENTARIO_UDEV_STATE=present
+        INVENTARIO_UDEV_REASON=""
     fi
+    case "$INVENTARIO_UDEV_STATE" in
+        present)
+            if grep -Fq 'E: DEVTYPE=usb_device' <<< "$udev_db"; then
+                :
+            else
+                usb_state=empty
+                udev_db=""
+            fi
+            ;;
+        error)
+            usb_state=error
+            usb_reason="${INVENTARIO_UDEV_REASON:-probe_failed}"
+            udev_db=""
+            ;;
+        *)
+            usb_state=unavailable
+            usb_reason="${INVENTARIO_UDEV_REASON:-probe_missing}"
+            udev_db=""
+            ;;
+    esac
 
-    # Compatibilidade com relatórios anteriores à seção normalizada. Só os
-    # campos estáveis são extraídos; se algum conjunto não puder ser provado,
-    # a comparação posterior falha fechada e pede uma nova coleta.
-    awk '
-        function tamanho_em_bytes(texto, numero, unidade, mult) {
-            numero=texto + 0
-            unidade=substr(texto, length(texto), 1)
-            mult=1
-            if (unidade == "K") mult=1024
-            else if (unidade == "M") mult=1048576
-            else if (unidade == "G") mult=1073741824
-            else if (unidade == "T") mult=1099511627776
-            else if (unidade == "P") mult=1125899906842624
-            else unidade=""
-            if (unidade == "") return sprintf("%.0f", numero)
-            return sprintf("%.0f", numero * mult)
-        }
-        /^== CPU ==$/ {secao="cpu"; next}
-        /^== RAM ==$/ {secao="ram"; next}
-        /^== PCI ==$/ {secao="pci"; next}
-        /^== BLOCK DEVICES ==$/ {secao="disk"; cabecalho=""; next}
-        /^== / {secao=""}
-        secao == "cpu" && index($0, ":") {
-            chave=$0; sub(/:.*/, "", chave); gsub(/^[[:space:]]+|[[:space:]]+$/, "", chave)
-            if (chave == "Architecture" || chave == "CPU(s)" || chave == "On-line CPU(s) list" ||
-                chave == "Thread(s) per core" || chave == "Core(s) per socket" ||
-                chave == "Socket(s)" || chave == "Model name") {
-                valor=$0; sub(/^[^:]*:[[:space:]]*/, "", valor)
-                cpu[chave]=valor
-            }
-        }
-        secao == "ram" && /^[[:space:]]*Size:[[:space:]]*[0-9]+[[:space:]]+(MB|GB|TB)/ {
-            valor=$2 + 0; unidade=$3
-            if (unidade == "GB") valor *= 1024
-            else if (unidade == "TB") valor *= 1048576
-            ram += valor
-        }
-        secao == "pci" && /^([[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:)?[[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]]\.[0-7][[:space:]]/ {
-            bdf=$1
-            if (bdf !~ /^[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:/) bdf="0000:" bdf
-            classe=""; id=""
-            for (i=2; i<=NF; i++) {
-                if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]:$/ && classe == "") {
-                    classe=$i; gsub(/[\[\]:]/, "", classe)
-                } else if ($i ~ /^\[[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]:[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]\]/) {
-                    id=$i; gsub(/[\[\]]/, "", id)
-                }
-            }
-            if (classe != "" && id != "") pci[++npci]="PCI|" bdf "|" classe "|" id
-        }
-        secao == "disk" && cabecalho == "" && /NAME/ && /SIZE/ && /TYPE/ && /MODEL/ && /SERIAL/ {
-            cabecalho=$0
-            psize=index(cabecalho, "SIZE"); ptype=index(cabecalho, "TYPE")
-            pmodel=index(cabecalho, "MODEL"); pserial=index(cabecalho, "SERIAL")
-            next
-        }
-        secao == "disk" && cabecalho != "" {
-            tipo=substr($0, ptype, pmodel-ptype); gsub(/^[[:space:]]+|[[:space:]]+$/, "", tipo)
-            if (tipo == "disk") {
-                tamanho=substr($0, psize, ptype-psize); modelo=substr($0, pmodel, pserial-pmodel); serial=substr($0, pserial)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", tamanho)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", modelo)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", serial)
-                disco[++ndisco]="DISK|BYTES=\"" tamanho_em_bytes(tamanho) "\" MODEL=\"" modelo "\" SERIAL=\"" serial "\" TYPE=\"disk\""
-            }
-        }
-        END {
-            ordem[1]="Architecture"; ordem[2]="CPU(s)"; ordem[3]="On-line CPU(s) list"
-            ordem[4]="Thread(s) per core"; ordem[5]="Core(s) per socket"
-            ordem[6]="Socket(s)"; ordem[7]="Model name"
-            for (i=1; i<=7; i++) print "CPU|" ordem[i] "|" cpu[ordem[i]]
-            if (ram > 0) print "RAM_MIB|" ram
-            for (i=1; i<=npci; i++) print pci[i]
-            for (i=1; i<=ndisco; i++) print disco[i]
-        }
-    ' "$arquivo" | {
-        # CPU mantém ordem semântica; os dois inventários de conjuntos precisam
-        # da mesma ordem C usada pela coleta nova.
-        awk '/^CPU\||^RAM_MIB\|/ {print; next} /^PCI\|/ {pci[++np]=$0; next} /^DISK\|/ {disk[++nd]=$0} END {
-            for (i=1; i<=np; i++) print pci[i] | "LC_ALL=C sort"
-            close("LC_ALL=C sort")
-            for (i=1; i<=nd; i++) print disk[i] | "LC_ALL=C sort"
-            close("LC_ALL=C sort")
-        }'
-    }
-}
-
-comparar_inventario_com_hardware() {
-    # O segundo argumento é uma fotografia normalizada opcional, usada apenas
-    # por testes. Em produção ela é sempre coletada novamente do kernel.
-    local arquivo="${1:-}" atual="${2:-}" esperado ram_antiga ram_atual tolerancia diferencas=""
-    INVENTARIO_DIFERENCAS=""
-    validar_inventario_principal "$arquivo" || return 1
-    esperado="$(extrair_identidade_inventario "$arquivo")"
-    if [ -z "$(grep '^CPU|' <<< "$esperado")" ] \
-       || [ -z "$(grep '^RAM_MIB|' <<< "$esperado")" ] \
-       || [ -z "$(grep '^PCI|' <<< "$esperado")" ] \
-       || [ -z "$(grep '^DISK|' <<< "$esperado")" ]; then
-        INVENTARIO_ERRO="Inventário sem identidade suficiente para comparação; execute novamente a etapa 1."
-        return 1
-    fi
-    [ -n "$atual" ] || atual="$(normalizar_identidade_hardware_atual)" \
-        || { INVENTARIO_ERRO="Não foi possível obter a identidade atual do hardware."; return 1; }
-
-    if [ "$(grep '^CPU|' <<< "$esperado")" != "$(grep '^CPU|' <<< "$atual")" ]; then
-        diferencas+="CPU: identidade ou topologia mudou."$'\n'
-    fi
-    ram_antiga="$(awk -F'|' '$1 == "RAM_MIB" {print $2; exit}' <<< "$esperado")"
-    ram_atual="$(awk -F'|' '$1 == "RAM_MIB" {print $2; exit}' <<< "$atual")"
-    if [[ "$ram_antiga" =~ ^[0-9]+$ ]] && [[ "$ram_atual" =~ ^[0-9]+$ ]]; then
-        tolerancia=$((ram_antiga / 20))
-        [ "$tolerancia" -ge 1024 ] || tolerancia=1024
-        if [ "$ram_atual" -lt $((ram_antiga - tolerancia)) ] \
-           || [ "$ram_atual" -gt $((ram_antiga + tolerancia)) ]; then
-            diferencas+="RAM: inventário=${ram_antiga} MiB, atual=${ram_atual} MiB (tolerância=${tolerancia} MiB)."$'\n'
+    if command -v ip >/dev/null 2>&1; then
+        interfaces_data="$(LC_ALL=C ip -j -details link 2>/dev/null)" \
+            || { interfaces_state=error; interfaces_reason=probe_failed; interfaces_data=""; }
+        if [ "$interfaces_state" = present ] && [ "$interfaces_data" = "[]" ]; then
+            interfaces_state=empty
+            interfaces_data=""
         fi
     else
-        diferencas+="RAM: total não pôde ser comparado."$'\n'
+        interfaces_state=unavailable; interfaces_reason=probe_missing
     fi
-    if [ "$(grep '^PCI|' <<< "$esperado")" != "$(grep '^PCI|' <<< "$atual")" ]; then
-        diferencas+="PCI: conjunto normalizado de dispositivos mudou."$'\n'
-    fi
-    if [ "$(grep '^DISK|' <<< "$esperado")" != "$(grep '^DISK|' <<< "$atual")" ]; then
-        diferencas+="Discos: modelo, serial ou tamanho mudou."$'\n'
-    fi
-    if [ -n "$diferencas" ]; then
-        INVENTARIO_DIFERENCAS="${diferencas%$'\n'}"
-        INVENTARIO_ERRO="O hardware atual diverge do último inventário completo."
+    [ -d "$(caminho_sistema /sys/firmware/efi 2>/dev/null || true)" ] && firmware=uefi
+    bootloader="$(detectar_bootloader 2>/dev/null || true)"
+    case "$bootloader" in grub|kernelstub) ;; *) bootloader=unknown ;; esac
+    boot_data="FIRMWARE=$firmware"$'\n'"SECURE_BOOT=unknown"$'\n'"BOOTLOADER=$bootloader"
+
+    pares+=(
+        cpu_state "$cpu_state" cpu_reason "$cpu_reason" cpu_data "$cpu_data"
+        memory_state "$memory_state" memory_reason "$memory_reason" memory_data "$memory_data"
+        memory_report "${memory_report:-$memory_data}"
+        pci_state "$pci_state" pci_reason "$pci_reason" pci_data "$pci_data"
+        disks_state "$disks_state" disks_reason "$disks_reason"
+        usb_state "$usb_state" usb_reason "$usb_reason" usb_data "$udev_db"
+        interfaces_state "$interfaces_state" interfaces_reason "$interfaces_reason" interfaces_data "$interfaces_data"
+        boot_state "$boot_state" boot_reason "$boot_reason" boot_data "$boot_data"
+        baseboard_report "${baseboard_report:-(indisponível)}"
+        bios_report "${bios_report:-(indisponível)}"
+        iommu_report "${iommu_report:-(vazio: normal antes da etapa 11)}"
+    )
+    destino=("${pares[@]}")
+}
+
+inventario_normalizar_snapshot() {
+    local nome_payload="${1:-}" destino="${2:-}"
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" VALID ERROR SCHEMA_VERSION SOURCE_FORMAT
+        COVERAGE CPU_STATE MEMORY_STATE PCI_STATE DISKS_STATE USB_STATE
+        INTERFACES_STATE BOOT_STATE FACT_COUNT SNAPSHOT_FINGERPRINT
+        IDENTITY_FINGERPRINT DECISION_FINGERPRINT BYTES_WRITTEN SHA256
+    )
+    INVENTARIO_ERRO=""
+    python_core_arquivo_saida permitidas INVN_ inventory-normalize \
+        "$nome_payload" "$destino" || {
+        INVENTARIO_ERRO="${PYTHON_CORE_ERRO:-O core recusou a captura de inventário.}"
+        return 1
+    }
+    INVENTARIO_DECISION_FINGERPRINT="$INVN_DECISION_FINGERPRINT"
+}
+
+inventario_planejar_papeis_disco() {
+    local system_members="${1:-}" working_members="${2:-}" hd1_members="${3:-}"
+    local expected_system="${4:-}" expected_working="${5:-}" expected_hd1="${6:-}"
+    local -a payload=() permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" VALID ERROR SYSTEM_STATE WORKING_STATE HD1_STATE
+        SYSTEM_FINGERPRINT WORKING_FINGERPRINT HD1_FINGERPRINT CONFLICT_COUNT
+        'CONFLICT_#_LEFT' 'CONFLICT_#_RIGHT' 'CONFLICT_#_IDENTITY'
+    )
+    INVENTARIO_ERRO=""
+    INVENTARIO_SYSTEM_FINGERPRINT=""; INVENTARIO_WORKING_FINGERPRINT=""; INVENTARIO_HD1_FINGERPRINT=""
+    INVENTARIO_CONFLITOS_DISCO=0
+    _inventario_capturar_topologia_disco payload \
+        || { INVENTARIO_ERRO="Não foi possível capturar a topologia física de discos."; return 1; }
+    payload+=(
+        system_members "$system_members" working_members "$working_members" hd1_members "$hd1_members"
+        expected_system_fingerprint "$expected_system"
+        expected_working_fingerprint "$expected_working"
+        expected_hd1_fingerprint "$expected_hd1"
+    )
+    python_core_pares_payload permitidas INVD_ inventory-disk-plan payload || {
+        INVENTARIO_ERRO="${PYTHON_CORE_ERRO:-O core recusou a topologia física de discos.}"
+        return 1
+    }
+    INVENTARIO_SYSTEM_FINGERPRINT="$INVD_SYSTEM_FINGERPRINT"
+    INVENTARIO_WORKING_FINGERPRINT="$INVD_WORKING_FINGERPRINT"
+    INVENTARIO_HD1_FINGERPRINT="$INVD_HD1_FINGERPRINT"
+    INVENTARIO_CONFLITOS_DISCO="$INVD_CONFLICT_COUNT"
+    if [ "$INVD_VALID" != 1 ]; then
+        INVENTARIO_ERRO="${INVD_ERROR:-Papéis de disco fisicamente incompatíveis.}"
         return 1
     fi
+}
+
+inventario_revalidar_papeis_disco_configurados() {
+    # Reobserva os três papéis persistidos pela I6 como um único plano. Esta
+    # função só faz probes de leitura no Bash; o core compara as identidades e
+    # recusa troca de mídia, alias entre papéis ou evidência incompleta.
+    local sistema="${NVME_DEVICE:-}" working="${WORKING_DISK_PATH:-}"
+    local hd1="${HD1_BY_ID_PATH:-}" system_members working_members="" hd1_members=""
+    INVENTARIO_ERRO=""
+
+    [ -n "$sistema" ] && [ -n "${SYSTEM_DISK_FINGERPRINT:-}" ] || {
+        INVENTARIO_ERRO="Identidade física do disco do sistema ausente; execute a etapa 3 com --redetectar."
+        return 1
+    }
+    if [ -n "$working" ] && [ "${WORKING_DISK_DISPENSADO:-}" = sim ]; then
+        INVENTARIO_ERRO="workingDisk está simultaneamente configurado e dispensado."
+        return 1
+    fi
+    if [ -n "$hd1" ] && [ "${HD1_DISPENSADO:-}" = sim ]; then
+        INVENTARIO_ERRO="HD1 está simultaneamente configurado e dispensado."
+        return 1
+    fi
+
+    system_members="$(discos_raiz 2>/dev/null)" || {
+        INVENTARIO_ERRO="Não foi possível reobservar todos os discos físicos da raiz do sistema."
+        return 1
+    }
+    [ -n "$system_members" ] || {
+        INVENTARIO_ERRO="O papel sistema não resolveu para disco físico."
+        return 1
+    }
+
+    if [ -n "$working" ]; then
+        [ -n "${WORKING_DISK_FINGERPRINT:-}" ] || {
+            INVENTARIO_ERRO="Identidade física do workingDisk ausente; execute a etapa 3 com --redetectar."
+            return 1
+        }
+        validar_working_disk_montado "$working" || {
+            INVENTARIO_ERRO="${WORKING_DISK_ERRO:-O workingDisk não pôde ser revalidado.}"
+            return 1
+        }
+        working_members="$(discos_fisicos_de "$WORKING_DISK_SOURCE" 2>/dev/null)" || {
+            INVENTARIO_ERRO="Não foi possível reobservar todos os discos físicos do workingDisk."
+            return 1
+        }
+        [ -n "$working_members" ] || {
+            INVENTARIO_ERRO="O workingDisk não resolveu para disco físico."
+            return 1
+        }
+    elif [ -n "${WORKING_DISK_FINGERPRINT:-}" ]; then
+        INVENTARIO_ERRO="Fingerprint de workingDisk existe sem WORKING_DISK_PATH."
+        return 1
+    fi
+
+    if [ -n "$hd1" ]; then
+        [ -n "${HD1_DISK_FINGERPRINT:-}" ] || {
+            INVENTARIO_ERRO="Identidade física do HD1 ausente; execute a etapa 3 com --redetectar."
+            return 1
+        }
+        hd1_members="$(readlink -f -- "$hd1" 2>/dev/null)" || {
+            INVENTARIO_ERRO="O localizador persistente do HD1 não pôde ser resolvido."
+            return 1
+        }
+        [ -n "$hd1_members" ] || {
+            INVENTARIO_ERRO="O localizador persistente do HD1 resolveu vazio."
+            return 1
+        }
+    elif [ -n "${HD1_DISK_FINGERPRINT:-}" ]; then
+        INVENTARIO_ERRO="Fingerprint de HD1 existe sem HD1_BY_ID_PATH."
+        return 1
+    fi
+
+    inventario_planejar_papeis_disco \
+        "$system_members" "$working_members" "$hd1_members" \
+        "$SYSTEM_DISK_FINGERPRINT" "${WORKING_DISK_FINGERPRINT:-}" \
+        "${HD1_DISK_FINGERPRINT:-}" || return 1
+}
+
+# Parsers current-v1, legacy-v0 e v2 vivem exclusivamente em inventory.py.
+# A fachada Bash só transporta o relatório como dado pelo canal controlado.
+
+comparar_inventario_com_hardware() {
+    # O segundo argumento current-v1 continua aceito para caracterização. Em
+    # produção, Bash recaptura todos os fatos e o core compara dois modelos.
+    local arquivo="${1:-}" atual="${2:-}" esperado tmp=""
+    local -a payload=() captura=() permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" EQUAL PHYSICAL_CHANGED STATE_CHANGED
+        COVERAGE_CHANGED FORMAT_ONLY REQUIRES_REDETECT CHANGE_COUNT
+        'CHANGE_#_CATEGORY' 'CHANGE_#_PATH' 'CHANGE_#_OLD_STATE'
+        'CHANGE_#_NEW_STATE' 'CHANGE_#_MESSAGE'
+    )
+    INVENTARIO_DIFERENCAS=""
+    validar_inventario_principal "$arquivo" || return 1
+    esperado="$(<"$arquivo")" || { INVENTARIO_ERRO="Não foi possível reler o inventário validado."; return 1; }
+    if [ -z "$atual" ]; then
+        coletar_snapshot_inventario captura || {
+            INVENTARIO_ERRO="Não foi possível obter a captura atual do hardware."
+            return 1
+        }
+        tmp="$(umask 077; mktemp "${TMPDIR:-/tmp}/inventario-atual.XXXXXXXX")" || return 1
+        if ! inventario_normalizar_snapshot captura "$tmp"; then
+            rm -f -- "$tmp"
+            return 1
+        fi
+        atual="$(<"$tmp")"
+        rm -f -- "$tmp"
+    fi
+    payload=(expected_report "$esperado" actual_capture "$atual")
+    python_core_pares_payload permitidas INVDIFF_ inventory-diff payload || {
+        INVENTARIO_DIFERENCAS="${PYTHON_CORE_ERRO:-Captura atual inválida.}"
+        INVENTARIO_ERRO="${PYTHON_CORE_ERRO:-Não foi possível comparar o inventário com a captura atual.}"
+        return 1
+    }
+    if [ "$INVDIFF_REQUIRES_REDETECT" = 1 ]; then
+        local indice nome_categoria nome_caminho nome_mensagem caminho_rotulo
+        for (( indice=0; indice<INVDIFF_CHANGE_COUNT; indice++ )); do
+            nome_categoria="INVDIFF_CHANGE_${indice}_CATEGORY"
+            nome_caminho="INVDIFF_CHANGE_${indice}_PATH"
+            nome_mensagem="INVDIFF_CHANGE_${indice}_MESSAGE"
+            case "${!nome_caminho}" in
+                cpu) caminho_rotulo=CPU ;;
+                memory) caminho_rotulo=RAM ;;
+                pci) caminho_rotulo=PCI ;;
+                disks) caminho_rotulo=Discos ;;
+                usb) caminho_rotulo=USB ;;
+                interfaces) caminho_rotulo=Interfaces ;;
+                boot) caminho_rotulo=Boot ;;
+                *) caminho_rotulo="${!nome_caminho}" ;;
+            esac
+            INVENTARIO_DIFERENCAS+="$caminho_rotulo: ${!nome_mensagem} (${!nome_categoria})."$'\n'
+        done
+        INVENTARIO_DIFERENCAS="${INVENTARIO_DIFERENCAS%$'\n'}"
+        INVENTARIO_ERRO="O hardware atual diverge semanticamente do último inventário completo."
+        return 1
+    fi
+}
+
+inventario_resolver_usb() {
+    # inventario_resolver_usb DADOS MODO VID PID KIND SHA BUS DEVICE
+    local usb_data="${1:-}" mode="${2:-}" vendor="${3:-}" product="${4:-}"
+    local kind="${5:-}" digest="${6:-}" bus="${7:-}" device="${8:-}"
+    local -a payload=(
+        usb_data "$usb_data" mode "$mode" vendor "$vendor" product "$product"
+        identity_kind "$kind" identity_sha256 "$digest"
+        expected_bus "$bus" expected_device "$device"
+    ) permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}" VALID ERROR MATCH_COUNT IDENTITY_KIND
+        IDENTITY_SHA256 VENDOR PRODUCT PORT BUS DEVICE RENUMBERED
+    )
+    USB_IDENTIDADE_ERRO=""; USB_IDENTIDADE_KIND=""; USB_IDENTIDADE_SHA256=""
+    USB_IDENTIDADE_VENDOR=""; USB_IDENTIDADE_PRODUCT=""; USB_IDENTIDADE_PORT=""
+    USB_IDENTIDADE_BUS=""; USB_IDENTIDADE_DEVICE=""; USB_IDENTIDADE_RENUMBERED=0
+    python_core_pares_payload permitidas USBID_ inventory-usb-resolve payload || {
+        USB_IDENTIDADE_ERRO="${PYTHON_CORE_ERRO:-O core recusou a captura USB.}"
+        return 1
+    }
+    USB_IDENTIDADE_ERRO="$USBID_ERROR"
+    USB_IDENTIDADE_KIND="$USBID_IDENTITY_KIND"
+    USB_IDENTIDADE_SHA256="$USBID_IDENTITY_SHA256"
+    USB_IDENTIDADE_VENDOR="$USBID_VENDOR"
+    USB_IDENTIDADE_PRODUCT="$USBID_PRODUCT"
+    USB_IDENTIDADE_PORT="$USBID_PORT"
+    USB_IDENTIDADE_BUS="$USBID_BUS"
+    USB_IDENTIDADE_DEVICE="$USBID_DEVICE"
+    USB_IDENTIDADE_RENUMBERED="$USBID_RENUMBERED"
+    [ "$USBID_VALID" = 1 ] || return 1
 }
 
 # --- Configuração central (passthrough.conf) ---------------------------------
@@ -644,8 +838,9 @@ CHAVES_CONF_PERMITIDAS=(
     GPU_PCI_ID GPU_AUDIO_PCI_ID GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID
     IOMMU_GROUP_GPU DM_SERVICE
     USB_CTRL_PCI_IDS USB_CTRL_VENDOR_DEVICE_IDS USB_CTRL_IOMMU_GROUP
-    NVME_DEVICE WORKING_DISK_PATH WORKING_DISK_DISPENSADO
-    HD1_BY_ID_PATH HD1_DISPENSADO
+    NVME_DEVICE SYSTEM_DISK_FINGERPRINT
+    WORKING_DISK_PATH WORKING_DISK_FINGERPRINT WORKING_DISK_DISPENSADO
+    HD1_BY_ID_PATH HD1_DISK_FINGERPRINT HD1_DISPENSADO
     QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS VM_CORES VM_THREADS
     CPUS_VM CPUS_HOST HUGEPAGES_1G ISO_WINDOWS ISO_VIRTIO NVIDIA_DRIVER_EXE
     REDE_MODO INTERFACE_FISICA REDE_BRIDGE REDE_LIBVIRT
@@ -1573,8 +1768,9 @@ backup_e_resetar_config_etapa02() {
         USUARIO_LINUX VM_NAME BOOTLOADER
         GPU_PCI_ID GPU_AUDIO_PCI_ID GPU_VENDOR_DEVICE_ID GPU_AUDIO_VENDOR_DEVICE_ID
         IOMMU_GROUP_GPU DM_SERVICE
-        NVME_DEVICE WORKING_DISK_PATH WORKING_DISK_DISPENSADO
-        HD1_BY_ID_PATH HD1_DISPENSADO
+        NVME_DEVICE SYSTEM_DISK_FINGERPRINT
+        WORKING_DISK_PATH WORKING_DISK_FINGERPRINT WORKING_DISK_DISPENSADO
+        HD1_BY_ID_PATH HD1_DISK_FINGERPRINT HD1_DISPENSADO
         CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB HUGEPAGES_1G
         INTERFACE_FISICA REDE_MODO VM_IP_FIXO IP_FIXO_HOST REDE_NAT_CIDR
         TRANSFER_USER AIRLOCK_DIR ISO_WINDOWS ISO_VIRTIO
@@ -2779,6 +2975,17 @@ xml_candidato_fonte_nic() {
     _xml_candidato_gerar "$1" "$2" \
         op_count 1 op_0 nic-source \
         op_0_mac "$3" op_0_type "$4" op_0_attribute "$5" op_0_value "$6"
+}
+
+xml_candidato_usb() {
+    # xml_candidato_usb ORIGEM DESTINO ESTADO KIND SHA VID PID [BUS DEVICE]
+    local estado="${3:-}" kind="${4:-}" digest="${5:-}"
+    local vendor="${6:-}" product="${7:-}" bus="${8:-}" device="${9:-}"
+    _xml_candidato_gerar "$1" "$2" \
+        op_count 1 op_0 usb-hostdev \
+        op_0_state "$estado" op_0_identity_kind "$kind" \
+        op_0_identity_sha256 "$digest" op_0_vendor "$vendor" \
+        op_0_product "$product" op_0_bus "$bus" op_0_device "$device"
 }
 
 XML_COMPARACAO_ERRO=""

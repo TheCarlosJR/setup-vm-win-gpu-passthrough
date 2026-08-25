@@ -1,0 +1,17 @@
+libexec/passthrough_core/inventory.py
+tests/check-python-boundary.py
+tests/fixtures/i6/block-normalize.json
+tests/fixtures/i6/current-v1-reordered.txt
+tests/fixtures/i6/current-v1.txt
+tests/fixtures/i6/hostile.txt
+tests/fixtures/i6/interfaces.json
+tests/fixtures/i6/legacy-v0.txt
+tests/fixtures/i6/lscpu.txt
+tests/fixtures/i6/meminfo.txt
+tests/fixtures/i6/pci.txt
+tests/fixtures/i6/storage-distinct.json
+tests/fixtures/i6/usb-port.json
+tests/fixtures/i6/usb-serial.json
+tests/manifests/i6-files.txt
+tests/python/test_inventory.py
+tests/test-i6-inventory.sh

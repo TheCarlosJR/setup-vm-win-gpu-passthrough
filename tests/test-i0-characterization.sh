@@ -180,7 +180,10 @@ EXAMPLE_HASH_AFTER=$(sha256sum "$ROOT/passthrough.conf.example")
 # USB_CTRL_PCI_IDS, USB_CTRL_VENDOR_DEVICE_IDS e USB_CTRL_IOMMU_GROUP, vazias
 # por padrão. O hash anterior era
 # e26fc804889420ff8f5ec714ca8f82e6232ac1825ec54cadf941470f06c27878.
-[[ $EXAMPLE_HASH_BEFORE == 16dba90bf8513ddccf9ba59ea2e0c80514aea427514dac605240b66c07bc63ff ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
+# Baseline atualizado em I6: o exemplo ganhou os fingerprints físicos de
+# sistema, workingDisk e HD1, todos vazios até a redetecção explícita. O hash
+# anterior era 16dba90bf8513ddccf9ba59ea2e0c80514aea427514dac605240b66c07bc63ff.
+[[ $EXAMPLE_HASH_BEFORE == e9ca7aef879147bffe2fe2044035c2c224c79df105bd87a064ceb8178bfa50db ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
 [[ $ROUNDTRIP_BEFORE != "$(sha256sum "$TMP/batch-before" | cut -d' ' -f1)" ]] || : # mudança anterior foi intencional
 
 # A matriz de I0 deve cobrir cada chave pública individualmente, inclusive as
@@ -256,10 +259,10 @@ validar_inventario_principal "$FIXTURES/inventory/legacy.txt" || fail "$INVENTAR
 expect_failure 'inventário truncado' validar_inventario_principal "$FIXTURES/inventory/truncated.txt"
 SNAPSHOT=$(sed -n '/^== HARDWARE IDENTITY ==$/,/^== CPU ==$/p' "$FIXTURES/inventory/current.txt" | sed '1d;$d')
 comparar_inventario_com_hardware "$FIXTURES/inventory/current.txt" "$SNAPSHOT" || fail "identidade atual: $INVENTARIO_ERRO"
-# Oráculo atual: a comparação ainda é sensível à ordem textual dos registros
-# CPU/DISK. I6 deve normalizar por identidade; I0 apenas fixa a lacuna.
-expect_failure 'inventário equivalente reordenado (lacuna conhecida)' comparar_inventario_com_hardware "$FIXTURES/inventory/current-reordered.txt" "$SNAPSHOT"
-[[ ${INVENTARIO_DIFERENCAS:-} == *CPU* && ${INVENTARIO_DIFERENCAS:-} == *Discos* ]] || fail 'oráculo de ordem do inventário mudou sem atualização explícita'
+# I6 fecha a lacuna histórica: ordem textual de CPU/PCI/discos não altera o
+# modelo semântico nem exige redetecção.
+comparar_inventario_com_hardware "$FIXTURES/inventory/current-reordered.txt" "$SNAPSHOT" \
+    || fail "inventário semanticamente equivalente foi recusado: $INVENTARIO_ERRO"
 expect_failure 'identidade de hardware alterada' comparar_inventario_com_hardware "$FIXTURES/inventory/identity-changed.txt" "$SNAPSHOT"
 [[ ${INVENTARIO_DIFERENCAS:-} == *CPU* && ${INVENTARIO_DIFERENCAS:-} == *Discos* ]] || fail 'mudança de identidade não discriminou CPU/discos'
 INV_EMPTY="$TMP/inventory-empty"
