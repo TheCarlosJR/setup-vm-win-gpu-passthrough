@@ -174,16 +174,27 @@ USB_AMBIGUOS=0
 USB_XML_ERRO=""
 USB_XML_LISTA=""
 listar_usb_xml() {
+    # listar_usb_xml [ARQUIVO]
     # Preenche USB_XML_LISTA no shell atual. Cada linha usa TAB e sentinela '-'
     # para preservar campos opcionais; erro nunca vira lista vazia silenciosa.
+    # Sem argumento lê o XML inativo da VM; com ARQUIVO lê aquele documento, que
+    # é como a pós-condição inspeciona o que o libvirt publicou sem gastar uma
+    # segunda leitura do domínio.
+    local arquivo="${1:-}"
     local xml total indice vendor produto kind digest bus device alias linha
     local nome_vendor nome_produto nome_kind nome_digest nome_bus nome_device nome_alias
     local -a payload=()
     USB_AMBIGUOS=0
     USB_XML_ERRO=""
     USB_XML_LISTA=""
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" \
-        || { USB_XML_ERRO="Não foi possível ler o XML inativo da VM."; return 1; }
+    if [ -n "$arquivo" ]; then
+        _xml_ler_arquivo "$arquivo" \
+            || { USB_XML_ERRO="XML observado ausente ou ilegível."; return 1; }
+        xml="$XML_CONTEUDO"
+    else
+        xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" \
+            || { USB_XML_ERRO="Não foi possível ler o XML inativo da VM."; return 1; }
+    fi
     payload=(xml "$xml")
     python_core_pares_payload USB_XML_PERMITIDAS USBX_ domain-usb-hostdev payload \
         2>/dev/null || { USB_XML_ERRO="${PYTHON_CORE_ERRO:-O core recusou o XML USB.}"; return 1; }
@@ -210,6 +221,70 @@ usb_linha_ler() {
         USB_LINHA_BUS USB_LINHA_DEVICE USB_LINHA_ALIAS; do
         [ "${!nome}" != - ] || printf -v "$nome" '%s' ""
     done
+}
+
+usb_reducao_identidade() {
+    # usb_reducao_identidade ORIGEM DESTINO KIND SHA VID PID
+    # Gera em DESTINO o XML de ORIGEM sem o hostdev USB desta identidade e sem
+    # a binding dela: a projeção que ignora exatamente o que esta transação
+    # pediu, e nada além disso.
+    xml_candidato_usb "$1" "$2" absent "$3" "$4" "$5" "$6"
+}
+
+usb_publicado_e_o_candidato() {
+    # usb_publicado_e_o_candidato CANDIDATO OBSERVADO KIND SHA VID PID
+    # 0 quando OBSERVADO é o CANDIDATO a menos do que o libvirt aloca DENTRO do
+    # hostdev desta identidade.
+    #
+    # Por que não comparar os dois inteiros: o libvirt normaliza o que guarda.
+    # Ao publicar um hostdev USB novo ele aloca <address type='usb' .../> e o
+    # reposiciona em <devices>, e a comparação canônica preserva ordem de
+    # propósito. O candidato, portanto, NUNCA volta idêntico do define, e exigir
+    # igualdade total transformava toda adição em falso conflito. Reduzir os
+    # dois lados pela mesma identidade remove justamente o que o libvirt mexeu e
+    # mantém sob prova todo o resto do domínio, que é o que distingue
+    # normalização do hipervisor de escrita concorrente de terceiro.
+    local candidato="$1" observado="$2" kind="$3" digest="$4" vendor="$5" product="$6"
+    local reduzido_candidato reduzido_observado rc=1
+    reduzido_candidato="$(mktemp)" || return 1
+    reduzido_observado="$(mktemp)" || { rm -f -- "$reduzido_candidato"; return 1; }
+    if chmod 600 -- "$reduzido_candidato" "$reduzido_observado" \
+        && usb_reducao_identidade "$candidato" "$reduzido_candidato" "$kind" "$digest" "$vendor" "$product" \
+        && usb_reducao_identidade "$observado" "$reduzido_observado" "$kind" "$digest" "$vendor" "$product" \
+        && xml_dominio_equivalente "$reduzido_candidato" "$reduzido_observado" full; then
+        rc=0
+    fi
+    rm -f -- "$reduzido_candidato" "$reduzido_observado"
+    return "$rc"
+}
+
+usb_identidade_no_estado() {
+    # usb_identidade_no_estado ARQUIVO ESTADO KIND SHA
+    # 0 quando ARQUIVO contém a identidade exatamente no estado pedido. É o
+    # complemento indispensável da redução acima: sozinha, ela também aprovaria
+    # um define que não tivesse feito efeito algum.
+    local arquivo="$1" estado="$2" kind="$3" digest="$4" achados=0 linha
+    listar_usb_xml "$arquivo" || return 1
+    while IFS= read -r linha; do
+        [ -n "$linha" ] || continue
+        usb_linha_ler "$linha"
+        [ "$USB_LINHA_DIGEST" = "$digest" ] || continue
+        [ "$USB_LINHA_KIND" = "$kind" ] || return 1
+        achados=$((achados + 1))
+    done <<< "$USB_XML_LISTA"
+    case "$estado" in
+        present) [ "$achados" -eq 1 ] ;;
+        absent)  [ "$achados" -eq 0 ] ;;
+        *) return 1 ;;
+    esac
+}
+
+usb_poscondicao_provada() {
+    # usb_poscondicao_provada CANDIDATO OBSERVADO ESTADO KIND SHA VID PID
+    # O publicado precisa ser o candidato fora da identidade E precisar estar
+    # no estado pedido dentro dela. As duas metades juntas provam a mutação.
+    usb_publicado_e_o_candidato "$1" "$2" "$4" "$5" "$6" "$7" || return 1
+    usb_identidade_no_estado "$2" "$3" "$4" "$5"
 }
 
 verificar() {
@@ -588,7 +663,7 @@ usb_aplicar_candidato() {
     }
 
     : > "$xml_check"
-    local fp_candidato="$XML_CANDIDATO_FINGERPRINT_DEPOIS" janela_rc=0 resultado=""
+    local janela_rc=0 resultado=""
     if (
         USB_TX_ESTADO=PREPARED
 
@@ -604,9 +679,11 @@ usb_aplicar_candidato() {
                 printf '%s\n' unchanged > "$xml_check"
                 return 0
             fi
-            if [ -z "$fp_candidato" ] || [ "$fp_atual" != "$fp_candidato" ]; then
-                # Outro processo publicou um terceiro estado depois do nosso
-                # define. Restaurar o snapshot antigo apagaria trabalho alheio.
+            if ! usb_publicado_e_o_candidato "$candidato" "$observado" \
+                "$kind" "$digest" "$vendor" "$product"; then
+                # O estado atual não é o que ESTA transação publicou: outro
+                # processo escreveu depois do nosso define. Restaurar o snapshot
+                # antigo apagaria trabalho alheio.
                 printf '%s\n' conflict > "$xml_check"
                 return 2
             fi
@@ -645,7 +722,8 @@ usb_aplicar_candidato() {
         fi
         USB_TX_ESTADO=APPLIED
         if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$observado" 2>/dev/null \
-            || ! xml_dominio_equivalente "$candidato" "$observado" full; then
+            || ! usb_poscondicao_provada "$candidato" "$observado" \
+                "$estado" "$kind" "$digest" "$vendor" "$product"; then
             exit 1
         fi
         USB_TX_ESTADO=VERIFIED

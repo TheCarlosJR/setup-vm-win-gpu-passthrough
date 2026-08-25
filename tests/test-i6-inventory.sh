@@ -305,6 +305,27 @@ case "$command_name" in
         count=$((count + 1))
         printf '%s\n' "$count" > "$USB_DEFINE_COUNT"
         cp -- "$candidate" "${USB_STATE:?}"
+        if [[ ${USB_NORMALIZE_DEFINE:-0} -eq 1 ]]; then
+            # Emula o que o libvirt real faz ao publicar: aloca o endereço USB
+            # do hostdev que ainda não tem um e reposiciona o elemento em
+            # <devices>. Sem isto o define do harness é um cp, e a pós-condição
+            # nunca enfrenta o que o hipervisor de verdade devolve.
+            python3 - "${USB_STATE:?}" <<'NORMALIZE'
+import sys
+import xml.etree.ElementTree as ET
+
+arvore = ET.parse(sys.argv[1])
+devices = arvore.getroot().find("devices")
+for hostdev in list(devices.findall("hostdev")):
+    if hostdev.get("type") != "usb":
+        continue
+    if hostdev.find("address") is None:
+        ET.SubElement(hostdev, "address", {"type": "usb", "bus": "0", "port": "2"})
+    devices.remove(hostdev)
+    devices.insert(0, hostdev)
+arvore.write(sys.argv[1], encoding="unicode", xml_declaration=True)
+NORMALIZE
+        fi
         if [[ ${USB_CONCURRENT_AFTER_DEFINE:-0} -eq $count ]]; then
             cp -- "${USB_CONCURRENT:?}" "${USB_STATE:?}"
         fi
@@ -445,5 +466,34 @@ grep -q 'bus="4" device="22"' "$USB_STATE" \
 run_usb_stage '1\ns\n' --remover
 [[ $USB_STAGE_RC -eq 0 ]] || fail 'remoção USB explícita falhou'
 ! grep -q "type=\"usb\"" "$USB_STATE" || fail 'remoção USB deixou hostdev gerenciado'
+
+# O define real do libvirt NÃO devolve o candidato: ele aloca <address
+# type='usb'> no hostdev novo e o reposiciona em <devices>. Exigir igualdade
+# canônica total com o candidato transformava toda adição em falso conflito,
+# com o efeito já publicado e o rollback recusado. A pós-condição precisa
+# aceitar a normalização do hipervisor e continuar provando que nada mais mudou.
+cp "$USB_INITIAL" "$USB_STATE"
+export USB_BUS=1 USB_DEVICE=7
+cp "$FIXTURES/usb-serial.json" "$USB_CAPTURE"
+export USB_CONCURRENT_BACKUP=0 USB_CONCURRENT_DUMP=0 USB_CONCURRENT_AFTER_DEFINE=0
+export USB_SIGNAL_AFTER_DEFINE=0 USB_FAIL_DEFINE=0 USB_FAIL_DUMP=0 USB_NORMALIZE_DEFINE=1
+run_usb_stage '1\n1\ns\n0\n'
+[[ $USB_STAGE_RC -eq 0 ]] \
+    || fail "normalização do libvirt virou falso conflito: $(<"$USB_HARNESS/stderr")"
+[[ $(<"$USB_DEFINE_COUNT") == 1 ]] || fail 'adição normalizada não convergiu com um define'
+grep -q 'type="usb" bus="0" port="2"' "$USB_STATE" \
+    || fail 'harness não aplicou a normalização que este caso exige'
+grep -q 'identity-sha256=' "$USB_STATE" \
+    || fail 'adição normalizada não persistiu binding estável'
+
+# Sob normalização, escrita concorrente de terceiro continua sendo conflito:
+# a redução pela identidade só perdoa o que o libvirt mexe DENTRO do hostdev.
+cp "$USB_INITIAL" "$USB_STATE"
+export USB_CONCURRENT_AFTER_DEFINE=1
+run_usb_stage '1\n1\ns\n0\n'
+[[ $USB_STAGE_RC -ne 0 ]] || fail 'escrita concorrente pós-define virou sucesso sob normalização'
+cmp -s "$USB_STATE" "$USB_CONCURRENT" \
+    || fail 'rollback apagou o estado publicado por terceiro sob normalização'
+export USB_CONCURRENT_AFTER_DEFINE=0 USB_NORMALIZE_DEFINE=0
 
 printf '%s\n' 'OK: I6 inventário/legado/diff/discos/USB herméticos e sem efeitos no host'
