@@ -182,7 +182,7 @@ Etapas com vários blocos internos os anunciam como `Etapa N.x`, por exemplo
 | 12 | `40-criar-vm` | cria qcow2 + AppArmor + VM via virt-install, já com o canal virtio `org.qemu.guest_agent.0`; a NIC nasce em NAT `default` temporária e seu MAC é persistido; abra o console no "Press any key..." |
 | 13 | `41-instalacao-windows` | manual, em sub-passos `13.1` a `13.17`: instalação (driver `viostor\w11\amd64` na tela de discos, guest-tools) e pós-instalação (Fast Startup; o driver NVIDIA do `13.15` tem caminho automático na etapa 16, depois da etapa 14) |
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
-| 15 | `51-usb-passthrough` | opcional; dispositivos individuais (vendor:product, inclui adaptadores Bluetooth) ou uma controladora USB PCI inteira com hotplug nativo nas portas dela |
+| 15 | `51-usb-passthrough` | opcional; dispositivos individuais (vendor:product, inclui adaptadores Bluetooth e o rádio Bluetooth integrado à placa-mãe, sem VFIO e sem tocar no grupo IOMMU) ou uma controladora USB PCI inteira com hotplug nativo nas portas dela |
 | 16 | `55-driver-nvidia-vm` | instala o driver NVIDIA dentro do Windows sem monitor dedicado: baixa o pacote oficial, injeta o `qemu-guest-agent` no QCOW2 se faltar, dispara unidade systemd que liga a VM, instala silenciosamente (`-s -noreboot` via guest-exec), confirma no convidado e desliga |
 | 17 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
 | 18 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |

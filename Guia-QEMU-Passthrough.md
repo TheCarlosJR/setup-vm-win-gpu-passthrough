@@ -635,6 +635,22 @@ nessas portas: qualquer dispositivo plugado nelas, inclusive adaptadores
 Bluetooth, aparece na VM na hora. As portas somem do host enquanto a VM roda e
 voltam quando ela desliga; `--remover-controladora` desfaz.
 
+O Bluetooth integrado à placa-mãe entra pelo modo por dispositivo, nunca pelo
+`--controladora`. Os dois mecanismos não se parecem por baixo: `--controladora`
+é passthrough PCI por VFIO e leva o grupo IOMMU inteiro junto, enquanto o modo
+por dispositivo abre o USB pelo usbfs e o expõe no `qemu-xhci` que a VM já tem,
+sem consultar o grupo IOMMU e sem desbindar a controladora PCI. É por isso que
+o rádio Bluetooth de uma porta cuja controladora divide grupo IOMMU com SATA,
+NVMe e rede pode ser passado com segurança: esses três continuam no host.
+
+Em placas com WiFi e Bluetooth no mesmo módulo (MediaTek, Intel, Realtek),
+apenas o rádio Bluetooth é USB e é só ele que viaja; o WiFi é uma função PCIe
+separada e permanece no host. Enquanto a VM estiver ligada o host perde o
+`hci0`, então teclado, mouse, headset e áudio Bluetooth do Linux param até a VM
+desligar. Dentro do Windows o rádio quase sempre exige o driver do fabricante
+da placa; sem ele o aparelho fica como desconhecido no Gerenciador de
+Dispositivos. Confirme com `Get-PnpDevice -Class Bluetooth`.
+
 Evite deixar o host sem nenhum teclado ao usar a etapa 15: sem um segundo
 teclado em porta do host, a recuperação de emergência é por SSH de outro
 dispositivo (`virsh shutdown`) ou, em último caso, o botão POWER.

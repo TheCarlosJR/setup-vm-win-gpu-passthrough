@@ -24,7 +24,7 @@
 #   51-usb-passthrough.sh --verificar            verifica sem alterar
 # Adição e remoção são persistentes e valem no próximo boot da VM.
 # ============================================================================
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
@@ -103,6 +103,43 @@ dispositivos_usb_da_controladora() {
             printf '%s:%s %s\n' "$vid" "$pid" "$nome"
         done < <(find "$caminho" -maxdepth 3 -name product 2>/dev/null | sort)
     done
+}
+
+usb_controladora_pci() {
+    # BDF da controladora PCI dona do dispositivo USB bus:device observado
+    # agora. Falha (sem eco) quando o sysfs não permite concluir.
+    local bus="${1:-}" device="${2:-}" dir busnum devnum caminho tronco
+    [[ "$bus" =~ ^[0-9]+$ ]] && [[ "$device" =~ ^[0-9]+$ ]] || return 1
+    for dir in /sys/bus/usb/devices/*; do
+        [ -r "$dir/busnum" ] && [ -r "$dir/devnum" ] || continue
+        IFS= read -r busnum < "$dir/busnum" || continue
+        IFS= read -r devnum < "$dir/devnum" || continue
+        [ "$((10#$busnum))" -eq "$((10#$bus))" ] || continue
+        [ "$((10#$devnum))" -eq "$((10#$device))" ] || continue
+        caminho="$(readlink -f -- "$dir")" || return 1
+        # .../pci0000:00/0000:00:01.2/0000:01:00.0/usb1/1-5 -> 0000:01:00.0
+        tronco="${caminho%%/usb[0-9]*}"
+        [ "$tronco" != "$caminho" ] || return 1
+        printf '%s\n' "${tronco##*/}"
+        return 0
+    done
+    return 1
+}
+
+usb_coberto_por_controladora() {
+    # Ecoa o BDF da controladora JÁ em passthrough que cobre bus:device.
+    # Serve só para avisar: um hostdev individual numa porta dessas é redundante.
+    local bus="${1:-}" device="${2:-}" dono="" bdf
+    local -a configuradas=()
+    [ -n "${USB_CTRL_PCI_IDS:-}" ] || return 1
+    dono="$(usb_controladora_pci "$bus" "$device")" || return 1
+    IFS=',' read -r -a configuradas <<< "$USB_CTRL_PCI_IDS"
+    for bdf in "${configuradas[@]}"; do
+        [ "$bdf" = "$dono" ] || continue
+        printf '%s\n' "$dono"
+        return 0
+    done
+    return 1
 }
 
 enumerar_controladoras() {
@@ -293,6 +330,8 @@ vm_existe "$VM_NAME" || falhar "A VM '$VM_NAME' não existe. Execute a etapa 12 
 echo
 info "Finalidade: dar entrada real ao Windows: dispositivos USB individuais ou uma controladora USB PCI inteira (hotplug nativo nas portas dela)."
 info "Adaptadores Bluetooth são dispositivos USB e aparecem nas listas; passar um deles dá a pilha Bluetooth inteira à VM (o host a perde enquanto ela roda)."
+info "Isso vale também para o Bluetooth integrado à placa-mãe: em módulos combo, só o rádio Bluetooth é USB e viaja; o WiFi é função PCIe separada e continua no host."
+info "O modo individual NÃO usa VFIO nem toca no grupo IOMMU: a controladora PCI da porta segue no host, com SATA, NVMe e rede intactos."
 aviso "Tudo que for passado fica EXCLUSIVO da VM enquanto ela estiver ligada; volta ao host quando ela desliga."
 aviso "Se você passar o ÚNICO teclado/mouse do host, a recuperação sem a VM cooperando é por SSH de outro dispositivo (virsh shutdown) ou, em último caso, o botão POWER."
 info "Tanto a adição quanto a remoção passam a valer no próximo boot da VM, não na sessão já em execução."
@@ -686,9 +725,20 @@ modo_dispositivos() {
     while :; do
         mapfile -t LINHAS < <(LC_ALL=C lsusb)
         [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
+        # Os rótulos só decoram a lista; a identidade continua saindo de $LINHAS.
+        ROTULOS=()
+        for LINHA in "${LINHAS[@]}"; do
+            ROTULO="$LINHA"
+            if [[ "$LINHA" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+): ]]; then
+                DONO="$(usb_coberto_por_controladora \
+                    "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" || true)"
+                [ -z "$DONO" ] || ROTULO="$LINHA  $'\033[0;33m'[já vai à VM pela controladora $DONO]$'\033[0m'"
+            fi
+            ROTULOS+=("$ROTULO")
+        done
         echo
         echo "Dispositivos USB conectados agora (0 = terminar):"
-        ESCOLHA="$(escolher_da_lista 'Dispositivo para configurar' sim "${LINHAS[@]}")"
+        ESCOLHA="$(escolher_da_lista 'Dispositivo para configurar' sim "${ROTULOS[@]}")"
         [ "$ESCOLHA" -eq 0 ] && break
         LINHA="${LINHAS[$((ESCOLHA-1))]}"
         if [[ ! "$LINHA" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+):[[:space:]]+ID[[:space:]]+([0-9a-fA-F]{4}):([0-9a-fA-F]{4}) ]]; then
@@ -698,6 +748,11 @@ modo_dispositivos() {
         BUS_ATUAL="$((10#${BASH_REMATCH[1]}))"
         DEVICE_ATUAL="$((10#${BASH_REMATCH[2]}))"
         VEND="${BASH_REMATCH[3],,}"; PROD="${BASH_REMATCH[4],,}"
+        DONO_CTRL="$(usb_coberto_por_controladora "$BUS_ATUAL" "$DEVICE_ATUAL" || true)"
+        if [ -n "$DONO_CTRL" ]; then
+            aviso "Este dispositivo está numa porta da controladora $DONO_CTRL, que já vai INTEIRA à VM; um hostdev individual aqui seria redundante."
+            confirmar "Mesmo assim, adicionar também como dispositivo individual?" || continue
+        fi
         USB_CAPTURA="$(capturar_usb_udev)" \
             || falhar "udevadm não forneceu a captura USB necessária."
         if ! inventario_resolver_usb "$USB_CAPTURA" select "$VEND" "$PROD" "" "" "$BUS_ATUAL" "$DEVICE_ATUAL"; then
@@ -751,7 +806,8 @@ modo_dispositivos() {
     done
 
     echo
-    info "Verificação dentro do Windows: Get-PnpDevice -Class Keyboard, Mouse, AudioEndpoint"
+    info "Verificação dentro do Windows: Get-PnpDevice -Class Keyboard, Mouse, AudioEndpoint, Bluetooth"
+    info "Rádio Bluetooth de placa-mãe (MediaTek, Intel, Realtek) costuma exigir o driver do fabricante no Windows; sem ele fica como dispositivo desconhecido."
     ok "Etapa 15 concluída."
 }
 
