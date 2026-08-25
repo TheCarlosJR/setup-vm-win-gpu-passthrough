@@ -14,13 +14,14 @@ stage-41	mutator	etapas/41-instalacao-windows.sh	domain.console	13
 stage-50-default	mutator	etapas/50-hooks-gpu-hd1.sh	hooks.configure	14
 stage-50-render	mutator	etapas/50-hooks-gpu-hd1.sh	hooks.configure	-	--renderizar-hooks
 stage-51	mutator	etapas/51-usb-passthrough.sh	usb.configure	15
-stage-52-default	mutator	etapas/52-cpu-pinning-hugepages.sh	cpu.tune	16
+stage-55	mutator	etapas/55-driver-nvidia-vm.sh	guest.driver	16
+stage-52-default	mutator	etapas/52-cpu-pinning-hugepages.sh	cpu.tune	17
 stage-52-undo	mutator	etapas/52-cpu-pinning-hugepages.sh	cpu.tune	-	--desfazer
-stage-53-default	mutator	etapas/53-cpu-isolation.sh	cpu.tune	17
+stage-53-default	mutator	etapas/53-cpu-isolation.sh	cpu.tune	18
 stage-53-undo	mutator	etapas/53-cpu-isolation.sh	cpu.tune	-	--desfazer
-stage-60	mutator	etapas/60-rede-bridge.sh	network.configure	18
-stage-61	mutator	etapas/61-airlock.sh	airlock.configure	19
-stage-70	mutator	etapas/70-trim-discard.sh	trim.configure	20
+stage-60	mutator	etapas/60-rede-bridge.sh	network.configure	19
+stage-61	mutator	etapas/61-airlock.sh	airlock.configure	20
+stage-70	mutator	etapas/70-trim-discard.sh	trim.configure	21
 util-diagnostic	mutator	util/diagnostico.sh	diagnostic.write	u1
 util-snapshot-create	mutator	util/snapshot-vm.sh	snapshot.manage	-	criar
 util-snapshot-revert	mutator	util/snapshot-vm.sh	snapshot.manage	-	reverter
