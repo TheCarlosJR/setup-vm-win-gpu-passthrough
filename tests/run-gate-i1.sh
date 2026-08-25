@@ -5,7 +5,7 @@
 # passos sem remover nenhum dos anteriores.
 set -euo pipefail
 
-GATE_FASE=${GATE_FASE:-I5}
+GATE_FASE=${GATE_FASE:-I7}
 secao() {
     printf '%s\n' "== Gate $GATE_FASE: $1 =="
 }
@@ -47,7 +47,10 @@ bash tests/check-phase-manifest.sh \
     tests/manifests/i2-files.txt \
     tests/manifests/i3-files.txt \
     tests/manifests/i4-files.txt \
-    tests/manifests/i5-files.txt
+    tests/manifests/i5-files.txt \
+    tests/manifests/i6-docs-files.txt \
+    tests/manifests/i6-files.txt \
+    tests/manifests/i7-files.txt
 
 secao 'testes dirigidos'
 bash tests/test-i1-safety-envelope.sh

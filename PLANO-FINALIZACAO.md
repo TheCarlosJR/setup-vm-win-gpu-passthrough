@@ -2,7 +2,7 @@
 
 > **Data de consolidação:** 16 de agosto de 2026
 > **Executor-alvo:** Claude Code (Opus 5)
-> **Status:** fases I0 e I1 concluídas e reverificadas em 16 de agosto de 2026; fases I2, I3, I4 e I5 concluídas em 17 de agosto de 2026; fases I6 a I14 pendentes
+> **Status:** fases I0 e I1 concluídas e reverificadas em 16 de agosto de 2026; fases I2, I3, I4 e I5 concluídas em 17 de agosto de 2026; I6 concluída em 23 de agosto de 2026; I7 em andamento desde 24 de agosto de 2026 (`I7.1` concluída); fases I8 a I14 pendentes
 > **Escopo:** correções funcionais e de segurança, migração arquitetural híbrida Bash/Python, testes/CI, documentação, qualificação real de Ubuntu/Pop!_OS e, por último, expansão multidistribuição
 > **Substitui integralmente:** `PLANO-CORRECOES-AUDITORIA.md` (blocos A, B e C registrados como executados; itens restantes absorvidos no código atual e nos deltas de I0) e `PLANO-INTEGRADO-MELHORIAS-MIGRACAO-PYTHON.md` (todo o conteúdo normativo foi transportado para cá). Nenhum dos dois é necessário para executar este documento.
 
@@ -57,9 +57,9 @@ A ordem de execução **não é a ordem numérica**. Siga a coluna "ordem".
 | 4 | I3 | XML/JSON, libvirt e transações de domínio | `CONCLUÍDA` 2026-08-17 | `domain_xml.py`, `network_xml.py`, `qemu_image.py`, `xmlutil.py` |
 | 5 | I4 | Configuração, ISO legada, dispensas e dados locais | `CONCLUÍDA` 2026-08-17 | `config.py` |
 | 6 | I5 | CPU, RAM, HugePages, isolamento e IOMMU/VFIO | `CONCLUÍDA` 2026-08-17 | `cpu.py`, `lib/shell/boot.sh` |
-| 7 | **I6.0** | **Revalidação do baseline pós-commits** | **BLOQUEADOR ABERTO** | linha nova na seção 12 |
-| 8 | I6 | Inventário e identidades físicas | `ABERTA` | `inventory.py`, REQ-DISK-IDENTITY, REQ-USB-IDENTITY |
-| 9 | I7 | Rede transacional e planner backend-neutral | `ABERTA` | `network.py`, REQ-NET-TX |
+| 7 | **I6.0** | **Revalidação do baseline pós-commits** | **CONCLUÍDA** 2026-08-23 | gate atual + campanha I0 `full` registrados na seção 12 |
+| 8 | I6 | Inventário e identidades físicas | `CONCLUÍDA` 2026-08-23 | `inventory.py`, REQ-DISK-IDENTITY, REQ-USB-IDENTITY |
+| 9 | I7 | Rede transacional e planner backend-neutral | `EM ANDAMENTO` 2026-08-24 (`I7.1` concluída) | `network.py`, REQ-NET-TX |
 | 10 | I8 | Plataforma, capabilities e **eixos de hardware** | `ABERTA` | `platform.py`, eixos distro/CPU/GPU |
 | 11 | I9 | Modularização Bash e requisitos P1 restantes | `ABERTA` | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY |
 | 12 | **I9B** | **Internacionalização (en, pt-BR, es)** | **ABERTA (nova)** | `lang/*.msg`, `lib/shell/i18n.sh`, `messages.py` |
@@ -237,7 +237,7 @@ A tabela de numeração da seção "Numeração das etapas" mapeia as 21 etapas 
 
 Os 27 commits de 18/08 a 23/08 alteraram etapas cobertas pelos oráculos de I0 e pelas suítes de regressão **sem reexecutar nem registrar o gate canônico**. Portanto o resultado do Gate I5 **não vale mais como baseline**. Antes da primeira linha de I6:
 
-- [ ] **I6.0:** reexecutar `bash tests/run-gate-i1.sh` sobre o estado atual, registrar o resultado (aprovado ou reprovado) numa linha nova da seção 12 e tratar qualquer falha como preexistente, jamais apagando-a. Se o gate reprovar, corrigir a regressão **antes** de iniciar I6.1. Reexecutar também a campanha I0 `full`, porque `etapas/50-hooks-gpu-hd1.sh`, `etapas/51-usb-passthrough.sh`, `etapas/60-rede-bridge.sh` e `etapas/61-airlock.sh` mudaram depois de os oráculos terem sido escritos.
+- [x] **I6.0:** reexecutado `bash tests/run-gate-i1.sh` sobre o estado atual e registrada a sequência completa na seção 12. A primeira tentativa parou no manifesto por causa da documentação Kiro recém-tornada rastreável; a segunda revelou a regressão preexistente da etapa 55 ausente no envelope I1; após integrar os documentos ao manifesto e corrigir `tests/i1/mutators.tsv`, o gate foi aprovado. A campanha I0 `full` também foi repetida explicitamente e aprovou 42 grupos de cenários.
 
 ---
 
@@ -1051,16 +1051,18 @@ Limitações registradas:
 
 ### Tarefas
 
-- [ ] **I6.1:** definir snapshot de CPU, memória, PCI, discos/IDs, interfaces e boot; distinguir ausente, indisponível, erro e vazio; ordenar deterministicamente.
-- [ ] **I6.2:** implementar parsers de inventário atual/legado; rejeitar truncado, duplicado, inconsistente e texto executável.
-- [ ] **I6.3:** implementar diff semântico de hardware separado de diferenças de formato e renderização.
-- [ ] **I6.4:** migrar etapas 1/3: Bash faz probes/publicação; Python normaliza/compara; relatório permanece atômico.
-- [ ] **I6.5:** implementar integralmente REQ-DISK-IDENTITY.
-- [ ] **I6.6:** implementar integralmente REQ-USB-IDENTITY.
+- [x] **I6.1:** definir snapshot de CPU, memória, PCI, discos/IDs, interfaces e boot; distinguir ausente, indisponível, erro e vazio; ordenar deterministicamente.
+- [x] **I6.2:** implementar parsers de inventário atual/legado; rejeitar truncado, duplicado, inconsistente e texto executável.
+- [x] **I6.3:** implementar diff semântico de hardware separado de diferenças de formato e renderização.
+- [x] **I6.4:** migrar etapas 1/3: Bash faz probes/publicação; Python normaliza/compara; relatório permanece atômico.
+- [x] **I6.5:** implementar integralmente REQ-DISK-IDENTITY.
+- [x] **I6.6:** implementar integralmente REQ-USB-IDENTITY.
 
 ### Gate I6
 
 Legado continua legível; reordenação não gera falso positivo; mudança real bloqueia/redetecta; probes continuam Bash; alias físico e USB ambíguo são recusados; suíte aprovada.
+
+**Resultado:** `APROVADO` em 2026-08-23. A implementação e a evidência registradas na spec ativa foram reconciliadas com este plano; `tests/test-i6-inventory.sh`, os 546 casos do core Python e o gate cumulativo confirmam os contratos de inventário, legado, diff, discos e USB sem sondar o host pelo Python.
 
 ## I7: Rede transacional e planner backend-neutral
 
@@ -1070,7 +1072,7 @@ Legado continua legível; reordenação não gera falso positivo; mudança real 
 
 ### Tarefas
 
-- [ ] **I7.1:** modelar snapshots/intenção de uplink, rotas, links, bridge, XML, ativo/persistente/autostart, VMs e configuração, com fingerprints.
+- [x] **I7.1:** modelar snapshots/intenção de uplink, rotas, links, bridge, XML, ativo/persistente/autostart, VMs e configuração, com fingerprints. **Concluída em 2026-08-24:** `network.py` valida schemas fechados, coerência bidirecional da topologia, identidade/metadados `lstat` dos artefatos de configuração, normaliza relações e coleções e produz fingerprints exato, semântico e por componente; XML de rede/VM usa projeção canônica. Nenhum probe, arquivo, comando, provider, cálculo de CIDR, planner ou efeito foi antecipado.
 - [ ] **I7.2:** usar `ipaddress` para gateway/DHCP/host/VM/broadcast/sobreposição; tratar exceção `proto kernel` exatamente; recusar IPv6/formato ainda não suportado de forma explícita.
 - [ ] **I7.3:** gerar planos bridge/NAT determinísticos com precondições, operações abstratas, pós-condições e rollback; nenhum comando/escrita no Python.
 - [ ] **I7.4:** detectar consumidores/NIC de todas as VMs por MAC/cardinalidade/marcador.
@@ -1782,10 +1784,13 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I5 (tentativa 4) | 2026-08-17 | `8b34a4c` + working tree | mesmos arquivos da tentativa final | campanha I0 `full` | **REPROVADO (rc=1)** | `sinal INT na etapa 11/6 deixou estado persistente parcial`: o intermediário do `vfio.conf` era criado fora da janela protegida e sobrevivia ao sinal. Corrigido movendo a criação/escrita do intermediário do GRUB para dentro do subshell com trap e descartando o intermediário do `vfio.conf` no rollback; ambas as correções foram confirmadas por mutação injetada | logs da sessão | fechar a janela do intermediário e reexecutar |
 | I5 | 2026-08-17 | `8b34a4c` + working tree | `libexec/passthrough_core/cpu.py`, `libexec/passthrough_core/cli.py`, `lib/shell/boot.sh` (novo, com o bloco de boot movido de `lib/common.sh`), `lib/common.sh`, `etapas/{02,30,52,53}`, `tests/python/test_cpu.py`, `tests/test-i5-cpu-boot.sh`, `tests/{test-i0-mutators,test-cpu-hugepages,test-bios-output,test-runtime-lifecycles,test-snapshot-safety,test-ubuntu-audit-regressions}.sh`, `tests/lib/{mutator-harness.sh,mutator-dispatch.py}`, `tests/manifests/i5-files.txt`, `tests/run-gate-i1.sh`, este plano | `python3 -I -S -B tests/python/run_tests.py` = 503 casos; `bash tests/test-i5-cpu-boot.sh` (12 grupos); suíte shell 16/16; campanha I0 `full` sem skips com o oráculo da etapa 11 reescrito sobre a transação real de boot (42 grupos de cenários, eram 40); gate canônico completo aprovado (rc=0): manifesto I5 com 86 arquivos nominais, 16 testes da suíte, `bash -n` em 53 arquivos, `compileall` em 2 árvores mais `py_compile` em 26 arquivos sem bytecode residual, whitespace de 86 arquivos untracked; duas mutações injetadas em `lib/shell/boot.sh` reprovadas | APROVADO; revisão semântica APPROVE, bloqueadores 0 | dois reboots reais seguem `[H]` em I13; validadores de lista de CPU continuam em Bash por serem de runtime; parsing de cmdline/GRUB permanece em Bash com justificativa registrada (seção 2.3); `FSTAB` não foi roteado por `caminho_sistema` nesta fase; a etapa 11 `--verificar` passou a devolver `2` quando a persistência não é legível sem privilégio | seção 5 (fase I5, resultado do gate), `scratchpad/gate-i5-final.log` | executar I6 |
 | Auditoria | 2026-08-23 | `2b10ae7` + working tree | nenhum arquivo de produção alterado | verificação por leitura de `etapas/51-usb-passthrough.sh:411`, `etapas/61-airlock.sh:230-296` e `:565`, `libexec/passthrough_core/domain_xml.py:582`, `lib/common.sh:2393/:2430/:3199`, busca por consumidores de `windows-install`, busca por `recovery_id`, existência de `platform.py`/`check-python-boundary.py`/`check-plan-traceability.py`, conferência da tabela de numeração contra `menu.sh`; contagem de saída humana (1783) e de `assert_text` (46, sendo 12 em PT) | I0-I5 CONFIRMADAS; I6-I14 CONFIRMADAS ABERTAS; plano **não** defasado no essencial; 2 pontos defasados corrigidos (REQ-IOMMU-TX na seção 16 e README na seção 1.4) | 27 commits entre 18/08 e 23/08 alteraram toda a árvore sem linha no registro; **o Gate I5 deixou de valer como baseline** | seção 1.5 | executar I6.0 antes de I6.1 |
-| I6.0 | | | | `bash tests/run-gate-i1.sh` + campanha I0 `full` | **bloqueador aberto** | revalidar baseline pós-commits | | executar I6 |
+| I6.0 (tentativa 1) | 2026-08-23 | `ea36127` + working tree | `.gitignore`, `.kiro/**/*.md` | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1), antes dos testes** | a atualização documental obrigatória tornou 26 arquivos Kiro rastreáveis e o manifesto cumulativo os recusou como untracked; não era regressão de produção | saída da sessão | criar manifesto documental explícito, sem voltar a ignorar `.kiro/` |
+| I6.0 (tentativa 2) | 2026-08-23 | `ea36127` + working tree | `tests/run-gate-i1.sh`, `tests/manifests/i6-docs-files.txt` | `bash tests/run-gate-i1.sh` | **REPROVADO (rc=1)** | regressão preexistente confirmada: `etapas/55-driver-nvidia-vm.sh` usava `guest.driver`, mas faltava em `tests/i1/mutators.tsv`; as posições 16–21 do menu também estavam defasadas | saída da sessão | representar a etapa 55 e realinhar a matriz do menu |
+| I6.0 | 2026-08-23 | `ea36127` + working tree | `.gitignore`, `.kiro/**/*.md`, `tests/manifests/i6-docs-files.txt`, `tests/run-gate-i1.sh`, `tests/i1/mutators.tsv`, este plano | gate canônico aprovado: manifesto com 113 arquivos; envelope I1 com 30 mutadores diretos e 23 seleções de menu em 6 perfis, duas vezes; validação atualizar-host em 29 cenários; campanha I0 integral com 42 grupos; 13 testes shell de regressão; core Python com 517 casos; `bash -n` em 54 arquivos; `compileall` em 2 árvores e `py_compile` em 28 arquivos; whitespace em 27 untracked; campanha I0 `full` repetida explicitamente, 42 grupos | **APROVADO (rc=0)** | ShellCheck ausente localmente, mas permanece obrigatório na CI; nenhuma operação de host/hardware foi executada | saída integral da sessão e gate canônico | iniciar I6.1 |
 
-| I6 | | | | | não iniciado | | | próxima fase |
-| I7 | | | | | não iniciado | | | aguarda I6 (harness I0 pronto) |
+| I6 | 2026-08-23 | `ea36127` + working tree | `libexec/passthrough_core/inventory.py`, ponte/CLI, etapas 1/3/14/15/16, fixtures e testes I6, manifestos, este plano | `bash tests/test-i6-inventory.sh`; core Python com 546 casos; gate cumulativo aprovado e posteriormente reconfirmado no checkpoint I7.1 | **APROVADO** | probes e efeitos permaneceram em Bash; aliases físicos/USB ambíguos falham fechados; nenhuma validação de hardware real foi promovida | `.kiro/specs/repository-finalization/tasks.md`, saída das sessões e gate canônico | I7 liberada |
+| I7.1 | 2026-08-24 | `ea36127` + working tree | `libexec/passthrough_core/network.py`, `tests/manifests/i7-files.txt`, `tests/run-gate-i1.sh`, este plano | smoke hermético: ordem determinística, XML semanticamente equivalente, fingerprint exato distinto e schema fechado; `bash tests/test-python-core.sh` = 546 casos; manifesto I7 = 132 arquivos; `bash tests/run-gate-i1.sh` = rc 0, campanha I0 `full` com 42 grupos, `bash -n` em 55 arquivos, `compileall` em 2 árvores, `py_compile` em 32 arquivos e whitespace em 46 untracked | **CHECKPOINT APROVADO; Gate I7 final PENDENTE** | somente modelo puro de snapshot/intenção e fingerprints; I7.2–I7.7 continuam abertas; ShellCheck ausente localmente e obrigatório na CI; LSP indisponível por ausência de `pyright-langserver` | saída integral da sessão e gate canônico | executar I7.2 |
+| I7 | | | | | em andamento (`I7.1` de 7 concluída) | Gate I7 exige I7.2–I7.7 e revisão específica de rollback | | executar I7.2 |
 | I8 | | | | | não iniciado | | | aguarda I7 |
 | I9 | | | | | não iniciado | | | aguarda I8 |
 | I10 | | | | | não iniciado | | | aguarda I9 |
