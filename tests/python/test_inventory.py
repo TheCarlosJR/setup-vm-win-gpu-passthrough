@@ -51,6 +51,41 @@ E: ID_WWN_WITH_EXTENSION=0x5000cc01
 E: ID_WWN=0x5000cc
 E: ID_SERIAL_SHORT=HD1
 """
+# Bloco e caractere numeram major:minor em namespaces independentes: os loopN
+# do snapd (bloco, major 7) e os /dev/vcsN do console virtual (caractere, major
+# 7) coexistem em qualquer host real sem que exista conflito algum entre eles.
+UDEV_NAMESPACES = """P: /devices/virtual/block/loop0
+E: SUBSYSTEM=block
+E: DEVNAME=/dev/loop0
+E: MAJOR=7
+E: MINOR=0
+
+P: /devices/virtual/vc/vcs
+E: SUBSYSTEM=vc
+E: DEVNAME=/dev/vcs
+E: MAJOR=7
+E: MINOR=0
+
+P: /devices/pci0000:00/0000:00:14.0/usb1/1-2
+E: SUBSYSTEM=usb
+E: DEVTYPE=usb_device
+E: MAJOR=189
+E: MINOR=6
+E: BUSNUM=001
+E: DEVNUM=007
+E: ID_VENDOR_ID=046d
+E: ID_MODEL_ID=c52b
+E: ID_SERIAL_SHORT=SERIAL-A
+E: ID_PATH=pci-0000:00:14.0-usb-0:2.3
+"""
+# Mesmo major:minor do disco de sistema, porém em outro namespace.
+UDEV_CHAR_SHADOW = UDEV + """
+P: /devices/virtual/tty/tty0
+E: SUBSYSTEM=tty
+E: DEVNAME=/dev/tty0
+E: MAJOR=8
+E: MINOR=0
+"""
 USB = [
     {"vendor": "046d", "product": "c52b", "serial": "SERIAL-A", "port": "pci-0000:00:14.0-usb-0:2.3", "bus": 1, "device": 7}
 ]
@@ -302,6 +337,37 @@ class DiskIdentityTests(unittest.TestCase):
         payload["udev_database"] = UDEV.split("E: MAJOR=8\nE: MINOR=32", 1)[0]
         with self.assertRaises(DataError):
             inventory.disk_plan_command(payload)
+
+
+class UdevNamespaceTests(unittest.TestCase):
+    def usb(self, text: str) -> dict:
+        return inventory.usb_resolve_command({
+            "usb_data": text, "mode": "select", "vendor": "046d", "product": "c52b",
+            "identity_kind": "", "identity_sha256": "",
+            "expected_bus": "1", "expected_device": "7",
+        })
+
+    def test_block_and_char_may_share_major_minor(self) -> None:
+        resolved = self.usb(UDEV_NAMESPACES)
+        self.assertEqual(resolved["valid"], 1)
+        self.assertEqual(resolved["identity_kind"], "serial")
+        self.assertEqual((resolved["bus"], resolved["device"]), (1, 7))
+
+    def test_conflict_inside_the_block_namespace_still_fails_closed(self) -> None:
+        colliding = UDEV_NAMESPACES.replace("E: SUBSYSTEM=vc", "E: SUBSYSTEM=block")
+        with self.assertRaises(DataError):
+            self.usb(colliding)
+
+    def test_char_record_does_not_shadow_disk_evidence(self) -> None:
+        payload = {
+            "block_json": json.dumps(BLOCK), "block_by_id_map": BY_ID,
+            "udev_database": UDEV_CHAR_SHADOW, "system_members": "/dev/sda1",
+            "working_members": "/dev/sdb1", "hd1_members": "/dev/sdc",
+        }
+        shadowed = inventory.disk_plan_command(payload)
+        clean = inventory.disk_plan_command(dict(payload, udev_database=UDEV))
+        self.assertEqual(shadowed["valid"], 1)
+        self.assertEqual(shadowed["system_fingerprint"], clean["system_fingerprint"])
 
 
 class UsbIdentityTests(unittest.TestCase):

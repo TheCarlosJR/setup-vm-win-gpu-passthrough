@@ -219,7 +219,15 @@ def _parse_udev(text: str) -> tuple[dict[str, dict[str, str]], list[dict[str, st
         if not record:
             return
         major = record.get("MAJOR", "") + ":" + record.get("MINOR", "")
-        if _MAJMIN.fullmatch(major):
+        # major:minor só é único DENTRO de um namespace de dispositivo: o major
+        # 7 de bloco (loop0, loop1, ...) e o major 7 de caractere (/dev/vcs,
+        # /dev/vcs1, ...) coexistem no mesmo banco udev sem qualquer conflito
+        # real. Este mapa é consumido somente para enriquecer discos, logo um
+        # registro que se declara de outro subsistema nunca entra nele. Quem não
+        # declara subsistema algum mantém o tratamento anterior, e a checagem de
+        # conflito continua valendo para os que entram.
+        subsystem = record.get("SUBSYSTEM", "block")
+        if _MAJMIN.fullmatch(major) and subsystem == "block":
             allowed = {
                 key: value
                 for key, value in record.items()
