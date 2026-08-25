@@ -16,6 +16,7 @@ O bootstrap abaixo roda antes de qualquer import local e por isso mantém
 sintaxe conservadora: um interpretador antigo precisa conseguir compilar o
 arquivo para exibir o diagnóstico de versão.
 """
+import os
 import sys
 
 sys.dont_write_bytecode = True
@@ -27,15 +28,47 @@ _EXIT_USAGE = 64
 _EXIT_CAPABILITY = 69
 _EXIT_INTERNAL = 70
 
+# Espelham libexec/passthrough_core/colors.py pelo mesmo motivo dos códigos
+# acima: este diagnóstico precisa sair antes de o package poder ser importado.
+# tests/python/test_errors.py reprova qualquer divergência.
+_CORE_PREFIX = "passthrough-core: "
+_COLOR_RESET = "\033[0m"
+_COLOR_BOLD = "\033[1m"
+_COLOR_RED = "\033[0;31m"
+_COLOR_BRAND = "\033[38;2;13;90;92m"
+
 _MINIMUM_PYTHON = (3, 10)
 _FORBIDDEN_PATH_MARKERS = ("site-packages", "dist-packages")
 _REQUIRED_PARENT = "libexec"
 _PACKAGE_NAME = "passthrough_core"
 
 
+def _colored():
+    """Mesma política de passthrough_core/colors.py, que ainda não é importável.
+
+    Só há cor quando o diagnóstico vai para um terminal de verdade; qualquer
+    dúvida cai no texto puro, porque diagnóstico ilegível é pior que sem cor.
+    """
+    try:
+        if os.environ.get("NO_COLOR", ""):
+            return False
+        if os.environ.get("TERM", "dumb") == "dumb":
+            return False
+        return bool(sys.stderr.isatty())
+    except Exception:  # noqa: BLE001 - diagnóstico não pode mascarar o código
+        return False
+
+
 def _fail(message, code):
     """Emite diagnóstico humano em stderr e devolve o código interno."""
-    text = "passthrough-core: " + message + "\n"
+    if _colored():
+        head, separator, tail = message.partition("\n")
+        text = (
+            _COLOR_BRAND + _COLOR_BOLD + _CORE_PREFIX.rstrip() + _COLOR_RESET
+            + " " + _COLOR_RED + head + _COLOR_RESET + separator + tail + "\n"
+        )
+    else:
+        text = _CORE_PREFIX + message + "\n"
     try:
         sys.stderr.buffer.write(text.encode("utf-8", "backslashreplace"))
         sys.stderr.buffer.flush()

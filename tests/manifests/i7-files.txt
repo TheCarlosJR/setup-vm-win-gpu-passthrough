@@ -1,2 +1,3 @@
+libexec/passthrough_core/colors.py
 libexec/passthrough_core/network.py
 tests/manifests/i7-files.txt

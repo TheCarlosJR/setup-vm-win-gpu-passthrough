@@ -23,6 +23,7 @@ import sys
 from typing import Any, BinaryIO, Callable, Mapping
 
 from . import (
+    colors,
     config,
     cpu,
     domain_xml,
@@ -76,6 +77,27 @@ _CONTROLLED_OUTPUT_MODE = 0o600
 MAX_OUTPUT_BYTES = protocol.MAX_PAYLOAD_BYTES
 
 
+def _color_enabled(injected: BinaryIO | None) -> bool:
+    """Decide cor para o diagnóstico humano; na dúvida, texto puro.
+
+    Espelha a política de `lib/common.sh`, que só define as constantes quando
+    há terminal. Fluxo injetado é teste, captura e redirecionamento não são
+    terminal, e `NO_COLOR`/`TERM=dumb` desligam por convenção. Diagnóstico
+    ilegível é pior que diagnóstico sem cor, então todo caminho duvidoso cai
+    no texto puro.
+    """
+    if injected is not None:
+        return False
+    if os.environ.get("NO_COLOR", ""):
+        return False
+    if os.environ.get("TERM", "dumb") == "dumb":
+        return False
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 class Streams:
     """Fluxos binários injetáveis, para que os testes não dependam do processo."""
 
@@ -108,7 +130,7 @@ class Streams:
 
     def write_error(self, message: str, exception: BaseException | None, traceback_enabled: bool) -> None:
         stream = self._stderr if self._stderr is not None else sys.stderr.buffer
-        text = "passthrough-core: " + message + "\n"
+        text = colors.diagnostic_line(message, _color_enabled(self._stderr))
         if traceback_enabled and exception is not None:
             import traceback
 

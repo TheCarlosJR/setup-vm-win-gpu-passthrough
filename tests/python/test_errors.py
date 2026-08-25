@@ -1,9 +1,9 @@
-"""Códigos internos, mapeamento de exceções e divergência do bootstrap."""
+"""Códigos internos, mapeamento de exceções, paleta e divergência do bootstrap."""
 import ast
 import unittest
 from pathlib import Path
 
-from passthrough_core import errors
+from passthrough_core import colors, errors
 
 LIBEXEC = Path(__file__).resolve().parent.parent.parent / "libexec"
 ENTRYPOINT = LIBEXEC / "passthrough_core_cli.py"
@@ -97,6 +97,14 @@ class BootstrapDriftTests(unittest.TestCase):
         self.assertEqual(literais.get("_EXIT_CAPABILITY"), errors.EXIT_CAPABILITY)
         self.assertEqual(literais.get("_EXIT_INTERNAL"), errors.EXIT_INTERNAL)
 
+    def test_cores_do_bootstrap_espelham_colors(self) -> None:
+        literais = self._literais()
+        self.assertEqual(literais.get("_CORE_PREFIX"), colors.PREFIX)
+        self.assertEqual(literais.get("_COLOR_RESET"), colors.RESET)
+        self.assertEqual(literais.get("_COLOR_BOLD"), colors.BOLD)
+        self.assertEqual(literais.get("_COLOR_RED"), colors.RED)
+        self.assertEqual(literais.get("_COLOR_BRAND"), colors.BRAND)
+
     def test_minimo_de_python_declarado(self) -> None:
         self.assertEqual(self._literais().get("_MINIMUM_PYTHON"), (3, 10))
 
@@ -133,3 +141,38 @@ class BootstrapDriftTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiagnosticLineTests(unittest.TestCase):
+    """Cor é decoração de terminal; sem terminal o byte precisa ser o histórico."""
+
+    def test_sem_cor_e_exatamente_o_texto_historico(self) -> None:
+        self.assertEqual(
+            colors.diagnostic_line("falhou", False), "passthrough-core: falhou\n"
+        )
+
+    def test_com_cor_preserva_mensagem_e_fecha_toda_sequencia(self) -> None:
+        linha = colors.diagnostic_line("falhou", True)
+        self.assertIn("passthrough-core:", linha)
+        self.assertIn("falhou", linha)
+        self.assertTrue(linha.endswith(colors.RESET + "\n"))
+        self.assertEqual(linha.count(colors.RESET), 2)
+
+    def test_so_a_primeira_linha_recebe_cor(self) -> None:
+        linha = colors.diagnostic_line("falhou\nUso interno:\n  exemplo", True)
+        self.assertEqual(linha.count(colors.RED), 1)
+        self.assertTrue(linha.endswith("\nUso interno:\n  exemplo\n"))
+
+    def test_identidade_visual_usa_cor_verdadeira(self) -> None:
+        for tom in (colors.BRAND, colors.BRAND_ALT):
+            self.assertTrue(tom.startswith("\033[38;2;"))
+
+    def test_paleta_semantica_espelha_o_shell(self) -> None:
+        # Mesmos códigos de lib/common.sh, para que a severidade tenha a mesma
+        # cor venha ela do shell ou do core.
+        self.assertEqual(colors.GREEN, "\033[0;32m")
+        self.assertEqual(colors.YELLOW, "\033[0;33m")
+        self.assertEqual(colors.RED, "\033[0;31m")
+        self.assertEqual(colors.CYAN, "\033[0;36m")
+        self.assertEqual(colors.BOLD, "\033[1m")
+        self.assertEqual(colors.RESET, "\033[0m")
