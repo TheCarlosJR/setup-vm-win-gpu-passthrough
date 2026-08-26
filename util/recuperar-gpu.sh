@@ -183,6 +183,8 @@ aguardar_driver() {
 }
 
 info "3) Validando os drivers finais..."
+GPU_PRONTA=1
+GPU_ESTAVEL=1
 for i in "${!DISPOSITIVOS[@]}"; do
     BDF="${DISPOSITIVOS[$i]}"
     ESPERADO="${ESPERADOS[$i]}"
@@ -190,9 +192,37 @@ for i in "${!DISPOSITIVOS[@]}"; do
         ok "   $BDF confirmado em $ESPERADO."
     else
         erro "   $BDF não retornou a $ESPERADO (atual: $(driver_atual "$BDF"))."
+        [ "$BDF" != "${GPU_PCI_ID,,}" ] || GPU_PRONTA=0
         FALHAS=$((FALHAS + 1))
     fi
 done
+
+aguardar_udev_quieto() {
+    # D-GPU-UDEV-LOOP: com as regras udev da distro recarregando os módulos em
+    # laço, o driver confere no instante da amostra e some um segundo depois.
+    # Subir o display manager nesse estado congela o host, então a estabilidade
+    # é exigida por janela, e não por amostra.
+    local tentativa
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=15 >/dev/null 2>&1 || true
+    fi
+    for ((tentativa=0; tentativa<5; tentativa++)); do
+        sleep 1
+        [ "$(driver_atual "${GPU_PCI_ID,,}")" = nvidia ] || return 1
+        [ -d /sys/module/nvidia_drm ] || return 1
+        [ -d /sys/module/nvidia_modeset ] || return 1
+    done
+    return 0
+}
+# Só faz sentido exigir estabilidade se a GPU chegou ao driver esperado; se nem
+# chegou, o diagnóstico é outro e o comportamento histórico continua valendo.
+if [ "$GPU_PRONTA" -eq 1 ] && ! aguardar_udev_quieto; then
+    GPU_ESTAVEL=0
+    FALHAS=$((FALHAS + 1))
+    erro "   a GPU não ficou estável: os módulos nvidia estão sendo recarregados em laço pelas regras udev da distro."
+    erro "   confirme com: journalctl -k | grep -c 'Nvlink Core is being initialized'"
+    erro "   corrija com: bash etapas/50-hooks-gpu-hd1.sh (reinstala o filtro em /etc/udev/rules.d/71-nvidia.rules)"
+fi
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     ok "   nvidia-smi respondeu."
 else
@@ -202,7 +232,9 @@ fi
 
 info "4) Restaurando o estado original do gerenciador de exibição ($DM)..."
 if [ "$DM_WAS_ACTIVE_RECUPERACAO" -eq 1 ]; then
-    if sudo systemctl start "$DM" && sudo systemctl is-active --quiet "$DM"; then
+    if [ "$GPU_ESTAVEL" -eq 0 ]; then
+        erro "   $DM mantido parado por causa do laço de recarga; iniciá-lo agora congelaria o host."
+    elif sudo systemctl start "$DM" && sudo systemctl is-active --quiet "$DM"; then
         ok "   $DM está ativo como antes do passthrough."
     else
         erro "   $DM não pôde ser confirmado como ativo."

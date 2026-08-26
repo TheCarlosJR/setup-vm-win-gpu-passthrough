@@ -136,7 +136,8 @@ assert_hooks_transaction_restored() {
         etc/libvirt/hooks/qemu.d/fixture-win11/prepare/begin/00-vm-passthrough-installing.sh \
         etc/libvirt/hooks/qemu.d/fixture-win11/prepare/begin/01-gpu-preflight.sh \
         etc/libvirt/hooks/qemu.d/fixture-win11/start/begin/01-gpu-vfio-check.sh \
-        etc/libvirt/hooks/qemu.d/fixture-win11/release/end/01-gpu-restore.sh; do
+        etc/libvirt/hooks/qemu.d/fixture-win11/release/end/01-gpu-restore.sh \
+        usr/local/sbin/vm-passthrough-nvidia-udev; do
         [[ ! -e $MUTATOR_ROOT/$path ]] || fail "etapa 50 deixou recurso gerenciado após rollback: $path"
     done
 }
@@ -787,15 +788,25 @@ pass
 mutator_harness_reset
 mutator_harness_run 50-hooks-gpu-hd1.sh "$HOOKS_INPUT"
 assert_eq 0 "$MUTATOR_RC" 'sucesso etapa 50'
-assert_eq 23 "$(mutator_harness_effect_count)" 'efeitos etapa 50'
+# D-GPU-UDEV-LOOP: 23 antes do filtro udev. O arquivo novo custa o mesmo par
+# de efeitos de qualquer outro gerenciado (install do diretório + mv atômico),
+# então todo efeito a partir do 15 desloca +2 nos oráculos abaixo.
+assert_eq 25 "$(mutator_harness_effect_count)" 'efeitos etapa 50'
 for installed in \
     etc/libvirt/hooks/qemu \
     etc/libvirt/hooks/qemu.d/fixture-win11/.vm-passthrough-required \
     etc/libvirt/hooks/qemu.d/fixture-win11/prepare/begin/01-gpu-preflight.sh \
     etc/libvirt/hooks/qemu.d/fixture-win11/start/begin/01-gpu-vfio-check.sh \
-    etc/libvirt/hooks/qemu.d/fixture-win11/release/end/01-gpu-restore.sh; do
+    etc/libvirt/hooks/qemu.d/fixture-win11/release/end/01-gpu-restore.sh \
+    usr/local/sbin/vm-passthrough-nvidia-udev; do
     [[ -e $MUTATOR_ROOT/$installed ]] || fail "etapa 50 não instalou $installed"
 done
+# D-GPU-UDEV-LOOP: a raiz simulada não tem as regras udev da distro, então este
+# é o ramo "host sem regras a filtrar": o filtro é publicado, o override não.
+# O ramo com regras é provado em tests/test-gpu-udev-loop.sh, que deriva o
+# arquivo real e o submete a udevadm verify.
+[[ ! -e $MUTATOR_ROOT/etc/udev/rules.d/71-nvidia.rules ]] \
+    || fail 'etapa 50 publicou override udev sem regras de distro para filtrar'
 [[ ! -e $MUTATOR_ROOT/etc/libvirt/hooks/qemu.d/fixture-win11/.vm-passthrough-installing \
    && ! -e $MUTATOR_ROOT/etc/libvirt/hooks/qemu.d/fixture-win11/prepare/begin/00-vm-passthrough-installing.sh ]] \
     || fail 'etapa 50 deixou marcadores temporários no sucesso'
@@ -810,7 +821,7 @@ assert_confined 'etapa 50 sucesso'
 pass
 
 if [[ $I0_MUTATOR_MATRIX == full && ${I0_MUTATOR_SKIP_50:-0} != 1 ]]; then
-for effect_number in $(/usr/bin/seq 1 23); do
+for effect_number in $(/usr/bin/seq 1 25); do
     mutator_harness_reset
     baseline_vm_hash=$(mutator_harness_vm_hash)
     MUTATOR_TEST_FAIL_EFFECT=$effect_number MUTATOR_TEST_FAIL_MODE=after
@@ -823,7 +834,7 @@ done
 pass
 
 for signal_name in INT TERM EXIT; do
-    for effect_number in 1 15 17 23; do
+    for effect_number in 1 15 17 19 25; do
         mutator_harness_reset
         baseline_vm_hash=$(mutator_harness_vm_hash)
         MUTATOR_TEST_SIGNAL_EFFECT=$effect_number MUTATOR_TEST_SIGNAL_NAME=$signal_name
@@ -862,7 +873,7 @@ pass
 # restauram hooks, serviço e XML como qualquer outra janela mutante.
 mutator_harness_reset
 baseline_vm_hash=$(mutator_harness_vm_hash)
-MUTATOR_TEST_FAIL_EFFECT=24 MUTATOR_TEST_FAIL_MODE=after
+MUTATOR_TEST_FAIL_EFFECT=26 MUTATOR_TEST_FAIL_MODE=after
 mutator_harness_run 50-hooks-gpu-hd1.sh $'APLICAR\nREMOVER\n' --remover-video
 unset MUTATOR_TEST_FAIL_EFFECT MUTATOR_TEST_FAIL_MODE
 assert_nonzero "$MUTATOR_RC" 'falha na opção --remover-video dentro da transação'
@@ -873,7 +884,7 @@ assert_confined 'falha na opção --remover-video'
 for signal_name in INT TERM EXIT; do
     mutator_harness_reset
     baseline_vm_hash=$(mutator_harness_vm_hash)
-    MUTATOR_TEST_SIGNAL_EFFECT=24 MUTATOR_TEST_SIGNAL_NAME=$signal_name
+    MUTATOR_TEST_SIGNAL_EFFECT=26 MUTATOR_TEST_SIGNAL_NAME=$signal_name
     mutator_harness_run 50-hooks-gpu-hd1.sh "$HOOKS_INPUT" --anti-code43
     unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
     case $signal_name in
@@ -890,7 +901,7 @@ pass
 # oráculo de I0 exigia a ausência de "Rollback incompleto".
 mutator_harness_reset
 baseline_vm_hash=$(mutator_harness_vm_hash)
-MUTATOR_TEST_SIGNAL_EFFECT=17 MUTATOR_TEST_SIGNAL_NAME=EXIT MUTATOR_TEST_DIVERGE_EFFECT=18
+MUTATOR_TEST_SIGNAL_EFFECT=19 MUTATOR_TEST_SIGNAL_NAME=EXIT MUTATOR_TEST_DIVERGE_EFFECT=20
 mutator_harness_run 50-hooks-gpu-hd1.sh "$HOOKS_INPUT"
 unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME MUTATOR_TEST_DIVERGE_EFFECT
 assert_nonzero "$MUTATOR_RC" 'rollback divergente etapa 50'

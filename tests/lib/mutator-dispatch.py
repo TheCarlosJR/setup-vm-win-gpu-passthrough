@@ -43,12 +43,16 @@ LOGICAL_ROOTS = tuple(
         "/dev",
         "/etc",
         "/home",
+        # A etapa 14 lê as regras udev da distro para derivar seu override; a
+        # leitura é mapeada na raiz simulada como qualquer outro caminho.
+        "/lib/udev/rules.d",
         "/mnt",
         "/opt",
         "/proc",
         "/run",
         "/srv",
         "/sys",
+        "/usr/lib/udev/rules.d",
         "/usr/local",
         "/var",
         "/vm",

@@ -158,7 +158,9 @@ novo.
 - desktop/display manager não volta;
 - `nvidia-smi` falha no host;
 - journal do hook informa driver inesperado ou restauração incompleta;
-- permanece um arquivo em `/run/libvirt-gpu-passthrough/`.
+- permanece um arquivo em `/run/libvirt-gpu-passthrough/`;
+- o desktop volta, o hook declara sucesso e o host congela segundos depois
+  (veja o laço de recarga do nvidia mais abaixo).
 
 ### Diagnóstico
 
@@ -178,6 +180,45 @@ Quando necessário, consulte também o serviço de display manager configurado:
 ```bash
 sudo journalctl -u <DM_SERVICE> -b -e --no-pager
 ```
+
+### Desktop volta e congela segundos depois
+
+Este é um caso à parte: o hook grava `GPU e desktop restaurados com pós-condições
+verificadas` em `/var/log/vm-passthrough/hooks.log`, o desktop realmente aparece
+e, poucos segundos depois, o host trava e só sai no botão de reset.
+
+A causa não é o hook. As regras udev da distro em
+`/usr/lib/udev/rules.d/71-nvidia.rules` rodam `modprobe` direto a cada evento
+`add`/`remove` em `/bus/pci/drivers/nvidia`. Enquanto a GPU está no `vfio-pci`
+esse `modprobe` puxa o módulo `nvidia`, que não consegue sondar a GPU e é
+descarregado; o descarregamento gera outro evento no mesmo caminho e a coisa se
+realimenta. A tempestade atravessa o `release` e derruba `nvidia_drm` com a
+sessão gráfica já aberta.
+
+Confirme contando as recargas do boot afetado:
+
+```bash
+journalctl -k -b -1 | grep -c 'Nvlink Core is being initialized'
+journalctl -b -1 | grep -c "udev-worker.*nvidia: Process"
+```
+
+Um boot saudável mostra **1** e **0**. Centenas ou milhares dos dois confirmam o
+laço.
+
+A etapa 14 fecha esse laço instalando `/usr/local/sbin/vm-passthrough-nvidia-udev`
+e um override em `/etc/udev/rules.d/71-nvidia.rules`, derivado byte a byte do
+arquivo da distro: só as seis regras de `modprobe` passam a consultar o estado
+real do barramento antes de agir. Verifique e reinstale com:
+
+```bash
+bash etapas/50-hooks-gpu-hd1.sh --verificar
+bash etapas/50-hooks-gpu-hd1.sh
+```
+
+Depois de instalado, o `release` também recusa subir o display manager quando
+detecta a GPU instável: prefere deixar você em um TTY a congelar o host. Uma
+atualização do pacote NVIDIA que mude as regras da distro aparece como
+divergência no `--verificar`; reexecutar a etapa 14 regenera o override.
 
 ### Recuperação suportada
 

@@ -539,6 +539,18 @@ mesmo dispositivo é a origem clássica de GPU presa em meio-caminho. Os hooks
 cuidam só do que o libvirt não faz: o gerenciador de exibição, os módulos NVIDIA
 e a verificação das pós-condições.
 
+Fora da árvore de hooks, a etapa também instala
+`/usr/local/sbin/vm-passthrough-nvidia-udev` e um override em
+`/etc/udev/rules.d/71-nvidia.rules`. As regras da distro rodam `modprobe` direto
+a cada evento em `/bus/pci/drivers/nvidia`; enquanto a GPU está no `vfio-pci`
+esse `modprobe` puxa o módulo `nvidia`, que não sonda a GPU e é descarregado,
+gerando outro evento no mesmo caminho. O laço se realimenta, atravessa o
+`release` e derruba `nvidia_drm` com o desktop já aberto. O override é derivado
+byte a byte do arquivo da distro e muda **apenas** as seis regras de `modprobe`,
+que passam a consultar o estado real do barramento antes de agir. Uma
+atualização do pacote NVIDIA aparece como divergência em `--verificar`, e
+reexecutar a etapa 14 regenera o arquivo.
+
 Disco físico dedicado (só se você escolheu um na etapa 3):
 
 ```xml
@@ -807,6 +819,7 @@ gerais:
 | Rede bridge | rollback automático em falha; manualmente, restaurar/remover `/etc/netplan/90-vm-passthrough-bridge.yaml`, executar `sudo netplan generate && sudo netplan apply` e restaurar o XML da VM |
 | Rede NAT | Netplan não foi tocado; restaurar o XML da VM e, sem consumidores, usar `virsh --connect qemu:///system net-destroy <REDE_LIBVIRT>` + `virsh --connect qemu:///system net-undefine <REDE_LIBVIRT>` |
 | Hooks da GPU | `sudo rm -rf /etc/libvirt/hooks/qemu.d/<vm>` e `sudo systemctl restart libvirtd` |
+| Filtro udev da NVIDIA | `sudo rm -f /etc/udev/rules.d/71-nvidia.rules /usr/local/sbin/vm-passthrough-nvidia-udev` e `sudo udevadm control --reload-rules` (volta a valer o arquivo da distro, com o laço de recarga) |
 | VM inteira | `virsh --connect qemu:///system undefine <vm> --nvram` (o QCOW2 continua no disco) |
 
 A rede `default` usada na instalação não é sobrescrita pela etapa 19. Para uma

@@ -35,6 +35,9 @@ INSTALLING_MARKER="$HOOK_BASE/.vm-passthrough-installing"
 INSTALLING_HOOK="$HOOK_BASE/prepare/begin/00-vm-passthrough-installing.sh"
 PREPARE_ANTIGO="$HOOK_BASE/prepare/begin/01-gpu-para-vfio.sh"
 RELEASE_ANTIGO="$HOOK_BASE/release/end/01-gpu-para-linux.sh"
+NVIDIA_UDEV_FILTRO="/usr/local/sbin/vm-passthrough-nvidia-udev"
+NVIDIA_UDEV_REGRAS="/etc/udev/rules.d/71-nvidia.rules"
+MARCADOR_UDEV="# vm-passthrough-nvidia-udev-v1"
 MARCADOR_DISPATCHER="# vm-passthrough-qemu-dispatcher-v2"
 STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 
@@ -89,6 +92,113 @@ estado_video_virtual() {
     return "$rc"
 }
 
+nvidia_udev_origem() {
+    # Caminho do arquivo de regras da distro que dispara modprobe direto.
+    # Ausência não é erro: um host sem esse pacote não tem laço a quebrar.
+    local candidato
+    # Só o grep decide: um teste de arquivo embutido no shell leria o sistema
+    # real mesmo sob sandbox, e as duas leituras podiam discordar.
+    for candidato in /usr/lib/udev/rules.d/71-nvidia.rules /lib/udev/rules.d/71-nvidia.rules; do
+        if grep -qF 'RUN+="/sbin/modprobe' "$candidato" 2>/dev/null; then
+            printf '%s\n' "$candidato"
+            return 0
+        fi
+    done
+    return 1
+}
+
+gerar_nvidia_udev_filtro() {
+    # D-GPU-UDEV-LOOP: as regras da distro rodam modprobe nvidia-modeset/-drm/
+    # -uvm a cada evento add/remove em /bus/pci/drivers/nvidia. Com a GPU no
+    # vfio-pci esse modprobe puxa o módulo nvidia, que não consegue sondar a
+    # GPU e é descarregado, o que gera outro evento no mesmo caminho: um laço
+    # que se realimenta. Ele atravessa o release, derruba nvidia_drm com o
+    # desktop já aberto e congela o host. Este filtro decide pelo estado real
+    # do barramento se o modprobe faz sentido; os hooks continuam sendo a
+    # única autoridade sobre os módulos.
+    local destino="$1"
+    cat > "$destino" <<'FILTRO'
+#!/bin/bash
+# vm-passthrough-nvidia-udev-v1 (gerado por etapas/50-hooks-gpu-hd1.sh)
+# Filtra os modprobe disparados pelas regras udev da NVIDIA.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+ACAO="${1:-}"
+MODULO="${2:-}"
+case "$ACAO" in
+    load|unload) ;;
+    *) exit 0 ;;
+esac
+case "$MODULO" in
+    nvidia-modeset|nvidia-drm|nvidia-uvm) ;;
+    *) exit 0 ;;
+esac
+
+EM_VFIO=0
+EM_NVIDIA=0
+for DISPOSITIVO in /sys/bus/pci/devices/*; do
+    [ -r "$DISPOSITIVO/vendor" ] && [ -r "$DISPOSITIVO/class" ] || continue
+    [ "$(cat "$DISPOSITIVO/vendor" 2>/dev/null)" = 0x10de ] || continue
+    case "$(cat "$DISPOSITIVO/class" 2>/dev/null)" in
+        0x03*) ;;
+        *) continue ;;
+    esac
+    [ -L "$DISPOSITIVO/driver" ] || continue
+    case "$(basename -- "$(readlink -f -- "$DISPOSITIVO/driver")")" in
+        vfio-pci) EM_VFIO=1 ;;
+        nvidia) EM_NVIDIA=1 ;;
+    esac
+done
+
+# Janela vfio: a GPU é da VM e qualquer modprobe aqui só alimenta o laço.
+if [ "$EM_VFIO" -eq 1 ]; then
+    exit 0
+fi
+
+if [ "$ACAO" = load ]; then
+    # Carregar segue permitido fora da janela vfio: é por estas regras que o
+    # host ganha nvidia_drm modeset=1 no boot, e não há softdep que faça isso.
+    exec modprobe -- "$MODULO"
+fi
+
+# Descarregar com a GPU viva no nvidia mata a sessão gráfica em uso: é
+# exatamente o que a tempestade fazia depois do release.
+if [ "$EM_NVIDIA" -eq 1 ]; then
+    exit 0
+fi
+exec modprobe -r -- "$MODULO"
+FILTRO
+}
+
+gerar_nvidia_udev_regras() {
+    # Reescreve as regras da distro trocando o modprobe direto pelo filtro.
+    # Mesmo nome em /etc sombreia o arquivo de /usr/lib inteiro, então tudo o
+    # que não é modprobe é copiado byte a byte: seat/master-of-seat,
+    # ub-device-create, persistenced e runtime PM continuam valendo. Derivar do
+    # arquivo da distro (em vez de fixar um conteúdo) faz uma atualização do
+    # pacote NVIDIA aparecer como divergência em --verificar.
+    local origem="$1" destino="$2" corpo linhas_origem linhas_corpo trocas restantes
+    corpo="$(sed \
+        -e "s|RUN+=\"/sbin/modprobe -r \([A-Za-z0-9_-]\{1,\}\)\"|RUN+=\"$NVIDIA_UDEV_FILTRO unload \1\"|g" \
+        -e "s|RUN+=\"/sbin/modprobe \([A-Za-z0-9_-]\{1,\}\)\"|RUN+=\"$NVIDIA_UDEV_FILTRO load \1\"|g" \
+        -- "$origem")" || return 1
+    linhas_origem="$(sed -n '$=' -- "$origem")" || return 1
+    linhas_corpo="$(printf '%s\n' "$corpo" | sed -n '$=')" || return 1
+    [ -n "$linhas_origem" ] && [ "$linhas_corpo" = "$linhas_origem" ] || return 1
+    trocas="$(printf '%s\n' "$corpo" | grep -cF "$NVIDIA_UDEV_FILTRO " || true)"
+    [ "${trocas:-0}" -ge 1 ] || return 1
+    restantes="$(printf '%s\n' "$corpo" | grep -cF 'RUN+="/sbin/modprobe' || true)"
+    [ "${restantes:-0}" -eq 0 ] || return 1
+    {
+        printf '%s\n' "$MARCADOR_UDEV"
+        printf '# Gerado por etapas/50-hooks-gpu-hd1.sh a partir de %s.\n' "$origem"
+        printf '# Não edite à mão: a etapa 14 regenera o arquivo e acusa divergência.\n'
+        printf '# O único desvio em relação ao original é o filtro do modprobe, em %s.\n' "$NVIDIA_UDEV_FILTRO"
+        printf '%s\n' "$corpo"
+    } > "$destino"
+}
+
 verificar_hook() {
     local arquivo="$1" descricao="$2"
     if [ -x "$arquivo" ] && bash -n "$arquivo" 2>/dev/null; then
@@ -96,6 +206,36 @@ verificar_hook() {
     else
         v_falta "$descricao ausente, não executável ou inválido: $arquivo"
     fi
+}
+
+verificar_filtro_udev() {
+    # D-GPU-UDEV-LOOP: sem este filtro o release "conclui com sucesso" e o
+    # desktop congela segundos depois, porque os módulos nvidia continuam
+    # recarregando em laço. A ausência é falta, não observação.
+    local origem="" esperado=""
+    if ! origem="$(nvidia_udev_origem)"; then
+        v_ok "Host sem regras udev da NVIDIA que disparem modprobe; nenhum filtro é necessário."
+        return 0
+    fi
+    if [ -x "$NVIDIA_UDEV_FILTRO" ] && bash -n "$NVIDIA_UDEV_FILTRO" 2>/dev/null; then
+        v_ok "Filtro de modprobe das regras udev instalado: $NVIDIA_UDEV_FILTRO."
+    else
+        v_falta "Filtro de modprobe ausente ou inválido ($NVIDIA_UDEV_FILTRO): os módulos nvidia recarregam em laço na janela vfio e o desktop congela após desligar a VM."
+    fi
+    esperado="$(mktemp)" || { v_indeterminado "Sem temporário para derivar as regras udev esperadas."; return 0; }
+    if ! gerar_nvidia_udev_regras "$origem" "$esperado" 2>/dev/null; then
+        rm -f -- "$esperado"
+        v_indeterminado "Não foi possível derivar as regras udev esperadas a partir de $origem."
+        return 0
+    fi
+    if [ ! -f "$NVIDIA_UDEV_REGRAS" ]; then
+        v_falta "Override das regras udev da NVIDIA ausente: $NVIDIA_UDEV_REGRAS"
+    elif cmp -s -- "$esperado" "$NVIDIA_UDEV_REGRAS"; then
+        v_ok "Override das regras udev da NVIDIA em dia com $origem."
+    else
+        v_falta "Override em $NVIDIA_UDEV_REGRAS divergente de $origem (a distro atualizou as regras); reexecute a etapa 14."
+    fi
+    rm -f -- "$esperado"
 }
 
 verificar() {
@@ -129,6 +269,7 @@ verificar() {
         v_ok "Nenhuma transação de instalação pendente bloqueia a VM."
     fi
 
+    verificar_filtro_udev
     if vm_existe "$VM_NAME"; then
         local gpu_no_xml=0 video_estado=2
         if [ -n "${GPU_PCI_ID:-}" ] && hostdev_estado_xml "$GPU_PCI_ID" \
@@ -754,6 +895,23 @@ aguardar_drm_gpu() {
     done
     return 1
 }
+aguardar_udev_quieto() {
+    # D-GPU-UDEV-LOOP: uma tempestade de eventos udev sobre
+    # /bus/pci/drivers/nvidia recarrega os módulos em laço. O driver aparece
+    # correto no instante da checagem e some um segundo depois, então as
+    # pós-condições passam e o desktop congela logo em seguida. Aqui a fila é
+    # drenada e a estabilidade é exigida por uma janela, não por uma amostra.
+    local i
+    udevadm settle --timeout=15 >/dev/null 2>&1 || true
+    for ((i=0; i<5; i++)); do
+        sleep 1
+        [ "$(driver_atual "$GPU_PCI")" = "$GPU_DRIVER" ] || return 1
+        [ -d /sys/module/nvidia_drm ] || return 1
+        [ -d /sys/module/nvidia_modeset ] || return 1
+        compgen -G "/sys/bus/pci/devices/$GPU_PCI/drm/card*" >/dev/null || return 1
+    done
+    return 0
+}
 desligamento_em_andamento() {
     # Com poweroff/reboot na fila, o systemd recusa iniciar o DM ("transaction
     # is destructive"); religar o desktop é impossível e desnecessário.
@@ -794,6 +952,8 @@ done < "$STATE_FILE"
 [[ "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]] || { dizer_erro "driver de áudio inválido"; exit 1; }
 
 FALHAS=0
+GPU_PRONTA=1
+GPU_ESTAVEL=1
 for modulo in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
     dizer "carregando $modulo..."
     if ! modprobe "$modulo"; then
@@ -808,6 +968,7 @@ fi
 if aguardar_driver "$GPU_PCI" "$GPU_DRIVER"; then
     hook_log "GPU $GPU_PCI confirmada no driver $GPU_DRIVER"
 else
+    GPU_PRONTA=0
     FALHAS=$((FALHAS + 1))
 fi
 if [ -n "$GPU_AUDIO_PCI" ] && ! aguardar_driver "$GPU_AUDIO_PCI" "$AUDIO_DRIVER"; then
@@ -817,7 +978,23 @@ if aguardar_drm_gpu; then
     hook_log "nó DRM da GPU presente; saída de vídeo disponível para o DM"
 else
     dizer_erro "nó DRM da GPU não apareceu em 15 s; o desktop pode subir sem sinal de vídeo"
+    GPU_PRONTA=0
     FALHAS=$((FALHAS + 1))
+fi
+# A prova de estabilidade só faz sentido quando a GPU já voltou inteira. Se ela
+# nem chegou ao nvidia, o diagnóstico é outro e o comportamento antigo (tentar
+# o desktop mesmo assim) continua valendo.
+if [ "$GPU_PRONTA" -eq 1 ]; then
+    if aguardar_udev_quieto; then
+        hook_log "GPU estável por 5 s após drenar a fila do udev"
+    else
+        GPU_ESTAVEL=0
+        FALHAS=$((FALHAS + 1))
+        dizer_erro "a GPU não ficou estável: os módulos nvidia estão sendo recarregados em laço pelas regras udev da distro."
+        dizer_erro "$DM NÃO será iniciado; subir o desktop nesse estado congela o host e obriga reset físico."
+        dizer_erro "confirme com: journalctl -k | grep -c 'Nvlink Core is being initialized'"
+        dizer_erro "correção: reexecute a etapa 14, que reinstala o filtro em /etc/udev/rules.d/71-nvidia.rules"
+    fi
 fi
 if ! timeout 30 nvidia-smi >/dev/null; then
     dizer_erro "nvidia-smi não respondeu"
@@ -826,6 +1003,8 @@ fi
 if [ "$DM_WAS_ACTIVE" -eq 1 ]; then
     if desligamento_em_andamento; then
         dizer "host em desligamento/reinício; $DM não será iniciado agora."
+    elif [ "$GPU_ESTAVEL" -eq 0 ]; then
+        dizer_erro "$DM mantido parado por causa do laço de recarga; use um TTY (Ctrl+Alt+F3) e rode bash util/recuperar-gpu.sh"
     elif iniciar_dm; then
         hook_log "$DM ativo; desktop restaurado"
     else
@@ -860,6 +1039,12 @@ gerar_conjunto_hooks() {
     gerar_prepare "$diretorio/prepare.sh"
     gerar_start "$diretorio/start.sh"
     gerar_release "$diretorio/release.sh"
+    gerar_nvidia_udev_filtro "$diretorio/nvidia-udev-filtro.sh"
+    local udev_origem=""
+    if udev_origem="$(nvidia_udev_origem)"; then
+        gerar_nvidia_udev_regras "$udev_origem" "$diretorio/nvidia.rules" || return 1
+        chmod 0644 "$diretorio/nvidia.rules"
+    fi
     printf 'vm-passthrough gate obrigatório para %s\n' "$VM_NAME" > "$diretorio/required"
     printf 'transação de instalação em andamento para %s\n' "$VM_NAME" > "$diretorio/installing"
     cat > "$diretorio/installing.sh" <<'BLOQUEIO'
@@ -867,10 +1052,10 @@ gerar_conjunto_hooks() {
 echo "[hook install] configuração de passthrough em transação; evento bloqueado" >&2
 exit 75
 BLOQUEIO
-    chmod 0755 "$diretorio/qemu" "$diretorio/prepare.sh" "$diretorio/start.sh" "$diretorio/release.sh" "$diretorio/installing.sh"
+    chmod 0755 "$diretorio/qemu" "$diretorio/prepare.sh" "$diretorio/start.sh" "$diretorio/release.sh" "$diretorio/installing.sh" "$diretorio/nvidia-udev-filtro.sh"
     chmod 0644 "$diretorio/required" "$diretorio/installing"
     local arquivo
-    for arquivo in "$diretorio/qemu" "$diretorio/prepare.sh" "$diretorio/start.sh" "$diretorio/release.sh" "$diretorio/installing.sh"; do
+    for arquivo in "$diretorio/qemu" "$diretorio/prepare.sh" "$diretorio/start.sh" "$diretorio/release.sh" "$diretorio/installing.sh" "$diretorio/nvidia-udev-filtro.sh"; do
         bash -n "$arquivo" || return 1
     done
 }
@@ -958,6 +1143,15 @@ if [ -n "${HD1_BY_ID_PATH:-}" ]; then
     fi
 fi
 
+# Sombrear 71-nvidia.rules em /etc anula o arquivo da distro inteiro. Adotar um
+# override que não é desta etapa apagaria em silêncio uma decisão do usuário.
+if sudo test -e "$NVIDIA_UDEV_REGRAS"; then
+    sudo test ! -L "$NVIDIA_UDEV_REGRAS" \
+        || falhar "Override das regras udev é link simbólico; adoção recusada: $NVIDIA_UDEV_REGRAS"
+    sudo grep -qF "$MARCADOR_UDEV" "$NVIDIA_UDEV_REGRAS" \
+        || falhar "Já existe $NVIDIA_UDEV_REGRAS fora da gestão desta etapa. Mova-o para fora de /etc/udev/rules.d e rode a etapa 14 de novo."
+fi
+
 # --- Vídeo virtual: decisão ativa no fluxo interativo --------------------------
 # A remoção do QXL/SPICE não fica mais escondida atrás de --remover-video: no
 # fluxo padrão do menu (sem flags, com TTY), quando a GPU real já está no XML e
@@ -1037,7 +1231,8 @@ hooks_convergidos() {
         "required|$GATE_REQUIRED|644" \
         "prepare.sh|$PREPARE|755" \
         "start.sh|$START|755" \
-        "release.sh|$RELEASE|755"; do
+        "release.sh|$RELEASE|755" \
+        "nvidia-udev-filtro.sh|$NVIDIA_UDEV_FILTRO|755"; do
         origem="$render/${par%%|*}"
         destino="${par#*|}"
         modo="${destino#*|}"
@@ -1047,6 +1242,10 @@ hooks_convergidos() {
             break
         fi
     done
+    if [ "$rc" -eq 0 ] && [ -f "$render/nvidia.rules" ] \
+       && ! _arquivo_gerenciado_identico "$render/nvidia.rules" "$NVIDIA_UDEV_REGRAS" 644; then
+        rc=1
+    fi
     rm -rf -- "$render"
     return "$rc"
 }
@@ -1246,11 +1445,17 @@ EXISTIAM=()
 BACKUP_ROOT="/etc/libvirt/hooks/.vm-passthrough-backups/$STAMP"
 TRANSACAO_ATIVA=0
 XML_MUTADO=0
+UDEV_REGRAS_MUTADAS=0
 PRESERVAR_XML=0
 instalar_root_atomico() {
-    local origem="$1" destino="$2" diretorio temporario
+    # $3=1 preserva dono/modo de um diretório que já existe. Só o filtro udev
+    # usa isso: ele mora fora da árvore de hooks e /usr/local/sbin é root:staff
+    # 2775 por política da distro, que um install -d cego reescreveria.
+    local origem="$1" destino="$2" preservar_dir="${3:-0}" diretorio temporario
     diretorio="$(dirname "$destino")"
-    sudo install -d -o root -g root -m 0755 "$diretorio" || return 1
+    if [ "$preservar_dir" != 1 ] || ! sudo test -d "$diretorio"; then
+        sudo install -d -o root -g root -m 0755 "$diretorio" || return 1
+    fi
     sudo test ! -L "$destino" || return 1
     temporario="$(sudo mktemp "${destino}.tmp.XXXXXX")" || return 1
     if ! sudo install -o root -g root -m 0755 "$origem" "$temporario" \
@@ -1286,9 +1491,9 @@ registrar_backup_destino() {
     EXISTIAM+=("$existia")
 }
 instalar_com_backup() {
-    local origem="$1" destino="$2"
+    local origem="$1" destino="$2" preservar_dir="${3:-0}"
     registrar_backup_destino "$destino" || return 1
-    instalar_root_atomico "$origem" "$destino"
+    instalar_root_atomico "$origem" "$destino" "$preservar_dir"
 }
 instalar_dado_com_backup() {
     local origem="$1" destino="$2"
@@ -1353,6 +1558,12 @@ rollback_total() {
         rollback_xml || falhou=1
     fi
     rollback_hooks || falhou=1
+    # As regras restauradas só voltam a valer depois do reload; sem isto o host
+    # ficaria com o arquivo antigo em disco e o filtro revertido ainda ativo.
+    if [ "$UDEV_REGRAS_MUTADAS" -eq 1 ]; then
+        sudo udevadm control --reload-rules \
+            || { erro "Regras udev revertidas em disco, mas o udev não recarregou. Rode: sudo udevadm control --reload-rules"; falhou=1; }
+    fi
     libvirt_backend_reiniciar \
         || { erro "Hooks foram revertidos, mas o daemon libvirt não reiniciou: $LIBVIRT_BACKEND_ERRO Não inicie VMs."; falhou=1; }
     if [ "$falhou" -ne 0 ]; then
@@ -1398,6 +1609,18 @@ instalar_com_backup "$RENDER_DIR/start.sh" "$START" \
     || falhar "Falha ao instalar start/begin."
 instalar_com_backup "$RENDER_DIR/release.sh" "$RELEASE" \
     || falhar "Falha ao instalar release/end."
+instalar_com_backup "$RENDER_DIR/nvidia-udev-filtro.sh" "$NVIDIA_UDEV_FILTRO" 1 \
+    || falhar "Falha ao instalar o filtro de modprobe das regras udev da NVIDIA."
+if [ -f "$RENDER_DIR/nvidia.rules" ]; then
+    UDEV_REGRAS_MUTADAS=1
+    instalar_dado_com_backup "$RENDER_DIR/nvidia.rules" "$NVIDIA_UDEV_REGRAS" \
+        || falhar "Falha ao instalar o override das regras udev da NVIDIA."
+    sudo udevadm control --reload-rules \
+        || falhar "O udev recusou recarregar as regras; a transação restaurará os arquivos anteriores."
+    ok "Regras udev da NVIDIA filtradas: o laço de recarga dos módulos na janela vfio está fechado."
+else
+    aviso "Nenhuma regra udev da NVIDIA com modprobe direto foi encontrada; filtro instalado mas sem override a aplicar."
+fi
 remover_com_backup "$PREPARE_ANTIGO" \
     || falhar "Falha ao migrar o hook prepare antigo."
 remover_com_backup "$RELEASE_ANTIGO" \
