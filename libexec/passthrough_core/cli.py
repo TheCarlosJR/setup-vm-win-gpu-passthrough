@@ -62,7 +62,7 @@ USAGE = (
     "  domain-compare, domain-fingerprint, domain-metadata, domain-candidate,\n"
     "  network-address-check, network-consumers, network-inspect,\n"
     "  network-nat-addresses, network-overlap, network-plan,\n"
-    "  network-route-audit,\n"
+    "  network-revalidate, network-route-audit, network-snapshot,\n"
     "  nvidia-product-match,\n"
     "  nvidia-download-info, qemu-image-inspect,\n"
     "  cpu-topology, cpu-layout, cpu-plan, cpu-memory,\n"
@@ -714,7 +714,9 @@ _PURE_COMMANDS: dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] = {
     "network-nat-addresses": network.nat_addresses,
     "network-overlap": network_xml.network_overlap,
     "network-plan": network.network_plan,
+    "network-revalidate": network.network_revalidate,
     "network-route-audit": network.route_audit,
+    "network-snapshot": network.network_snapshot,
     "nvidia-download-info": nvidia_lookup.download_info,
     "nvidia-product-match": nvidia_lookup.product_match,
     "config-validate": config.validate_pair,

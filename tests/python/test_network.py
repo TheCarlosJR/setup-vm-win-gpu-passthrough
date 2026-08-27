@@ -10,7 +10,7 @@ import ipaddress
 import json
 import unittest
 
-from passthrough_core import domain_xml, network
+from passthrough_core import domain_xml, network, protocol
 from passthrough_core.errors import DataError
 
 import fixtures_i3 as fx
@@ -48,6 +48,14 @@ from fixtures_i7 import (
     intencao_nat,
     inventario,
     nic,
+    pares_ajustes,
+    pares_alvo,
+    pares_auditoria,
+    pares_estado,
+    pares_inventario,
+    pares_pedido,
+    pares_revalidacao,
+    pares_snapshot,
     pedido_bridge,
     pedido_nat,
     precondicao,
@@ -3237,6 +3245,703 @@ class PlanEffectRegressionTests(unittest.TestCase):
                 for token in TOKENS_DE_FERRAMENTA:
                     self.assertNotIn(token, texto.lower())
 
+
+# --- I7.5: canal de pares planos --------------------------------------------
+# O Bash não constrói JSON, então o transporte é `chave\0valor\0` com coleções
+# dobradas em um par só. O que estes testes precisam provar é que o transporte
+# NÃO distorce nada: a estrutura montada a partir dos pares tem que produzir o
+# mesmo documento, byte a byte, que a estrutura aninhada equivalente.
+
+
+def bytes_de(documento) -> bytes:
+    return json.dumps(
+        documento, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def sem(pares: dict, chave: str) -> dict:
+    copia = dict(pares)
+    del copia[chave]
+    return copia
+
+
+def com(pares: dict, **trocas) -> dict:
+    copia = dict(pares)
+    copia.update(trocas)
+    return copia
+
+
+class PairsRoundTripTests(unittest.TestCase):
+    """Pares -> estrutura -> normalização, para cada parte do schema."""
+
+    def test_snapshot_completo_ida_e_volta(self) -> None:
+        estado = snapshot()
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares_snapshot(estado))),
+            bytes_de(network.network_snapshot({"snapshot": estado})),
+        )
+
+    def test_rota_sem_metrica_e_com_metrica(self) -> None:
+        for metrica in (None, 0, 100):
+            with self.subTest(metrica=metrica):
+                estado = snapshot(
+                    routes=[
+                        rota(destino="default", dev="enp3s0", protocolo="dhcp"),
+                        rota(destino="192.168.0.0/24", dev="br0", metrica=metrica),
+                    ]
+                )
+                pares = pares_snapshot(estado)
+                self.assertEqual(
+                    bytes_de(network.network_snapshot(pares)),
+                    bytes_de(network.network_snapshot({"snapshot": estado})),
+                )
+
+    def test_rota_sem_dispositivo_atravessa_o_canal(self) -> None:
+        estado = snapshot(
+            routes=[
+                rota(destino="default", dev="enp3s0", protocolo="dhcp"),
+                rota(
+                    tipo="unreachable",
+                    destino="10.10.0.0/24",
+                    dev="",
+                    protocolo="static",
+                    escopo="",
+                ),
+            ]
+        )
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares_snapshot(estado))),
+            bytes_de(network.network_snapshot({"snapshot": estado})),
+        )
+
+    def test_link_transporta_listas_e_wireless(self) -> None:
+        estado = snapshot(
+            links=[
+                link(
+                    "enp3s0",
+                    mac=UPLINK_MAC,
+                    master="br0",
+                    flags=["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+                ),
+                link(
+                    "br0",
+                    kind="bridge",
+                    mac=UPLINK_MAC,
+                    addresses=["192.168.0.7/24", "10.1.1.1/32"],
+                ),
+                link("virbr9", kind="bridge", addresses=["192.168.77.1/24"]),
+                link("wlp2s0", wireless=True, mtu=1400),
+            ]
+        )
+        pares = pares_snapshot(estado)
+        self.assertIn("LOWER_UP", pares["snapshot_links"])
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares)),
+            bytes_de(network.network_snapshot({"snapshot": estado})),
+        )
+
+    def test_configuracao_transporta_metadados_de_lstat(self) -> None:
+        estado = snapshot(
+            configuration=[
+                artefato(scope="host", identifier="01-bridge.yaml"),
+                artefato(
+                    scope="project",
+                    identifier="passthrough.conf",
+                    content='A="1"\n\tB="2"\n',
+                ),
+                {
+                    "content": "",
+                    "device": None,
+                    "exists": False,
+                    "file_type": "",
+                    "gid": None,
+                    "identifier": "ausente.yaml",
+                    "inode": None,
+                    "mode": None,
+                    "mtime_ns": None,
+                    "nlink": None,
+                    "scope": "host",
+                    "size": None,
+                    "uid": None,
+                },
+            ]
+        )
+        pares = pares_snapshot(estado)
+        # O conteúdo tem TAB e nova linha; ele viaja em par próprio indexado e
+        # a coleção continua com exatamente um registro por artefato.
+        self.assertIn("\t", pares["snapshot_configuration_1_content"])
+        self.assertIn("\n", pares["snapshot_configuration_1_content"])
+        self.assertEqual(len(pares["snapshot_configuration"].split("\n")), 3)
+        for registro in pares["snapshot_configuration"].split("\n"):
+            self.assertEqual(len(registro.split("\t")), 12)
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares)),
+            bytes_de(network.network_snapshot({"snapshot": estado})),
+        )
+
+    def test_consumidor_transporta_xml_e_interfaces(self) -> None:
+        estado = snapshot(
+            consumers=[
+                consumidor(),
+                consumidor(
+                    name=OUTRA_VM,
+                    active=False,
+                    interfaces=[
+                        {"mac": OUTRO_MAC, "source": REDE, "source_type": "network"},
+                        {
+                            "mac": "52:54:00:99:88:77",
+                            "source": "br0",
+                            "source_type": "bridge",
+                        },
+                    ],
+                    xml=fx.domain().replace(VM, OUTRA_VM),
+                ),
+            ]
+        )
+        pares = pares_snapshot(estado)
+        self.assertIn("snapshot_consumer_1_xml", pares)
+        self.assertIn("snapshot_consumer_1_interfaces", pares)
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares)),
+            bytes_de(network.network_snapshot({"snapshot": estado})),
+        )
+
+    def test_redes_de_terceiros_atravessam_o_canal(self) -> None:
+        estado = snapshot(
+            foreign_networks=[
+                registro_rede(
+                    REDE_TERCEIRO,
+                    active_bridge=BRIDGE_TERCEIRO,
+                    persistent_bridge=BRIDGE_TERCEIRO,
+                ),
+                registro_rede(
+                    "so-persistente", active=False, persistent_bridge="virbr8"
+                ),
+            ],
+            links=[
+                link("enp3s0", mac=UPLINK_MAC, master="br0"),
+                link(
+                    "br0",
+                    kind="bridge",
+                    mac=UPLINK_MAC,
+                    addresses=["192.168.0.7/24"],
+                ),
+                link("virbr9", kind="bridge", addresses=["192.168.77.1/24"]),
+            ],
+        )
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares_snapshot(estado))),
+            bytes_de(network.network_snapshot({"snapshot": estado})),
+        )
+
+    def test_intencao_alvo_e_ajustes_ida_e_volta(self) -> None:
+        for nome, pedido in (("nat", pedido_nat()), ("bridge", pedido_bridge())):
+            with self.subTest(modo=nome):
+                pares = pares_pedido(pedido)
+                self.assertEqual(
+                    bytes_de(network.normalize_plan_request(pares)),
+                    bytes_de(network.normalize_plan_request(pedido)),
+                )
+
+    def test_bloco_de_estado_e_reaproveitavel_entre_subcomandos(self) -> None:
+        """O Bash captura uma vez: `snapshot_*` do plano serve ao snapshot."""
+        pedido = pedido_nat()
+        do_plano = {
+            chave: valor
+            for chave, valor in pares_pedido(pedido).items()
+            if chave.startswith("snapshot_")
+        }
+        self.assertEqual(do_plano, pares_estado(pedido["snapshot"], "snapshot"))
+        self.assertEqual(
+            bytes_de(network.network_snapshot(do_plano)),
+            bytes_de(network.network_snapshot({"snapshot": pedido["snapshot"]})),
+        )
+
+
+class PairsPlanParityTests(unittest.TestCase):
+    """A prova central: o plano vindo de pares é byte a byte o mesmo."""
+
+    def test_plano_de_pares_e_identico_ao_aninhado(self) -> None:
+        for nome, pedido in (("nat", pedido_nat()), ("bridge", pedido_bridge())):
+            with self.subTest(modo=nome):
+                pares = pares_pedido(pedido)
+                self.assertEqual(
+                    bytes_de(network.build_plan(pares)),
+                    bytes_de(network.build_plan(pedido)),
+                )
+                self.assertEqual(
+                    bytes_de(network.network_plan(pares)),
+                    bytes_de(network.network_plan(pedido)),
+                )
+
+    def test_plano_recusado_de_pares_e_identico(self) -> None:
+        pedido = pedido_nat(target=alvo(active=True))
+        self.assertEqual(
+            bytes_de(network.network_plan(pares_pedido(pedido))),
+            bytes_de(network.network_plan(pedido)),
+        )
+
+    def test_consumidores_de_pares_sao_identicos(self) -> None:
+        pedido = inventario(
+            domains=[
+                dominio(VM),
+                dominio(OUTRA_VM, active=True),
+                dominio(
+                    "sem-nic",
+                    interfaces=[{"mac": "", "source": "", "source_type": "other"}],
+                ),
+            ]
+        )
+        self.assertEqual(
+            bytes_de(network.network_consumers(pares_inventario(pedido))),
+            bytes_de(network.network_consumers(pedido)),
+        )
+
+    def test_auditoria_de_rotas_de_pares_e_identica(self) -> None:
+        pedido = {
+            "candidate_cidr": "192.168.177.0/24",
+            "managed": gerenciada(),
+            "routes": [
+                rota(destino="default", dev="virbr0", protocolo="dhcp"),
+                rota(destino="192.168.9.0/24", dev="virbr0"),
+                rota(tipo="local", destino="192.168.9.1", dev="virbr0", escopo="host"),
+                rota(destino="192.168.177.0/24", dev="enp3s0", protocolo="static"),
+            ],
+        }
+        self.assertEqual(
+            bytes_de(network.route_audit(pares_auditoria(pedido))),
+            bytes_de(network.route_audit(pedido)),
+        )
+
+    def test_auditoria_sem_rede_gerenciada_de_pares(self) -> None:
+        pedido = {
+            "candidate_cidr": "192.168.177.0/24",
+            "managed": {
+                "bridge": "",
+                "cidr": "",
+                "family": "",
+                "gateway": "",
+                "present": False,
+            },
+            "routes": [],
+        }
+        self.assertEqual(
+            bytes_de(network.route_audit(pares_auditoria(pedido))),
+            bytes_de(network.route_audit(pedido)),
+        )
+
+
+class PairsBudgetTests(unittest.TestCase):
+    """O pedido real precisa caber no teto de pares sem aumentar o teto."""
+
+    def test_pedido_de_plano_cabe_no_teto(self) -> None:
+        # Os dois números são o orçamento documentado em network.py: 65 pares
+        # fixos mais um blob de conteúdo por artefato de cada estado (1 no NAT,
+        # 2 na bridge). Prendê-los aqui impede que a conta envelheça calada.
+        for pedido, esperado in ((pedido_nat(), 67), (pedido_bridge(), 68)):
+            pares = pares_pedido(pedido)
+            self.assertEqual(len(pares), esperado)
+            self.assertLessEqual(len(pares), protocol.MAX_REQUEST_PAIRS)
+
+    def test_estado_sem_colecao_gasta_vinte_pares(self) -> None:
+        vazio = snapshot_plano(configuration=[], consumers=[])
+        self.assertEqual(len(pares_estado(vazio, "snapshot")), 20)
+        vazio["mode"] = "nat"
+        self.assertEqual(len(pares_estado(vazio, "intent")), 21)
+
+    def test_teto_de_pares_continua_em_256(self) -> None:
+        self.assertEqual(protocol.MAX_REQUEST_PAIRS, 256)
+
+    def test_toda_chave_do_canal_e_aceita_pelo_protocolo(self) -> None:
+        pares = dict(pares_pedido(pedido_bridge()))
+        pares.update(pares_inventario(inventario()))
+        pares.update(
+            pares_revalidacao(
+                snapshot_plano(),
+                network.snapshot_fingerprints(snapshot_plano()),
+            )
+        )
+        for chave in pares:
+            self.assertRegex(chave, r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class PairsRefusalTests(unittest.TestCase):
+    """Cada recusa do transporte é tipada; nenhuma vira default silencioso."""
+
+    def setUp(self) -> None:
+        self.pares = pares_snapshot(snapshot())
+
+    def recusa(self, pares) -> None:
+        with self.assertRaises(DataError):
+            network.network_snapshot(pares)
+
+    def test_par_obrigatorio_ausente(self) -> None:
+        for chave in (
+            "snapshot_schema_version",
+            "snapshot_uplink_name",
+            "snapshot_routes",
+            "snapshot_links",
+            "snapshot_bridge_ports",
+            "snapshot_libvirt_network_active_xml",
+            "snapshot_foreign_networks",
+            "snapshot_consumers",
+            "snapshot_configuration",
+        ):
+            with self.subTest(chave=chave):
+                self.recusa(sem(self.pares, chave))
+
+    def test_par_extra_fora_do_schema(self) -> None:
+        self.recusa(com(self.pares, snapshot_extra="1"))
+        self.recusa(com(self.pares, extra="1"))
+
+    def test_contagem_de_campos_errada(self) -> None:
+        rotas = self.pares["snapshot_routes"].split("\n")
+        curta = rotas[0].rsplit("\t", 1)[0]
+        self.recusa(com(self.pares, snapshot_routes="\n".join([curta] + rotas[1:])))
+        longa = rotas[0] + "\textra"
+        self.recusa(com(self.pares, snapshot_routes="\n".join([longa] + rotas[1:])))
+
+    def test_tab_em_campo_escalar(self) -> None:
+        self.recusa(com(self.pares, snapshot_uplink_name="enp3s0\tenp4s0"))
+        self.recusa(com(self.pares, snapshot_bridge_name="br0\tbr1"))
+
+    def test_tab_dentro_de_campo_de_registro_muda_a_contagem(self) -> None:
+        rotas = self.pares["snapshot_routes"].split("\n")
+        campos = rotas[0].split("\t")
+        campos[0] = "192.168.0.0/24\tinjetado"
+        self.recusa(
+            com(self.pares, snapshot_routes="\n".join(["\t".join(campos)] + rotas[1:]))
+        )
+
+    def test_nova_linha_em_campo_escalar(self) -> None:
+        self.recusa(com(self.pares, snapshot_bridge_name="br0\nbr1"))
+        self.recusa(com(self.pares, snapshot_libvirt_network_marker="a\nb"))
+
+    def test_retorno_de_carro_em_campo_de_registro(self) -> None:
+        rotas = self.pares["snapshot_routes"].split("\n")
+        campos = rotas[0].split("\t")
+        campos[4] = "dhcp\r"
+        self.recusa(
+            com(self.pares, snapshot_routes="\n".join(["\t".join(campos)] + rotas[1:]))
+        )
+
+    def test_registro_vazio_na_colecao(self) -> None:
+        self.recusa(
+            com(self.pares, snapshot_routes=self.pares["snapshot_routes"] + "\n")
+        )
+
+    def test_item_vazio_em_lista(self) -> None:
+        estado = snapshot(bridge={"exists": True, "name": "br0", "ports": ["enp3s0"]})
+        pares = pares_snapshot(estado)
+        self.recusa(com(pares, snapshot_bridge_ports="enp3s0\n\nenp4s0"))
+        links = pares["snapshot_links"].split("\n")
+        campos = links[0].split("\t")
+        campos[1] = "UP,,MULTICAST"
+        self.recusa(
+            com(pares, snapshot_links="\n".join(["\t".join(campos)] + links[1:]))
+        )
+
+    def test_indice_de_blob_ausente(self) -> None:
+        self.recusa(sem(self.pares, "snapshot_configuration_0_content"))
+        self.recusa(sem(self.pares, "snapshot_consumer_0_xml"))
+        self.recusa(sem(self.pares, "snapshot_consumer_0_interfaces"))
+
+    def test_indice_de_blob_fora_de_ordem(self) -> None:
+        deslocado = sem(self.pares, "snapshot_configuration_0_content")
+        deslocado["snapshot_configuration_1_content"] = self.pares[
+            "snapshot_configuration_0_content"
+        ]
+        self.recusa(deslocado)
+
+    def test_blob_indexado_sem_registro_correspondente(self) -> None:
+        estado = snapshot(consumers=[])
+        pares = pares_snapshot(estado)
+        pares["snapshot_consumer_0_xml"] = fx.domain()
+        self.recusa(pares)
+
+    def test_valor_fora_do_dominio(self) -> None:
+        self.recusa(com(self.pares, snapshot_bridge_exists="2"))
+        self.recusa(com(self.pares, snapshot_bridge_exists="true"))
+        self.recusa(com(self.pares, snapshot_schema_version="01"))
+        self.recusa(com(self.pares, snapshot_schema_version=""))
+        links = self.pares["snapshot_links"].split("\n")
+        campos = links[0].split("\t")
+        campos[8] = "sim"
+        self.recusa(
+            com(self.pares, snapshot_links="\n".join(["\t".join(campos)] + links[1:]))
+        )
+        campos[8] = "0"
+        campos[5] = "-1"
+        self.recusa(
+            com(self.pares, snapshot_links="\n".join(["\t".join(campos)] + links[1:]))
+        )
+        rotas = self.pares["snapshot_routes"].split("\n")
+        metrica = rotas[0].split("\t")
+        metrica[3] = "01"
+        self.recusa(
+            com(self.pares, snapshot_routes="\n".join(["\t".join(metrica)] + rotas[1:]))
+        )
+
+    def test_colecao_acima_do_limite(self) -> None:
+        excesso = "\n".join(
+            "10.%d.0.0/24\tbr0\t\t\tkernel\tlink\t\tmain\tunicast" % indice
+            for indice in range(network.MAX_ROUTES + 1)
+        )
+        self.recusa(com(self.pares, snapshot_routes=excesso))
+
+    def test_lista_acima_do_limite(self) -> None:
+        excesso = "\n".join(
+            "p%d" % indice for indice in range(network.MAX_LIST_ITEMS + 1)
+        )
+        self.recusa(com(self.pares, snapshot_bridge_ports=excesso))
+
+    def test_valor_nao_textual_no_canal_plano(self) -> None:
+        self.recusa(com(self.pares, snapshot_schema_version=1))
+
+    def test_forma_misturada_e_recusada(self) -> None:
+        misto = dict(pares_pedido(pedido_nat()))
+        misto["snapshot"] = pedido_nat()["snapshot"]
+        with self.assertRaises(DataError):
+            network.network_plan(misto)
+
+    def test_schema_fechado_continua_valendo_depois_do_transporte(self) -> None:
+        self.recusa(com(self.pares, snapshot_schema_version="2"))
+        self.recusa(com(self.pares, snapshot_uplink_name="nao existe"))
+        self.recusa(com(self.pares, snapshot_uplink_mac="zz:zz:zz:zz:zz:zz"))
+        with self.assertRaises(DataError):
+            network.network_plan(
+                com(pares_pedido(pedido_nat()), intent_mode="ponte")
+            )
+
+
+class PairsRevalidationTests(unittest.TestCase):
+    """Divergência por componente: um de cada vez, e só ele é acusado."""
+
+    def guardados(self, estado) -> dict:
+        return network.snapshot_fingerprints(estado)
+
+    def revalidar(self, base, mudado) -> dict:
+        return network.network_revalidate(
+            pares_revalidacao(mudado, self.guardados(base))
+        )
+
+    def test_estado_igual_nao_diverge(self) -> None:
+        estado = snapshot()
+        resposta = self.revalidar(estado, estado)
+        self.assertEqual(resposta["matches"], 1)
+        self.assertEqual(resposta["divergent_count"], 0)
+        self.assertEqual(resposta["divergent_components"], "")
+        self.assertEqual(resposta["exact_match"], 1)
+        self.assertEqual(resposta["semantic_match"], 1)
+        for campo in network.STATE_FIELDS:
+            self.assertEqual(resposta["component_%s_match" % campo], 1)
+
+    def test_cada_componente_acusa_sozinho(self) -> None:
+        """Um par (base, mudado) por componente, cada par autoconsistente.
+
+        `bridge` não pode ser mudada sobre a base padrão: `_validate_relations`
+        amarra bridge, portas e masters dos links. Por isso ela usa uma base
+        sem bridge alguma, onde só o nome declarado muda.
+        """
+        base = snapshot()
+        sem_bridge = snapshot(
+            bridge={"exists": False, "name": "br9", "ports": []},
+            links=[
+                link("enp3s0", mac=UPLINK_MAC),
+                link("virbr9", kind="bridge", addresses=["192.168.77.1/24"]),
+            ],
+            routes=[
+                rota(destino="default", dev="enp3s0", protocolo="dhcp"),
+                rota(destino="192.168.0.0/24", dev="enp3s0", origem="192.168.0.7"),
+            ],
+        )
+        casos = {
+            "bridge": (
+                sem_bridge,
+                copy.deepcopy(sem_bridge),
+            ),
+            "configuration": (
+                base,
+                snapshot(configuration=[artefato(content="network: {version: 2}\n")]),
+            ),
+            "consumers": (base, snapshot(consumers=[])),
+            "foreign_networks": (
+                base,
+                snapshot(foreign_networks=[registro_rede(REDE_TERCEIRO)]),
+            ),
+            "libvirt_network": (
+                base,
+                snapshot(libvirt_network=rede_libvirt(marker="outro-marcador")),
+            ),
+            "links": (
+                base,
+                snapshot(
+                    links=[
+                        link("enp3s0", mac=UPLINK_MAC, master="br0", mtu=9000),
+                        link(
+                            "br0",
+                            kind="bridge",
+                            mac=UPLINK_MAC,
+                            addresses=["192.168.0.7/24"],
+                        ),
+                        link("virbr9", kind="bridge", addresses=["192.168.77.1/24"]),
+                    ]
+                ),
+            ),
+            "routes": (
+                base,
+                snapshot(
+                    routes=[
+                        rota(destino="default", dev="enp3s0", protocolo="dhcp"),
+                        rota(
+                            destino="192.168.0.0/24", dev="br0", origem="192.168.0.7"
+                        ),
+                        rota(destino="10.20.0.0/24", dev="virbr9", protocolo="static"),
+                    ]
+                ),
+            ),
+            "uplink": (
+                base,
+                snapshot(
+                    uplink={"kind": "ethernet", "mac": UPLINK_MAC, "name": "enp3s0"}
+                ),
+            ),
+        }
+        casos["bridge"][1]["bridge"]["name"] = "br8"
+        self.assertEqual(sorted(casos), sorted(network.STATE_FIELDS))
+        for componente, (referencia, mudado) in sorted(casos.items()):
+            with self.subTest(componente=componente):
+                resposta = self.revalidar(referencia, mudado)
+                self.assertEqual(resposta["divergent_components"], componente)
+                self.assertEqual(resposta["divergent_count"], 1)
+                self.assertEqual(resposta["matches"], 0)
+                self.assertEqual(resposta["exact_match"], 0)
+                self.assertEqual(resposta["semantic_match"], 0)
+                self.assertEqual(resposta["component_%s_match" % componente], 0)
+                for outro in network.STATE_FIELDS:
+                    if outro == componente:
+                        continue
+                    self.assertEqual(resposta["component_%s_match" % outro], 1)
+
+    def test_dois_componentes_acusam_os_dois(self) -> None:
+        base = snapshot()
+        mudado = snapshot(
+            consumers=[],
+            uplink={"kind": "ethernet", "mac": UPLINK_MAC, "name": "enp3s0"},
+        )
+        resposta = self.revalidar(base, mudado)
+        self.assertEqual(resposta["divergent_count"], 2)
+        self.assertEqual(
+            resposta["divergent_components"].split("\n"), ["consumers", "uplink"]
+        )
+
+    def test_fingerprints_devolvidos_sao_os_recalculados(self) -> None:
+        estado = snapshot()
+        esperados = self.guardados(estado)
+        resposta = network.network_revalidate(pares_revalidacao(estado, esperados))
+        self.assertEqual(resposta["fingerprint_exact"], esperados["exact"])
+        self.assertEqual(resposta["fingerprint_semantic"], esperados["semantic"])
+        for campo in network.STATE_FIELDS:
+            self.assertEqual(
+                resposta["fingerprint_component_%s" % campo],
+                esperados["components"][campo],
+            )
+
+    def test_snapshot_entrega_o_que_a_revalidacao_consome(self) -> None:
+        """`network-snapshot` devolve exatamente as chaves `expected_*`."""
+        estado = snapshot()
+        capturado = network.network_snapshot(pares_snapshot(estado))
+        pares = pares_snapshot(estado)
+        pares["expected_exact"] = capturado["fingerprint_exact"]
+        pares["expected_semantic"] = capturado["fingerprint_semantic"]
+        for campo in network.STATE_FIELDS:
+            pares["expected_component_%s" % campo] = capturado[
+                "fingerprint_component_%s" % campo
+            ]
+        self.assertEqual(network.network_revalidate(pares)["matches"], 1)
+
+    def test_digest_guardado_fora_do_formato_e_recusado(self) -> None:
+        estado = snapshot()
+        esperados = self.guardados(estado)
+        for chave in ("expected_exact", "expected_semantic"):
+            with self.subTest(chave=chave):
+                pares = pares_revalidacao(estado, esperados)
+                pares[chave] = "nao-e-um-digest"
+                with self.assertRaises(DataError):
+                    network.network_revalidate(pares)
+        pares = pares_revalidacao(estado, esperados)
+        pares["expected_component_routes"] = esperados["exact"].upper()
+        with self.assertRaises(DataError):
+            network.network_revalidate(pares)
+
+    def test_componente_guardado_ausente_e_recusado(self) -> None:
+        estado = snapshot()
+        pares = pares_revalidacao(estado, self.guardados(estado))
+        with self.assertRaises(DataError):
+            network.network_revalidate(sem(pares, "expected_component_bridge"))
+
+    def test_forma_aninhada_da_revalidacao(self) -> None:
+        estado = snapshot()
+        esperados = self.guardados(estado)
+        aninhado = {
+            "expected": {
+                "components": dict(esperados["components"]),
+                "exact": esperados["exact"],
+                "semantic": esperados["semantic"],
+            },
+            "snapshot": estado,
+        }
+        self.assertEqual(
+            bytes_de(network.network_revalidate(aninhado)),
+            bytes_de(
+                network.network_revalidate(pares_revalidacao(estado, esperados))
+            ),
+        )
+
+
+class PairsDeterminismTests(unittest.TestCase):
+    def test_chamada_repetida_e_identica(self) -> None:
+        pares = pares_pedido(pedido_bridge())
+        self.assertEqual(
+            bytes_de(network.network_plan(pares)),
+            bytes_de(network.network_plan(pares)),
+        )
+
+    def test_ordem_dos_pares_nao_muda_a_resposta(self) -> None:
+        pares = pares_pedido(pedido_nat())
+        invertido = dict(reversed(list(pares.items())))
+        self.assertEqual(
+            bytes_de(network.network_plan(invertido)),
+            bytes_de(network.network_plan(pares)),
+        )
+
+    def test_snapshot_repetido_e_identico(self) -> None:
+        pares = pares_snapshot(snapshot())
+        self.assertEqual(
+            bytes_de(network.network_snapshot(pares)),
+            bytes_de(network.network_snapshot(pares)),
+        )
+
+
+class PairsEffectRegressionTests(unittest.TestCase):
+    """O transporte não pode mexer na matriz de efeitos congelada pelo I0."""
+
+    def test_efeitos_e_rollback_de_pares_continuam_iguais(self) -> None:
+        plano_nat = network.build_plan(pares_pedido(pedido_nat()))
+        plano_bridge = network.build_plan(pares_pedido(pedido_bridge()))
+        self.assertEqual(efeitos(plano_nat), EFEITOS_NAT)
+        self.assertEqual(efeitos(plano_bridge), EFEITOS_BRIDGE)
+        self.assertEqual(len(plano_nat["operations"]), 11)
+        self.assertEqual(len(plano_bridge["operations"]), 10)
+        self.assertEqual(efeitos_rollback(plano_nat), ROLLBACK_NAT)
+        self.assertEqual(efeitos_rollback(plano_bridge), ROLLBACK_BRIDGE)
+
+    def test_nenhum_token_de_ferramenta_no_plano_de_pares(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            plano = network.build_plan(pares_pedido(pedido))
+            for texto in textos(plano):
+                for token in TOKENS_DE_FERRAMENTA:
+                    self.assertNotIn(token, texto.lower())
 
 if __name__ == "__main__":
     unittest.main()

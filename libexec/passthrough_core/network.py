@@ -1208,9 +1208,16 @@ def route_audit(payload: Mapping[str, Any]) -> dict:
     única sobreposição tolerada e qualquer outra é colisão. A ordem é a das
     rotas já normalizadas (canônica e estável), então `collision_first_index`
     é determinístico.
+
+    Aceita o payload aninhado ou o mapa plano do canal de pares
+    (`_accept_route_audit_pairs`, I7.5); o schema fechado é o mesmo nos dois.
     """
     label = "route_audit"
-    data = _closed(payload, {"candidate_cidr", "managed", "routes"}, label)
+    data = _closed(
+        _accept_route_audit_pairs(payload),
+        {"candidate_cidr", "managed", "routes"},
+        label,
+    )
     _address, _prefix, candidate = parse_ipv4_cidr(
         _text(data, "candidate_cidr", label), "route_audit.candidate_cidr"
     )
@@ -1399,7 +1406,12 @@ def _normalize_inventory_domain(value: Any, index: int) -> dict:
 
 
 def normalize_consumer_request(value: Any) -> dict:
-    """Valida o inventário fechado de domínios e redes já capturado pelo Bash."""
+    """Valida o inventário fechado de domínios e redes já capturado pelo Bash.
+
+    Como o planner, aceita o objeto aninhado ou o mapa plano do canal de pares
+    (`_accept_consumer_pairs`, I7.5) sem afrouxar campo algum do schema.
+    """
+    value = _accept_consumer_pairs(value)
     fields = {
         "bridges",
         "domains",
@@ -2020,7 +2032,13 @@ def _normalize_settings(value: Any) -> dict:
 
 
 def normalize_plan_request(value: Any) -> dict:
-    """Valida o payload fechado do planner e normaliza cada parte."""
+    """Valida o payload fechado do planner e normaliza cada parte.
+
+    Aceita as duas formas do mesmo pedido: o objeto aninhado e o mapa plano do
+    canal de pares, que `_accept_plan_pairs` (I7.5) monta na mesma estrutura
+    antes de qualquer validação. O schema fechado abaixo continua idêntico.
+    """
+    value = _accept_plan_pairs(value)
     fields = {"schema_version", "snapshot", "intent", "target", "settings"}
     payload = _closed(value, fields, "plan")
     if (
@@ -3562,4 +3580,815 @@ def network_plan(payload: Mapping[str, Any]) -> dict:
         item["id"] for item in plan["operations"]
     )
     data["rollback_ids"] = "\n".join(item["id"] for item in plan["rollback"])
+    return data
+
+
+# --- I7.5: adaptador do canal de pares para o schema fechado ------------------
+# O Bash não constrói JSON (seção 3.8) e o canal `chave\0valor\0` decodifica
+# para `dict[str, str]` (`protocol.decode_request_pairs`). Este adaptador é a
+# única ponte entre aquele mapa plano e as estruturas aninhadas que
+# `normalize_snapshot`, `normalize_plan_request`, `normalize_consumer_request`
+# e `route_audit` exigem. Ele MONTA a estrutura e entrega; nenhum normalizador
+# foi afrouxado para acomodar o transporte, e o schema fechado continua sendo
+# a autoridade sobre o que é válido.
+#
+# Existem exatamente três formas de valor no canal:
+#
+# * escalar  -> par simples, sem caractere de controle algum (nem `\t`, nem
+#               `\n`, nem `\r`, nem DEL);
+# * coleção  -> UM par, registros separados por `\n` e campos separados por
+#               `\t`, em ordem fixa (as tuplas `PAIRS_*_FIELDS` abaixo);
+# * blob     -> par próprio com chave indexada. XML e conteúdo de arquivo de
+#               configuração contêm `\t` e `\n` por natureza e por isso NUNCA
+#               entram em registro.
+#
+# Dentro de um registro, uma sub-lista de escalares (`links.flags`,
+# `links.addresses`) é separada por `,`; uma lista de escalares que já tem par
+# próprio (`bridge_ports`, `settings_capabilities`, `bridges`) é separada por
+# `\n`. Item vazio é recusado pelo normalizador, então `a,,b` e `a\n\nb` são
+# erro tipado, nunca item silencioso.
+#
+# O índice de um blob é a posição do registro na coleção DECLARADA, antes de
+# qualquer ordenação do normalizador. Os índices precisam ser contíguos e
+# começar em zero: índice ausente vira "par obrigatório ausente" e índice extra
+# vira "par fora do schema fechado".
+#
+# Orçamento de pares (`protocol.MAX_REQUEST_PAIRS`, 256): um pedido de plano
+# gasta 65 pares fixos (20 do snapshot, 21 da intenção, 8 do alvo, 15 dos
+# ajustes e 1 da versão do schema) mais 2 por VM consumidora de cada estado
+# (o XML e as interfaces) e 1 por artefato de configuração de cada estado. Com
+# os 1 a 2 artefatos reais do projeto isso cabe em 256 até 46 VMs consumidoras,
+# ordens de grandeza acima de um host de passthrough. Por isso
+# `MAX_REQUEST_PAIRS` continua em 256, e o teste do orçamento prende os 67/68
+# pares dos pedidos reais para que a conta não possa envelhecer em silêncio.
+
+PAIRS_RECORD_SEPARATOR = "\n"
+PAIRS_FIELD_SEPARATOR = "\t"
+PAIRS_ITEM_SEPARATOR = ","
+
+# Ordem fixa dos campos de cada registro. O Bash precisa produzir exatamente
+# esta ordem; contagem diferente é erro tipado, nunca campo adivinhado.
+PAIRS_ROUTE_FIELDS = (
+    "destination",
+    "device",
+    "gateway",
+    "metric",
+    "protocol",
+    "scope",
+    "source",
+    "table",
+    "type",
+)
+PAIRS_LINK_FIELDS = (
+    "addresses",
+    "flags",
+    "kind",
+    "mac",
+    "master",
+    "mtu",
+    "name",
+    "operstate",
+    "wireless",
+)
+PAIRS_NETWORK_RECORD_FIELDS = (
+    "active",
+    "active_bridge",
+    "marker",
+    "name",
+    "persistent",
+    "persistent_bridge",
+)
+PAIRS_CONSUMER_FIELDS = ("active", "name")
+PAIRS_INTERFACE_FIELDS = ("mac", "source", "source_type")
+PAIRS_CONFIGURATION_FIELDS = (
+    "device",
+    "exists",
+    "file_type",
+    "gid",
+    "identifier",
+    "inode",
+    "mode",
+    "mtime_ns",
+    "nlink",
+    "scope",
+    "size",
+    "uid",
+)
+PAIRS_DOMAIN_FIELDS = ("active", "defined", "name")
+
+# Domínio de um escalar do canal: nenhum caractere de controle. `\t` e `\n`
+# são separadores estruturais, `\r` esconderia diferença invisível num digest
+# e DEL não pertence a nome, MAC, endereço ou enumeração alguma.
+_PAIRS_CONTROL = frozenset(chr(code) for code in range(32)) | {"\x7f"}
+# Inteiro decimal sem zero à esquerda: `mtime_ns` chega a 19 dígitos e `mode`
+# viaja em DECIMAL, não em octal (o Bash converte com `$(( 8#$octal ))`).
+_PAIRS_INTEGER = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
+_PAIRS_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _pairs_payload(value: Any, label: str) -> dict | None:
+    """Devolve o mapa plano quando a chamada veio do canal de pares.
+
+    A discriminação é total e não depende de marcador algum: o canal de pares
+    decodifica para `dict[str, str]`, logo NENHUM valor dele é objeto ou lista;
+    todo pedido aninhado destes subcomandos, ao contrário, carrega pelo menos
+    um objeto ou uma lista obrigatória no schema fechado. Não existe payload
+    que satisfaça as duas formas, então nenhuma das duas precisa ser afrouxada.
+    """
+    payload = _mapping(value, label)
+    if any(isinstance(item, (Mapping, list)) for item in payload.values()):
+        return None
+    for key, item in payload.items():
+        if not isinstance(item, str):
+            raise DataError(
+                "%s: o canal de pares só transporta texto; %s não é texto."
+                % (label, safe_label(key))
+            )
+    return dict(payload)
+
+
+def _pairs_scalar(value: str, label: str) -> str:
+    for character in value:
+        if character in _PAIRS_CONTROL:
+            raise DataError(
+                "%s contém caractere de controle no canal de pares." % label
+            )
+    return value
+
+
+def _pairs_take(source: dict, key: str, label: str) -> str:
+    if key not in source:
+        raise DataError(
+            "%s: par obrigatório ausente no canal de pares: %s."
+            % (label, safe_label(key))
+        )
+    return source.pop(key)
+
+
+def _pairs_text(source: dict, key: str, label: str) -> str:
+    # O diagnóstico cita a CHAVE do par, que é o que o produtor Bash escreve,
+    # e não um caminho de schema que ele não conhece.
+    return _pairs_scalar(_pairs_take(source, key, label), key)
+
+
+def _pairs_flag(value: str, label: str) -> bool:
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise DataError("%s precisa ser 0 ou 1 no canal de pares." % label)
+
+
+def _pairs_integer(
+    value: str, label: str, *, allow_none: bool = False
+) -> int | None:
+    if not value:
+        if allow_none:
+            return None
+        raise DataError(
+            "%s precisa ser inteiro decimal no canal de pares." % label
+        )
+    if _PAIRS_INTEGER.fullmatch(value) is None:
+        raise DataError(
+            "%s precisa ser inteiro decimal sem zero à esquerda no canal de "
+            "pares." % label
+        )
+    return int(value)
+
+
+def _pairs_digest(value: str, label: str) -> str:
+    if _PAIRS_DIGEST.fullmatch(value) is None:
+        raise DataError("%s precisa ser um SHA-256 em minúsculas." % label)
+    return value
+
+
+def _pairs_items(value: str, label: str) -> list[str]:
+    """Sub-lista de escalares dentro de um registro, separada por vírgula."""
+    if not value:
+        return []
+    return value.split(PAIRS_ITEM_SEPARATOR)
+
+
+def _pairs_lines(
+    value: str, label: str, limit: int = MAX_LIST_ITEMS
+) -> list[str]:
+    """Lista de escalares em par próprio, separada por nova linha."""
+    if not value:
+        return []
+    items = value.split(PAIRS_RECORD_SEPARATOR)
+    if len(items) > limit:
+        raise DataError("%s excede o limite de %d itens." % (label, limit))
+    for index, item in enumerate(items):
+        _pairs_scalar(item, "%s[%d]" % (label, index))
+    return items
+
+
+def _pairs_records(
+    value: str, fields: tuple, label: str, limit: int
+) -> list[dict]:
+    """Registros de uma coleção: `\\n` entre registros, `\\t` entre campos."""
+    if not value:
+        return []
+    lines = value.split(PAIRS_RECORD_SEPARATOR)
+    if len(lines) > limit:
+        raise DataError("%s excede o limite de %d registros." % (label, limit))
+    records: list[dict] = []
+    for index, line in enumerate(lines):
+        item_label = "%s[%d]" % (label, index)
+        if not line:
+            raise DataError("%s: registro vazio no canal de pares." % item_label)
+        parts = line.split(PAIRS_FIELD_SEPARATOR)
+        if len(parts) != len(fields):
+            raise DataError(
+                "%s: registro com %d campos; o schema exige %d."
+                % (item_label, len(parts), len(fields))
+            )
+        record: dict = {}
+        for name, raw in zip(fields, parts):
+            record[name] = _pairs_scalar(raw, "%s.%s" % (item_label, name))
+        records.append(record)
+    return records
+
+
+def _pairs_exhausted(source: dict, label: str) -> None:
+    if source:
+        raise DataError(
+            "%s: pares fora do schema fechado do canal: %s."
+            % (label, ", ".join(safe_label(key) for key in sorted(source)))
+        )
+
+
+def _expand_routes(value: str, label: str) -> list[dict]:
+    routes: list[dict] = []
+    for index, record in enumerate(
+        _pairs_records(value, PAIRS_ROUTE_FIELDS, label, MAX_ROUTES)
+    ):
+        item = "%s[%d]" % (label, index)
+        routes.append(
+            {
+                "destination": record["destination"],
+                "device": record["device"],
+                "gateway": record["gateway"],
+                "metric": _pairs_integer(
+                    record["metric"], "%s.metric" % item, allow_none=True
+                ),
+                "protocol": record["protocol"],
+                "scope": record["scope"],
+                "source": record["source"],
+                "table": record["table"],
+                "type": record["type"],
+            }
+        )
+    return routes
+
+
+def _expand_links(value: str, label: str) -> list[dict]:
+    links: list[dict] = []
+    for index, record in enumerate(
+        _pairs_records(value, PAIRS_LINK_FIELDS, label, MAX_LINKS)
+    ):
+        item = "%s[%d]" % (label, index)
+        links.append(
+            {
+                "addresses": _pairs_items(
+                    record["addresses"], "%s.addresses" % item
+                ),
+                "flags": _pairs_items(record["flags"], "%s.flags" % item),
+                "kind": record["kind"],
+                "mac": record["mac"],
+                "master": record["master"],
+                "mtu": _pairs_integer(record["mtu"], "%s.mtu" % item),
+                "name": record["name"],
+                "operstate": record["operstate"],
+                "wireless": _pairs_flag(
+                    record["wireless"], "%s.wireless" % item
+                ),
+            }
+        )
+    return links
+
+
+def _expand_network_records(value: str, label: str) -> list[dict]:
+    records: list[dict] = []
+    for index, record in enumerate(
+        _pairs_records(value, PAIRS_NETWORK_RECORD_FIELDS, label, MAX_NETWORKS)
+    ):
+        item = "%s[%d]" % (label, index)
+        records.append(
+            {
+                "active": _pairs_flag(record["active"], "%s.active" % item),
+                "active_bridge": record["active_bridge"],
+                "marker": record["marker"],
+                "name": record["name"],
+                "persistent": _pairs_flag(
+                    record["persistent"], "%s.persistent" % item
+                ),
+                "persistent_bridge": record["persistent_bridge"],
+            }
+        )
+    return records
+
+
+def _expand_interfaces(value: str, label: str) -> list[dict]:
+    return [
+        {
+            "mac": record["mac"],
+            "source": record["source"],
+            "source_type": record["source_type"],
+        }
+        for record in _pairs_records(
+            value, PAIRS_INTERFACE_FIELDS, label, MAX_INTERFACES_PER_VM
+        )
+    ]
+
+
+def _expand_state(source: dict, prefix: str, *, mode: bool) -> dict:
+    """Monta um estado (snapshot ou intenção) a partir dos pares planos.
+
+    Chaves consumidas, com `P` = `snapshot_` ou `intent_`:
+
+    * `P_schema_version`      inteiro decimal;
+    * `P_mode`                só na intenção: `bridge` ou `nat`;
+    * `P_uplink_name`         nome de interface;
+    * `P_uplink_kind`         texto, pode ser vazio;
+    * `P_uplink_mac`          MAC minúsculo ou vazio;
+    * `P_routes`              coleção `PAIRS_ROUTE_FIELDS`;
+    * `P_links`               coleção `PAIRS_LINK_FIELDS`;
+    * `P_bridge_name`         nome de interface;
+    * `P_bridge_exists`       `0`/`1`;
+    * `P_bridge_ports`        lista por nova linha;
+    * `P_libvirt_network_name`, `_exists`, `_active`, `_persistent`,
+      `_autostart`, `_marker`  escalares (`0`/`1` nos quatro booleanos);
+    * `P_libvirt_network_active_xml`, `P_libvirt_network_persistent_xml`
+      blobs;
+    * `P_foreign_networks`    coleção `PAIRS_NETWORK_RECORD_FIELDS`;
+    * `P_consumers`           coleção `PAIRS_CONSUMER_FIELDS`;
+    * `P_consumer_I_xml`      blob, um por registro de `P_consumers`;
+    * `P_consumer_I_interfaces` coleção `PAIRS_INTERFACE_FIELDS`, uma por
+      registro de `P_consumers`;
+    * `P_configuration`       coleção `PAIRS_CONFIGURATION_FIELDS`;
+    * `P_configuration_I_content` blob, um por registro de `P_configuration`.
+    """
+    label = prefix
+    prefix_key = "%s_" % prefix
+
+    def key(suffix: str) -> str:
+        return prefix_key + suffix
+
+    def text(suffix: str) -> str:
+        return _pairs_text(source, key(suffix), label)
+
+    def blob(suffix: str) -> str:
+        return _pairs_take(source, key(suffix), label)
+
+    state: dict[str, Any] = {}
+    state["schema_version"] = _pairs_integer(
+        text("schema_version"), "%s.schema_version" % label
+    )
+    if mode:
+        state["mode"] = text("mode")
+    state["uplink"] = {
+        "kind": text("uplink_kind"),
+        "mac": text("uplink_mac"),
+        "name": text("uplink_name"),
+    }
+    state["routes"] = _expand_routes(
+        _pairs_take(source, key("routes"), label), "%s.routes" % label
+    )
+    state["links"] = _expand_links(
+        _pairs_take(source, key("links"), label), "%s.links" % label
+    )
+    state["bridge"] = {
+        "exists": _pairs_flag(
+            text("bridge_exists"), "%s.bridge.exists" % label
+        ),
+        "name": text("bridge_name"),
+        "ports": _pairs_lines(
+            _pairs_take(source, key("bridge_ports"), label),
+            "%s.bridge.ports" % label,
+        ),
+    }
+    network_label = "%s.libvirt_network" % label
+    state["libvirt_network"] = {
+        "active": _pairs_flag(
+            text("libvirt_network_active"), "%s.active" % network_label
+        ),
+        "active_xml": blob("libvirt_network_active_xml"),
+        "autostart": _pairs_flag(
+            text("libvirt_network_autostart"), "%s.autostart" % network_label
+        ),
+        "exists": _pairs_flag(
+            text("libvirt_network_exists"), "%s.exists" % network_label
+        ),
+        "marker": text("libvirt_network_marker"),
+        "name": text("libvirt_network_name"),
+        "persistent": _pairs_flag(
+            text("libvirt_network_persistent"), "%s.persistent" % network_label
+        ),
+        "persistent_xml": blob("libvirt_network_persistent_xml"),
+    }
+    state["foreign_networks"] = _expand_network_records(
+        _pairs_take(source, key("foreign_networks"), label),
+        "%s.foreign_networks" % label,
+    )
+    consumers: list[dict] = []
+    for index, record in enumerate(
+        _pairs_records(
+            _pairs_take(source, key("consumers"), label),
+            PAIRS_CONSUMER_FIELDS,
+            "%s.consumers" % label,
+            MAX_CONSUMERS,
+        )
+    ):
+        item = "%s.consumers[%d]" % (label, index)
+        consumers.append(
+            {
+                "active": _pairs_flag(record["active"], "%s.active" % item),
+                "interfaces": _expand_interfaces(
+                    _pairs_take(
+                        source, key("consumer_%d_interfaces" % index), label
+                    ),
+                    "%s.interfaces" % item,
+                ),
+                "name": record["name"],
+                "xml": _pairs_take(source, key("consumer_%d_xml" % index), label),
+            }
+        )
+    state["consumers"] = consumers
+    configurations: list[dict] = []
+    for index, record in enumerate(
+        _pairs_records(
+            _pairs_take(source, key("configuration"), label),
+            PAIRS_CONFIGURATION_FIELDS,
+            "%s.configuration" % label,
+            MAX_CONFIGURATIONS,
+        )
+    ):
+        item = "%s.configuration[%d]" % (label, index)
+        entry: dict[str, Any] = {
+            "content": _pairs_take(
+                source, key("configuration_%d_content" % index), label
+            ),
+            "exists": _pairs_flag(record["exists"], "%s.exists" % item),
+            "file_type": record["file_type"],
+            "identifier": record["identifier"],
+            "scope": record["scope"],
+        }
+        for name in (
+            "device",
+            "gid",
+            "inode",
+            "mode",
+            "mtime_ns",
+            "nlink",
+            "size",
+            "uid",
+        ):
+            entry[name] = _pairs_integer(
+                record[name], "%s.%s" % (item, name), allow_none=True
+            )
+        configurations.append(entry)
+    state["configuration"] = configurations
+    return state
+
+
+def _expand_target(source: dict) -> dict:
+    """Alvo da etapa. Todo campo é par próprio; `target_xml` é blob.
+
+    Ordem das chaves: `target_active`, `target_defined`, `target_name`,
+    `target_nic_mac`, `target_nic_match_count`, `target_nic_source`,
+    `target_nic_source_type`, `target_xml`.
+    """
+    label = "target"
+    return {
+        "active": _pairs_flag(
+            _pairs_text(source, "target_active", label), "target.active"
+        ),
+        "defined": _pairs_flag(
+            _pairs_text(source, "target_defined", label), "target.defined"
+        ),
+        "name": _pairs_text(source, "target_name", label),
+        "nic_mac": _pairs_text(source, "target_nic_mac", label),
+        "nic_match_count": _pairs_integer(
+            _pairs_text(source, "target_nic_match_count", label),
+            "target.nic_match_count",
+        ),
+        "nic_source": _pairs_text(source, "target_nic_source", label),
+        "nic_source_type": _pairs_text(source, "target_nic_source_type", label),
+        "xml": _pairs_take(source, "target_xml", label),
+    }
+
+
+def _expand_settings(source: dict) -> dict:
+    """Ajustes da etapa; `settings_capabilities` é lista por nova linha."""
+    label = "settings"
+    profile = "settings.host_profile"
+    return {
+        "capabilities": _pairs_lines(
+            _pairs_take(source, "settings_capabilities", label),
+            "settings.capabilities",
+        ),
+        "configuration_identifier": _pairs_text(
+            source, "settings_configuration_identifier", label
+        ),
+        "host_ip": _pairs_text(source, "settings_host_ip", label),
+        "host_profile": {
+            "dhcp4": _pairs_flag(
+                _pairs_text(source, "settings_host_profile_dhcp4", label),
+                "%s.dhcp4" % profile,
+            ),
+            "forward_delay": _pairs_integer(
+                _pairs_text(
+                    source, "settings_host_profile_forward_delay", label
+                ),
+                "%s.forward_delay" % profile,
+            ),
+            "identifier": _pairs_text(
+                source, "settings_host_profile_identifier", label
+            ),
+            "member_dhcp4": _pairs_flag(
+                _pairs_text(
+                    source, "settings_host_profile_member_dhcp4", label
+                ),
+                "%s.member_dhcp4" % profile,
+            ),
+            "member_dhcp6": _pairs_flag(
+                _pairs_text(
+                    source, "settings_host_profile_member_dhcp6", label
+                ),
+                "%s.member_dhcp6" % profile,
+            ),
+            "scope": _pairs_text(source, "settings_host_profile_scope", label),
+            "stp": _pairs_flag(
+                _pairs_text(source, "settings_host_profile_stp", label),
+                "%s.stp" % profile,
+            ),
+        },
+        "marker": _pairs_text(source, "settings_marker", label),
+        "nat_bridge": _pairs_text(source, "settings_nat_bridge", label),
+        "nat_cidr": _pairs_text(source, "settings_nat_cidr", label),
+        "uplink_effective": _pairs_text(
+            source, "settings_uplink_effective", label
+        ),
+        "vm_ip": _pairs_text(source, "settings_vm_ip", label),
+    }
+
+
+def _accept_plan_pairs(value: Any) -> Any:
+    """Aceita o pedido de plano aninhado ou o mesmo pedido em pares planos.
+
+    Pares consumidos: `schema_version`, o bloco `snapshot_*`, o bloco
+    `intent_*` (com `intent_mode`), o bloco `target_*` e o bloco `settings_*`.
+    """
+    payload = _pairs_payload(value, "plan")
+    if payload is None:
+        return value
+    request = {
+        "intent": _expand_state(payload, "intent", mode=True),
+        "schema_version": _pairs_integer(
+            _pairs_text(payload, "schema_version", "plan"),
+            "plan.schema_version",
+        ),
+        "settings": _expand_settings(payload),
+        "snapshot": _expand_state(payload, "snapshot", mode=False),
+        "target": _expand_target(payload),
+    }
+    _pairs_exhausted(payload, "plan")
+    return request
+
+
+def _accept_snapshot_pairs(value: Any) -> Any:
+    """Aceita `{"snapshot": {...}}` ou o bloco `snapshot_*` em pares."""
+    payload = _pairs_payload(value, "snapshot")
+    if payload is None:
+        return _closed(value, {"snapshot"}, "snapshot")["snapshot"]
+    state = _expand_state(payload, "snapshot", mode=False)
+    _pairs_exhausted(payload, "snapshot")
+    return state
+
+
+def _accept_consumer_pairs(value: Any) -> Any:
+    """Aceita o inventário aninhado ou o mesmo inventário em pares planos.
+
+    Pares consumidos: `schema_version`, `marker`, `network_name`, `target`,
+    `bridges` (lista por nova linha), `networks` (coleção
+    `PAIRS_NETWORK_RECORD_FIELDS`), `domains` (coleção `PAIRS_DOMAIN_FIELDS`) e
+    `domain_I_interfaces` (coleção `PAIRS_INTERFACE_FIELDS`, uma por registro
+    de `domains`).
+    """
+    payload = _pairs_payload(value, "consumers")
+    if payload is None:
+        return value
+    label = "consumers"
+    domains: list[dict] = []
+    domain_records = _pairs_records(
+        _pairs_take(payload, "domains", label),
+        PAIRS_DOMAIN_FIELDS,
+        "consumers.domains",
+        MAX_CONSUMERS,
+    )
+    for index, record in enumerate(domain_records):
+        item = "consumers.domains[%d]" % index
+        domains.append(
+            {
+                "active": _pairs_flag(record["active"], "%s.active" % item),
+                "defined": _pairs_flag(record["defined"], "%s.defined" % item),
+                "interfaces": _expand_interfaces(
+                    _pairs_take(payload, "domain_%d_interfaces" % index, label),
+                    "%s.interfaces" % item,
+                ),
+                "name": record["name"],
+            }
+        )
+    request = {
+        "bridges": _pairs_lines(
+            _pairs_take(payload, "bridges", label), "consumers.bridges"
+        ),
+        "domains": domains,
+        "marker": _pairs_text(payload, "marker", label),
+        "network_name": _pairs_text(payload, "network_name", label),
+        "networks": _expand_network_records(
+            _pairs_take(payload, "networks", label), "consumers.networks"
+        ),
+        "schema_version": _pairs_integer(
+            _pairs_text(payload, "schema_version", label),
+            "consumers.schema_version",
+        ),
+        "target": _pairs_text(payload, "target", label),
+    }
+    _pairs_exhausted(payload, label)
+    return request
+
+
+def _accept_route_audit_pairs(value: Any) -> Any:
+    """Aceita a auditoria aninhada ou a mesma auditoria em pares planos.
+
+    Pares consumidos: `candidate_cidr`, `managed_present`, `managed_family`,
+    `managed_cidr`, `managed_gateway`, `managed_bridge` e `routes` (coleção
+    `PAIRS_ROUTE_FIELDS`).
+    """
+    payload = _pairs_payload(value, "route_audit")
+    if payload is None:
+        return value
+    label = "route_audit"
+    request = {
+        "candidate_cidr": _pairs_text(payload, "candidate_cidr", label),
+        "managed": {
+            "bridge": _pairs_text(payload, "managed_bridge", label),
+            "cidr": _pairs_text(payload, "managed_cidr", label),
+            "family": _pairs_text(payload, "managed_family", label),
+            "gateway": _pairs_text(payload, "managed_gateway", label),
+            "present": _pairs_flag(
+                _pairs_text(payload, "managed_present", label),
+                "route_audit.managed.present",
+            ),
+        },
+        "routes": _expand_routes(
+            _pairs_take(payload, "routes", label), "route_audit.routes"
+        ),
+    }
+    _pairs_exhausted(payload, label)
+    return request
+
+
+def _accept_revalidation_pairs(value: Any) -> tuple:
+    """Aceita a revalidação aninhada ou a mesma em pares planos.
+
+    Forma aninhada: `{"snapshot": {...}, "expected": {"components": {...},
+    "exact": ..., "semantic": ...}}`. Forma plana: o bloco `snapshot_*` mais
+    `expected_exact`, `expected_semantic` e `expected_component_CAMPO` para
+    cada campo de `STATE_FIELDS`. As chaves `expected_*` são exatamente o que
+    `network-snapshot` devolveu em `FINGERPRINT_EXACT`, `FINGERPRINT_SEMANTIC`
+    e `FINGERPRINT_COMPONENT_CAMPO`.
+    """
+    label = "revalidation"
+    payload = _pairs_payload(value, label)
+    if payload is None:
+        data = _closed(value, {"expected", "snapshot"}, label)
+        expected = _closed(
+            data["expected"],
+            {"components", "exact", "semantic"},
+            "%s.expected" % label,
+        )
+        components = _closed(
+            expected["components"],
+            set(STATE_FIELDS),
+            "%s.expected.components" % label,
+        )
+        return data["snapshot"], {
+            "components": {
+                field: _pairs_digest(
+                    _text(components, field, "%s.expected.components" % label),
+                    "%s.expected.components.%s" % (label, field),
+                )
+                for field in STATE_FIELDS
+            },
+            "exact": _pairs_digest(
+                _text(expected, "exact", "%s.expected" % label),
+                "%s.expected.exact" % label,
+            ),
+            "semantic": _pairs_digest(
+                _text(expected, "semantic", "%s.expected" % label),
+                "%s.expected.semantic" % label,
+            ),
+        }
+    state = _expand_state(payload, "snapshot", mode=False)
+    expected = {
+        "components": {
+            field: _pairs_digest(
+                _pairs_text(payload, "expected_component_%s" % field, label),
+                "%s.expected_component_%s" % (label, field),
+            )
+            for field in STATE_FIELDS
+        },
+        "exact": _pairs_digest(
+            _pairs_text(payload, "expected_exact", label),
+            "%s.expected_exact" % label,
+        ),
+        "semantic": _pairs_digest(
+            _pairs_text(payload, "expected_semantic", label),
+            "%s.expected_semantic" % label,
+        ),
+    }
+    _pairs_exhausted(payload, label)
+    return state, expected
+
+
+def network_snapshot(payload: Mapping[str, Any]) -> dict:
+    """Normaliza o estado capturado e projeta os fingerprints no canal escalar.
+
+    Devolve o digest exato, o semântico e um por componente de `STATE_FIELDS`,
+    que é exatamente o que o Bash guarda para chamar `network-revalidate`
+    depois, mais as cardinalidades que a etapa usa para diagnóstico.
+    """
+    normalized = normalize_snapshot(_accept_snapshot_pairs(payload))
+    prints = _fingerprints(normalized)
+    bridge = normalized["bridge"]
+    network = normalized["libvirt_network"]
+    data: dict[str, Any] = {
+        "bridge_exists": 1 if bridge["exists"] else 0,
+        "bridge_name": bridge["name"],
+        "bridge_port_count": len(bridge["ports"]),
+        "bridge_ports": "\n".join(bridge["ports"]),
+        "configuration_count": len(normalized["configuration"]),
+        "consumer_count": len(normalized["consumers"]),
+        "consumer_names": "\n".join(
+            item["name"] for item in normalized["consumers"]
+        ),
+        "fingerprint_exact": prints["exact"],
+        "fingerprint_semantic": prints["semantic"],
+        "foreign_network_count": len(normalized["foreign_networks"]),
+        "foreign_network_names": "\n".join(
+            item["name"] for item in normalized["foreign_networks"]
+        ),
+        "libvirt_network_active": 1 if network["active"] else 0,
+        "libvirt_network_autostart": 1 if network["autostart"] else 0,
+        "libvirt_network_exists": 1 if network["exists"] else 0,
+        "libvirt_network_marker": network["marker"],
+        "libvirt_network_name": network["name"],
+        "libvirt_network_persistent": 1 if network["persistent"] else 0,
+        "link_count": len(normalized["links"]),
+        "route_count": len(normalized["routes"]),
+        "schema_version": normalized["schema_version"],
+        "uplink_mac": normalized["uplink"]["mac"],
+        "uplink_name": normalized["uplink"]["name"],
+    }
+    for field in STATE_FIELDS:
+        data["fingerprint_component_%s" % field] = prints["components"][field]
+    return data
+
+
+def network_revalidate(payload: Mapping[str, Any]) -> dict:
+    """Recaptura contra fingerprints guardados e nomeia o que divergiu.
+
+    A comparação é por componente, além do exato e do semântico, para que a
+    etapa recuse com conflito citando exatamente o que mudou entre a captura e
+    a publicação. Nada aqui decide o efeito: quem recusa é o Bash.
+    """
+    state, expected = _accept_revalidation_pairs(payload)
+    normalized = normalize_snapshot(state)
+    prints = _fingerprints(normalized)
+    divergent = sorted(
+        field
+        for field in STATE_FIELDS
+        if prints["components"][field] != expected["components"][field]
+    )
+    exact_match = 1 if prints["exact"] == expected["exact"] else 0
+    semantic_match = 1 if prints["semantic"] == expected["semantic"] else 0
+    data: dict[str, Any] = {
+        "divergent_components": "\n".join(divergent),
+        "divergent_count": len(divergent),
+        "exact_match": exact_match,
+        "expected_exact": expected["exact"],
+        "expected_semantic": expected["semantic"],
+        "fingerprint_exact": prints["exact"],
+        "fingerprint_semantic": prints["semantic"],
+        "matches": 1 if not divergent and exact_match and semantic_match else 0,
+        "schema_version": normalized["schema_version"],
+        "semantic_match": semantic_match,
+    }
+    for field in STATE_FIELDS:
+        data["component_%s_match" % field] = 0 if field in divergent else 1
+        data["expected_component_%s" % field] = expected["components"][field]
+        data["fingerprint_component_%s" % field] = prints["components"][field]
     return data

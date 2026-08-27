@@ -523,3 +523,218 @@ def xml_dominio(item: Mapping) -> str:
     return fx.domain(
         interfaces="".join(nic_xml(nic_item) for nic_item in item["interfaces"])
     ).replace("fixture-win11", item["name"])
+
+
+# --- I7.5: produtor de pares planos, o que o Bash vai escrever ---------------
+# Este bloco é o ESPELHO do contrato de transporte: a ordem dos campos de cada
+# registro está escrita aqui à mão, e não importada do core, justamente para
+# que uma troca de ordem no core seja acusada pelo teste em vez de acompanhada
+# em silêncio. Ele reproduz `printf '%s\0'` do Bash sobre estruturas que as
+# fixtures acima já constroem.
+
+SEP_REGISTRO = "\n"
+SEP_CAMPO = "\t"
+SEP_ITEM = ","
+
+CAMPOS_ROTA = (
+    "destination",
+    "device",
+    "gateway",
+    "metric",
+    "protocol",
+    "scope",
+    "source",
+    "table",
+    "type",
+)
+CAMPOS_LINK = (
+    "addresses",
+    "flags",
+    "kind",
+    "mac",
+    "master",
+    "mtu",
+    "name",
+    "operstate",
+    "wireless",
+)
+CAMPOS_REDE = (
+    "active",
+    "active_bridge",
+    "marker",
+    "name",
+    "persistent",
+    "persistent_bridge",
+)
+CAMPOS_CONSUMIDOR = ("active", "name")
+CAMPOS_INTERFACE = ("mac", "source", "source_type")
+CAMPOS_CONFIGURACAO = (
+    "device",
+    "exists",
+    "file_type",
+    "gid",
+    "identifier",
+    "inode",
+    "mode",
+    "mtime_ns",
+    "nlink",
+    "scope",
+    "size",
+    "uid",
+)
+CAMPOS_DOMINIO = ("active", "defined", "name")
+
+
+def _sinal(valor) -> str:
+    return "1" if valor else "0"
+
+
+def _numero(valor) -> str:
+    return "" if valor is None else str(valor)
+
+
+def _campo(item: Mapping, nome: str) -> str:
+    valor = item[nome]
+    if isinstance(valor, bool):
+        return _sinal(valor)
+    if isinstance(valor, int) or valor is None:
+        return _numero(valor)
+    if isinstance(valor, list):
+        return SEP_ITEM.join(valor)
+    return valor
+
+
+def _colecao(itens, campos) -> str:
+    return SEP_REGISTRO.join(
+        SEP_CAMPO.join(_campo(item, nome) for nome in campos) for item in itens
+    )
+
+
+def pares_estado(estado: Mapping, prefixo: str) -> dict:
+    """Projeta um snapshot ou uma intenção no bloco `PREFIXO_*` de pares."""
+    pares = {
+        "%s_schema_version" % prefixo: str(estado["schema_version"]),
+        "%s_uplink_kind" % prefixo: estado["uplink"]["kind"],
+        "%s_uplink_mac" % prefixo: estado["uplink"]["mac"],
+        "%s_uplink_name" % prefixo: estado["uplink"]["name"],
+        "%s_routes" % prefixo: _colecao(estado["routes"], CAMPOS_ROTA),
+        "%s_links" % prefixo: _colecao(estado["links"], CAMPOS_LINK),
+        "%s_bridge_exists" % prefixo: _sinal(estado["bridge"]["exists"]),
+        "%s_bridge_name" % prefixo: estado["bridge"]["name"],
+        "%s_bridge_ports" % prefixo: SEP_REGISTRO.join(estado["bridge"]["ports"]),
+        "%s_foreign_networks" % prefixo: _colecao(
+            estado["foreign_networks"], CAMPOS_REDE
+        ),
+        "%s_consumers" % prefixo: _colecao(
+            estado["consumers"], CAMPOS_CONSUMIDOR
+        ),
+        "%s_configuration" % prefixo: _colecao(
+            estado["configuration"], CAMPOS_CONFIGURACAO
+        ),
+    }
+    if "mode" in estado:
+        pares["%s_mode" % prefixo] = estado["mode"]
+    rede = estado["libvirt_network"]
+    for nome in ("active", "autostart", "exists", "persistent"):
+        pares["%s_libvirt_network_%s" % (prefixo, nome)] = _sinal(rede[nome])
+    pares["%s_libvirt_network_marker" % prefixo] = rede["marker"]
+    pares["%s_libvirt_network_name" % prefixo] = rede["name"]
+    pares["%s_libvirt_network_active_xml" % prefixo] = rede["active_xml"]
+    pares["%s_libvirt_network_persistent_xml" % prefixo] = rede["persistent_xml"]
+    for indice, consumidor_item in enumerate(estado["consumers"]):
+        pares["%s_consumer_%d_xml" % (prefixo, indice)] = consumidor_item["xml"]
+        pares["%s_consumer_%d_interfaces" % (prefixo, indice)] = _colecao(
+            consumidor_item["interfaces"], CAMPOS_INTERFACE
+        )
+    for indice, artefato_item in enumerate(estado["configuration"]):
+        pares["%s_configuration_%d_content" % (prefixo, indice)] = artefato_item[
+            "content"
+        ]
+    return pares
+
+
+def pares_alvo(item: Mapping) -> dict:
+    return {
+        "target_active": _sinal(item["active"]),
+        "target_defined": _sinal(item["defined"]),
+        "target_name": item["name"],
+        "target_nic_mac": item["nic_mac"],
+        "target_nic_match_count": str(item["nic_match_count"]),
+        "target_nic_source": item["nic_source"],
+        "target_nic_source_type": item["nic_source_type"],
+        "target_xml": item["xml"],
+    }
+
+
+def pares_ajustes(item: Mapping) -> dict:
+    perfil = item["host_profile"]
+    return {
+        "settings_capabilities": SEP_REGISTRO.join(item["capabilities"]),
+        "settings_configuration_identifier": item["configuration_identifier"],
+        "settings_host_ip": item["host_ip"],
+        "settings_host_profile_dhcp4": _sinal(perfil["dhcp4"]),
+        "settings_host_profile_forward_delay": str(perfil["forward_delay"]),
+        "settings_host_profile_identifier": perfil["identifier"],
+        "settings_host_profile_member_dhcp4": _sinal(perfil["member_dhcp4"]),
+        "settings_host_profile_member_dhcp6": _sinal(perfil["member_dhcp6"]),
+        "settings_host_profile_scope": perfil["scope"],
+        "settings_host_profile_stp": _sinal(perfil["stp"]),
+        "settings_marker": item["marker"],
+        "settings_nat_bridge": item["nat_bridge"],
+        "settings_nat_cidr": item["nat_cidr"],
+        "settings_uplink_effective": item["uplink_effective"],
+        "settings_vm_ip": item["vm_ip"],
+    }
+
+
+def pares_pedido(pedido: Mapping) -> dict:
+    """Pedido de plano inteiro no canal de pares, como o Bash o escreveria."""
+    pares = {"schema_version": str(pedido["schema_version"])}
+    pares.update(pares_estado(pedido["snapshot"], "snapshot"))
+    pares.update(pares_estado(pedido["intent"], "intent"))
+    pares.update(pares_alvo(pedido["target"]))
+    pares.update(pares_ajustes(pedido["settings"]))
+    return pares
+
+
+def pares_snapshot(estado: Mapping) -> dict:
+    return pares_estado(estado, "snapshot")
+
+
+def pares_inventario(pedido: Mapping) -> dict:
+    pares = {
+        "bridges": SEP_REGISTRO.join(pedido["bridges"]),
+        "domains": _colecao(pedido["domains"], CAMPOS_DOMINIO),
+        "marker": pedido["marker"],
+        "network_name": pedido["network_name"],
+        "networks": _colecao(pedido["networks"], CAMPOS_REDE),
+        "schema_version": str(pedido["schema_version"]),
+        "target": pedido["target"],
+    }
+    for indice, item in enumerate(pedido["domains"]):
+        pares["domain_%d_interfaces" % indice] = _colecao(
+            item["interfaces"], CAMPOS_INTERFACE
+        )
+    return pares
+
+
+def pares_auditoria(pedido: Mapping) -> dict:
+    gerida = pedido["managed"]
+    return {
+        "candidate_cidr": pedido["candidate_cidr"],
+        "managed_bridge": gerida["bridge"],
+        "managed_cidr": gerida["cidr"],
+        "managed_family": gerida["family"],
+        "managed_gateway": gerida["gateway"],
+        "managed_present": _sinal(gerida["present"]),
+        "routes": _colecao(pedido["routes"], CAMPOS_ROTA),
+    }
+
+
+def pares_revalidacao(estado: Mapping, guardados: Mapping) -> dict:
+    pares = pares_snapshot(estado)
+    pares["expected_exact"] = guardados["exact"]
+    pares["expected_semantic"] = guardados["semantic"]
+    for campo, digest in guardados["components"].items():
+        pares["expected_component_%s" % campo] = digest
+    return pares

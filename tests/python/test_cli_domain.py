@@ -12,7 +12,7 @@ import stat
 import tempfile
 import unittest
 
-from passthrough_core import cli, errors, protocol
+from passthrough_core import cli, errors, network, protocol
 
 import fixtures_i3 as fx
 import fixtures_i7 as pf
@@ -69,7 +69,9 @@ class SubcommandRegistryTests(unittest.TestCase):
             "network-nat-addresses",
             "network-overlap",
             "network-plan",
+            "network-revalidate",
             "network-route-audit",
+            "network-snapshot",
             "qemu-image-inspect",
         }
         self.assertTrue(esperados.issubset(set(cli.SUBCOMMANDS)))
@@ -718,6 +720,185 @@ class NetworkConsumerCommandTests(unittest.TestCase):
         self.assertEqual(executar(argv, entrada), executar(argv, entrada))
 
 
+class NetworkPairsPayloadTests(unittest.TestCase):
+    """I7.5: os subcomandos de rede pelo canal de pares que o Bash escreve.
+
+    O Bash não constrói JSON, então o pedido inteiro (snapshot, intenção, alvo
+    e ajustes) chega como `chave\\0valor\\0`. O que a CLI precisa provar aqui é
+    que esse transporte não muda a resposta em nada.
+    """
+
+    def test_usage_e_registro_dos_subcomandos_novos(self) -> None:
+        for nome in ("network-revalidate", "network-snapshot"):
+            self.assertIn(nome, cli.USAGE)
+            self.assertIn(nome, cli.SUBCOMMANDS)
+
+    def test_snapshot_por_pares_e_por_json_sao_identicos(self) -> None:
+        estado = pf.snapshot_plano()
+        codigo, por_pares, diagnostico = executar(
+            ["network-snapshot", "--stdin", "--payload-format=pairs"],
+            pares(pf.pares_snapshot(estado)),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        self.assertEqual(diagnostico, b"")
+        _codigo, por_json, _erro = executar(
+            ["network-snapshot", "--stdin"], envelope({"snapshot": estado})
+        )
+        self.assertEqual(por_pares, por_json)
+        campos = dados(por_pares)
+        self.assertEqual(campos["schema_version"], 1)
+        self.assertRegex(campos["fingerprint_exact"], r"^[0-9a-f]{64}$")
+        self.assertRegex(campos["fingerprint_semantic"], r"^[0-9a-f]{64}$")
+        for campo in network.STATE_FIELDS:
+            self.assertRegex(
+                campos["fingerprint_component_%s" % campo], r"^[0-9a-f]{64}$"
+            )
+
+    def test_snapshot_projeta_escalares_em_maiusculas(self) -> None:
+        codigo, saida, _ = executar(
+            [
+                "network-snapshot",
+                "--stdin",
+                "--payload-format=pairs",
+                "--format=pairs",
+            ],
+            pares(pf.pares_snapshot(pf.snapshot_plano())),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = saida.decode("utf-8").split(NUL)[:-1]
+        mapa = dict(zip(campos[0::2], campos[1::2]))
+        self.assertEqual(mapa["SUBCOMMAND"], "network-snapshot")
+        self.assertEqual(mapa["UPLINK_NAME"], pf.PLANO_UPLINK)
+        self.assertEqual(mapa["BRIDGE_EXISTS"], "0")
+        self.assertEqual(mapa["LIBVIRT_NETWORK_NAME"], pf.PLANO_REDE)
+        self.assertRegex(mapa["FINGERPRINT_COMPONENT_ROUTES"], r"^[0-9a-f]{64}$")
+
+    def test_revalidacao_sem_mudanca_e_com_mudanca(self) -> None:
+        estado = pf.snapshot_plano()
+        guardados = network.snapshot_fingerprints(estado)
+        codigo, saida, _ = executar(
+            ["network-revalidate", "--stdin", "--payload-format=pairs"],
+            pares(pf.pares_revalidacao(estado, guardados)),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = dados(saida)
+        self.assertEqual(campos["matches"], 1)
+        self.assertEqual(campos["divergent_count"], 0)
+        self.assertEqual(campos["divergent_components"], "")
+
+        mudado = pf.snapshot_plano(
+            uplink={
+                "kind": "ethernet",
+                "mac": pf.UPLINK_MAC,
+                "name": pf.PLANO_UPLINK,
+            }
+        )
+        codigo, saida, _ = executar(
+            ["network-revalidate", "--stdin", "--payload-format=pairs"],
+            pares(pf.pares_revalidacao(mudado, guardados)),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = dados(saida)
+        self.assertEqual(campos["matches"], 0)
+        self.assertEqual(campos["divergent_components"], "uplink")
+        self.assertEqual(campos["component_uplink_match"], 0)
+        self.assertEqual(campos["component_routes_match"], 1)
+
+    def test_plano_por_pares_e_por_json_sao_identicos(self) -> None:
+        for nome, pedido in (
+            ("nat", pf.pedido_nat()),
+            ("bridge", pf.pedido_bridge()),
+        ):
+            with self.subTest(modo=nome):
+                codigo, por_pares, diagnostico = executar(
+                    ["network-plan", "--stdin", "--payload-format=pairs"],
+                    pares(pf.pares_pedido(pedido)),
+                )
+                self.assertEqual(codigo, errors.EXIT_OK)
+                self.assertEqual(diagnostico, b"")
+                _codigo, por_json, _erro = executar(
+                    ["network-plan", "--stdin"], envelope(pedido)
+                )
+                self.assertEqual(por_pares, por_json)
+
+    def test_consumidores_e_auditoria_por_pares(self) -> None:
+        inventario = pf.inventario()
+        codigo, por_pares, _ = executar(
+            ["network-consumers", "--stdin", "--payload-format=pairs"],
+            pares(pf.pares_inventario(inventario)),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        _codigo, por_json, _erro = executar(
+            ["network-consumers", "--stdin"], envelope(inventario)
+        )
+        self.assertEqual(por_pares, por_json)
+
+        auditoria = {
+            "candidate_cidr": "192.168.177.0/24",
+            "managed": {
+                "bridge": pf.PLANO_BRIDGE_NAT,
+                "cidr": "192.168.177.0/24",
+                "family": "ipv4",
+                "gateway": "192.168.177.1",
+                "present": True,
+            },
+            "routes": [
+                pf.rota(destino="192.168.177.0/24", dev=pf.PLANO_BRIDGE_NAT)
+            ],
+        }
+        codigo, por_pares, _ = executar(
+            ["network-route-audit", "--stdin", "--payload-format=pairs"],
+            pares(pf.pares_auditoria(auditoria)),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        _codigo, por_json, _erro = executar(
+            ["network-route-audit", "--stdin"], envelope(auditoria)
+        )
+        self.assertEqual(por_pares, por_json)
+
+    def test_pedido_real_cabe_no_teto_de_pares(self) -> None:
+        for pedido in (pf.pedido_nat(), pf.pedido_bridge()):
+            self.assertLessEqual(
+                len(pf.pares_pedido(pedido)), protocol.MAX_REQUEST_PAIRS
+            )
+
+    def test_payload_acima_do_teto_de_pares_e_recusado(self) -> None:
+        excesso = {
+            "chave_%d" % indice: "v"
+            for indice in range(protocol.MAX_REQUEST_PAIRS + 1)
+        }
+        codigo, saida, diagnostico = executar(
+            ["network-snapshot", "--stdin", "--payload-format=pairs"],
+            pares(excesso),
+        )
+        self.assertEqual(codigo, errors.EXIT_DATA)
+        self.assertEqual(saida, b"")
+        self.assertTrue(diagnostico)
+
+    def test_recusa_tipada_nao_escreve_em_stdout(self) -> None:
+        base = pf.pares_snapshot(pf.snapshot_plano())
+        faltando = dict(base)
+        del faltando["snapshot_routes"]
+        casos = (
+            faltando,
+            dict(base, snapshot_intruso="1"),
+            dict(base, snapshot_uplink_name="enp3s0\tenp4s0"),
+            {"snapshot_schema_version": "1"},
+        )
+        for indice, payload in enumerate(casos):
+            with self.subTest(caso=indice):
+                codigo, saida, diagnostico = executar(
+                    ["network-snapshot", "--stdin", "--payload-format=pairs"],
+                    pares(payload),
+                )
+                self.assertEqual(codigo, errors.EXIT_DATA)
+                self.assertEqual(saida, b"")
+                self.assertTrue(diagnostico)
+
+    def test_saida_repetida_e_identica(self) -> None:
+        argv = ["network-plan", "--stdin", "--payload-format=pairs"]
+        entrada = pares(pf.pares_pedido(pf.pedido_bridge()))
+        self.assertEqual(executar(argv, entrada), executar(argv, entrada))
 
 if __name__ == "__main__":
     unittest.main()
