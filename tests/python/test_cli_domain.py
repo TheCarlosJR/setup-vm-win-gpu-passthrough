@@ -62,8 +62,11 @@ class SubcommandRegistryTests(unittest.TestCase):
             "domain-snapshot-internal",
             "domain-usb-hostdev",
             "domain-validate-cpu",
+            "network-address-check",
             "network-inspect",
+            "network-nat-addresses",
             "network-overlap",
+            "network-route-audit",
             "qemu-image-inspect",
         }
         self.assertTrue(esperados.issubset(set(cli.SUBCOMMANDS)))
@@ -432,6 +435,138 @@ class CandidateOutputTests(unittest.TestCase):
         self.assertEqual(mapa["CHANGED"], "1")
         self.assertIn("FINGERPRINT_BEFORE", mapa)
         self.assertIn("BYTES_WRITTEN", mapa)
+
+
+class NetworkAddressCommandTests(unittest.TestCase):
+    """Subcomandos puros de I7.2, no mesmo contrato de `network-inspect`."""
+
+    def test_usage_lista_os_subcomandos_de_i7(self) -> None:
+        for nome in (
+            "network-address-check",
+            "network-nat-addresses",
+            "network-route-audit",
+        ):
+            with self.subTest(nome=nome):
+                self.assertIn(nome, cli.USAGE)
+
+    def test_nat_por_stdin_em_json(self) -> None:
+        codigo, saida, diagnostico = executar(
+            ["network-nat-addresses", "--stdin"],
+            envelope({"cidr": "192.168.177.0/24"}),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        self.assertEqual(diagnostico, b"")
+        campos = dados(saida)
+        self.assertEqual(campos["nat_gateway"], "192.168.177.1")
+        self.assertEqual(campos["nat_vm_ip"], "192.168.177.10")
+        self.assertEqual(campos["nat_dhcp_inicio"], "192.168.177.100")
+        self.assertEqual(campos["nat_dhcp_fim"], "192.168.177.254")
+        self.assertEqual(campos["nat_broadcast"], "192.168.177.255")
+        self.assertEqual(campos["nat_host_ip"], "192.168.177.1")
+
+    def test_nat_por_pares_nos_dois_sentidos(self) -> None:
+        codigo, saida, _ = executar(
+            [
+                "network-nat-addresses",
+                "--stdin",
+                "--payload-format=pairs",
+                "--format=pairs",
+            ],
+            pares({"cidr": "10.0.0.0/24"}),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = saida.decode("utf-8").split(NUL)[:-1]
+        mapa = dict(zip(campos[0::2], campos[1::2]))
+        # As chaves projetadas são exatamente as variáveis que
+        # `derivar_parametros_nat` exporta hoje.
+        self.assertEqual(mapa["NAT_GATEWAY"], "10.0.0.1")
+        self.assertEqual(mapa["NAT_VM_IP"], "10.0.0.10")
+        self.assertEqual(mapa["NAT_DHCP_INICIO"], "10.0.0.100")
+        self.assertEqual(mapa["NAT_DHCP_FIM"], "10.0.0.254")
+        self.assertEqual(mapa["SUBCOMMAND"], "network-nat-addresses")
+
+    def test_address_check_por_pares(self) -> None:
+        codigo, saida, _ = executar(
+            [
+                "network-address-check",
+                "--stdin",
+                "--payload-format=pairs",
+                "--format=pairs",
+            ],
+            pares(
+                {
+                    "cidr": "192.168.0.7/24",
+                    "host_ip": "192.168.0.7",
+                    "vm_ip": "192.168.0.55",
+                }
+            ),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = saida.decode("utf-8").split(NUL)[:-1]
+        mapa = dict(zip(campos[0::2], campos[1::2]))
+        self.assertEqual(mapa["ACCEPTED"], "1")
+        self.assertEqual(mapa["BROADCAST"], "192.168.0.255")
+
+    def test_route_audit_por_stdin(self) -> None:
+        rota = {
+            "destination": "192.168.177.0/24",
+            "device": "virbr9",
+            "gateway": "",
+            "metric": None,
+            "protocol": "kernel",
+            "scope": "link",
+            "source": "192.168.177.1",
+            "table": "main",
+            "type": "unicast",
+        }
+        codigo, saida, diagnostico = executar(
+            ["network-route-audit", "--stdin"],
+            envelope(
+                {
+                    "candidate_cidr": "192.168.177.0/24",
+                    "managed": {
+                        "present": True,
+                        "family": "ipv4",
+                        "cidr": "192.168.177.0/24",
+                        "gateway": "192.168.177.1",
+                        "bridge": "virbr9",
+                    },
+                    "routes": [rota],
+                }
+            ),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        self.assertEqual(diagnostico, b"")
+        campos = dados(saida)
+        self.assertEqual(campos["route_count"], 1)
+        self.assertEqual(campos["exception_count"], 1)
+        self.assertEqual(campos["collision_count"], 0)
+        self.assertEqual(campos["route_0_kernel_exception"], 1)
+
+    def test_recusa_tipada_nao_escreve_em_stdout(self) -> None:
+        casos = (
+            (["network-nat-addresses", "--stdin"], {"cidr": "fd00::/64"}),
+            (["network-nat-addresses", "--stdin"], {"cidr": "192.168.177.0/25"}),
+            (
+                ["network-address-check", "--stdin"],
+                {"cidr": "192.168.0.7/24", "host_ip": "192.168.0.7"},
+            ),
+            (
+                ["network-route-audit", "--stdin"],
+                {"candidate_cidr": "10.0.0.0/24", "routes": []},
+            ),
+        )
+        for argv, payload in casos:
+            with self.subTest(argv=argv[0], payload=sorted(payload)):
+                codigo, saida, diagnostico = executar(argv, envelope(payload))
+                self.assertEqual(codigo, errors.EXIT_DATA)
+                self.assertEqual(saida, b"")
+                self.assertTrue(diagnostico)
+
+    def test_saida_repetida_e_identica(self) -> None:
+        argv = ["network-nat-addresses", "--stdin"]
+        entrada = envelope({"cidr": "172.16.0.0/24"})
+        self.assertEqual(executar(argv, entrada), executar(argv, entrada))
 
 
 if __name__ == "__main__":

@@ -1,22 +1,29 @@
-"""Snapshots e intenção de rede puros da fase I7.1.
+"""Snapshots, intenção e cálculo de endereços de rede puros (I7.1 e I7.2).
 
 O Bash captura todos os fatos e preserva os artefatos necessários à
 recuperação. Este módulo recebe somente dados já capturados, valida um schema
 fechado, normaliza coleções e calcula fingerprints determinísticos. Ele não
 abre arquivos, não sonda o host, não escolhe provider e não produz comandos.
 
-Validação de endereços/rotas, geração de planos, descoberta de consumidores e
-execução transacional pertencem, respectivamente, às subetapas I7.2–I7.6.
+I7.2 acrescentou a aritmética de endereços com `ipaddress`: derivação NAT
+(gateway, DHCP, IP do host, IP da VM, broadcast), conferência do par
+host/VM contra um prefixo e auditoria de rotas com a exceção `proto kernel`.
+Nada aqui decide efeito: as funções devolvem medidas e cardinalidades para
+que o Bash produza a mensagem e a recusa, como já faz `network_xml`.
+
+Geração de planos, descoberta de consumidores e execução transacional
+pertencem, respectivamente, às subetapas I7.3–I7.6.
 """
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from typing import Any, Iterable, Mapping
 
 from . import xmlutil
-from .errors import DataError
+from .errors import DataError, InternalError
 from .protocol import safe_label
 
 SCHEMA_VERSION = 1
@@ -39,10 +46,73 @@ MAX_CONSUMERS = 1024
 MAX_CONFIGURATIONS = 128
 MAX_INTERFACES_PER_VM = 64
 MAX_LIST_ITEMS = 4096
-_INTERFACE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$")
-_ENTITY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+# I7.2: alinhado a `nome_interface_valido` (lib/common.sh:1823), que aceita `_`
+# como primeiro caractere. Sem o `_` inicial um nome legítimo para o Bash
+# viraria DataError quando I7.5 ligar o snapshot real. O conjunto continua
+# restrito a ASCII de propósito: `[[:alnum:]]` do Bash depende de locale e um
+# nome com caractere não ASCII seria interpolado em XML, YAML e comandos.
+_INTERFACE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$")
+# I7.2: o `_` inicial também foi alinhado a `nome_rede_libvirt_valido`
+# (lib/common.sh:1828). O limite de 128 é mantido de propósito, acima dos 63 do
+# Bash e dos 64 de network_xml.py:26: aqueles validam nomes que ESTE projeto
+# cria, enquanto o snapshot também transporta redes e VMs de terceiros já
+# existentes no host, cujo nome o Bash nunca validou. Apertar aqui recusaria
+# captura legítima; o nome que o projeto cria continua limitado pelo Bash.
+_ENTITY_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 _MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _ALLOWED_CONTROLS = frozenset({"\n", "\r", "\t"})
+
+# --- I7.2: vocabulário de rotas e limites de endereçamento -------------------
+# `ip -4 route show table all` prefixa a linha com o tipo, exceto no unicast da
+# tabela main, onde o token é omitido. O Bash reproduz isso em
+# `etapas/60-rede-bridge.sh:1224-1236`; aqui o tipo é campo explícito do
+# snapshot, porque `scope` e `protocol` não distinguem `local` de `broadcast`.
+ROUTE_TYPES = frozenset(
+    {
+        "blackhole",
+        "broadcast",
+        "local",
+        "prohibit",
+        "throw",
+        "unicast",
+        "unreachable",
+    }
+)
+# `unreachable`, `prohibit`, `blackhole` e `throw` não têm `dev`; as demais têm.
+ROUTE_TYPES_WITH_DEVICE = frozenset({"broadcast", "local", "unicast"})
+# Classes do oráculo Bash (`etapas/60-rede-bridge.sh:1226-1231`).
+ROUTE_CLASSES = {
+    "blackhole": "outra",
+    "broadcast": "broadcast",
+    "local": "local",
+    "prohibit": "outra",
+    "throw": "outra",
+    "unicast": "conectada",
+    "unreachable": "outra",
+}
+KERNEL_EXCEPTION_CLASSES = frozenset({"broadcast", "conectada", "local"})
+DEFAULT_DESTINATION = "default"
+KERNEL_PROTOCOL = "kernel"
+SUPPORTED_FAMILIES = frozenset({"ipv4"})
+NAT_PREFIXLEN = 24
+NAT_GATEWAY_OFFSET = 1
+NAT_VM_OFFSET = 10
+NAT_DHCP_START_OFFSET = 100
+NAT_DHCP_END_OFFSET = 254
+# `cidr_privado_24_valido` (lib/common.sh:2218) aceita exatamente estes três
+# blocos; `IPv4Network.is_private` é mais largo (127/8, 169.254/16, 100.64/10)
+# e não serve como oráculo.
+PRIVATE_BLOCKS = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+# Decimal pontuado sem zero à esquerda. O Bash aceita `010.0.0.0` porque usa
+# `10#$octeto`, mas `derivar_parametros_nat` concatena texto e produziria
+# `010.0.0.1`, que a glibc lê como octal: endereço diferente do pretendido.
+# Recusar é fail-closed e não perde nenhum produtor real.
+_IPV4_TEXT = re.compile(r"^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$")
+_PREFIX_TEXT = re.compile(r"^(?:[0-9]|[12][0-9]|3[0-2])$")
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -214,6 +284,13 @@ def _normalize_uplink(value: Any) -> dict:
 
 
 def _normalize_route(value: Any, index: int) -> dict:
+    # I7.2: `type` entrou no schema fechado porque a exceção `proto kernel`
+    # (`etapas/60-rede-bridge.sh:1173-1192`) é decidida pela classe da rota, e
+    # nem `scope` nem `protocol` separam `local` de `broadcast`. Pelo mesmo
+    # motivo `device` passou a ser opcional: `unreachable`, `prohibit`,
+    # `blackhole` e `throw` não têm `dev` algum e o Bash mesmo assim as compara
+    # contra a candidata. Nenhum produtor existia antes desta subetapa, então a
+    # extensão não quebra consumidor nenhum.
     label = "routes[%d]" % index
     fields = {
         "destination",
@@ -224,11 +301,20 @@ def _normalize_route(value: Any, index: int) -> dict:
         "table",
         "metric",
         "source",
+        "type",
     }
     payload = _closed(value, fields, label)
-    device = _interface_name(
-        _text(payload, "device", label), "%s.device" % label
+    route_type = _text(payload, "type", label)
+    if route_type not in ROUTE_TYPES:
+        raise DataError("%s.type não é um tipo de rota suportado." % label)
+    device = _text(
+        payload,
+        "device",
+        label,
+        allow_empty=route_type not in ROUTE_TYPES_WITH_DEVICE,
     )
+    if device:
+        device = _interface_name(device, "%s.device" % label)
     return {
         "destination": _text(payload, "destination", label),
         "device": device,
@@ -238,6 +324,7 @@ def _normalize_route(value: Any, index: int) -> dict:
         "scope": _text(payload, "scope", label, allow_empty=True),
         "source": _text(payload, "source", label, allow_empty=True),
         "table": _text(payload, "table", label, allow_empty=True),
+        "type": route_type,
     }
 
 
@@ -567,7 +654,9 @@ def _validate_relations(state: Mapping[str, Any]) -> None:
             master = links[master]["master"]
 
     for route in state["routes"]:
-        if route["device"] not in links:
+        # I7.2: rota sem `dev` (blackhole/prohibit/throw/unreachable) não
+        # referencia link algum; só as demais precisam existir na captura.
+        if route["device"] and route["device"] not in links:
             raise DataError(
                 "rota referencia link ausente: %s."
                 % safe_label(route["device"])
@@ -713,3 +802,388 @@ def snapshot_fingerprints(value: Any) -> dict:
 def intent_fingerprints(value: Any) -> dict:
     """Calcula digests determinísticos da intenção backend-neutral."""
     return _fingerprints(normalize_intent(value))
+
+
+# --- I7.2: aritmética de endereços com `ipaddress` ---------------------------
+# Nenhuma derivação abaixo concatena texto. O Bash de hoje monta
+# `${prefixo}.1/.10/.100/.254` (`etapas/60-rede-bridge.sh:525-534`), o que só
+# funciona porque `cidr_privado_24_valido` garante /24 com último octeto 0.
+# Aqui o mesmo resultado sai de soma inteira sobre o endereço de rede, e a
+# paridade byte a byte é oráculo do teste.
+
+
+def _looks_ipv6(text: str) -> bool:
+    for parser in (ipaddress.ip_network, ipaddress.ip_address):
+        try:
+            return parser(text).version == 6
+        except ValueError:
+            continue
+    return False
+
+
+def parse_ipv4_address(value: str, label: str) -> ipaddress.IPv4Address:
+    """Converte texto em IPv4, recusando IPv6 e formato ambíguo."""
+    if ":" in value or _looks_ipv6(value):
+        raise DataError(
+            "%s declara endereço IPv6; este core só trata IPv4." % label
+        )
+    if _IPV4_TEXT.fullmatch(value) is None:
+        raise DataError(
+            "%s não é um IPv4 decimal pontuado sem zero à esquerda." % label
+        )
+    try:
+        return ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError as error:
+        raise DataError("%s não é um endereço IPv4 válido." % label) from error
+
+
+def parse_ipv4_cidr(
+    value: str, label: str
+) -> tuple[ipaddress.IPv4Address, int, ipaddress.IPv4Network]:
+    """Devolve (endereço literal, prefixo, rede mascarada) de um CIDR IPv4.
+
+    O endereço literal é preservado porque a exceção `proto kernel` do Bash
+    compara o destino como texto: `192.168.9.5/24` não é `192.168.9.0/24` para
+    aquele teste, mesmo que as duas formas denotem a mesma rede.
+    """
+    if ":" in value or _looks_ipv6(value):
+        raise DataError(
+            "%s declara CIDR IPv6; este core só trata IPv4." % label
+        )
+    if value.count("/") != 1:
+        raise DataError("%s precisa estar na forma ENDERECO/PREFIXO." % label)
+    address_text, prefix_text = value.split("/", 1)
+    address = parse_ipv4_address(address_text, label)
+    if _PREFIX_TEXT.fullmatch(prefix_text) is None:
+        # I7.2: o Bash aceita `/024` e o reinterpreta como octal 20 dentro de
+        # `$(( ))`, produzindo uma máscara /20 para um texto que qualquer
+        # leitor entende como /24. A borda não é preservada: recusar é a única
+        # leitura segura, e nenhum produtor real emite prefixo com zero à
+        # esquerda.
+        raise DataError(
+            "%s declara prefixo IPv4 fora da faixa 0-32 ou com zero à esquerda."
+            % label
+        )
+    prefix = int(prefix_text)
+    return address, prefix, ipaddress.IPv4Network((address, prefix), strict=False)
+
+
+def require_supported_family(value: str, label: str) -> str:
+    """Recusa família de endereços que este core ainda não trata."""
+    if value not in SUPPORTED_FAMILIES:
+        raise DataError(
+            "%s declara família não suportada: %s; este core só trata ipv4."
+            % (label, safe_label(value))
+        )
+    return value
+
+
+def _is_private_v4(network: ipaddress.IPv4Network) -> bool:
+    return any(network.subnet_of(block) for block in PRIVATE_BLOCKS)
+
+
+def _is_unicast_in(
+    address: ipaddress.IPv4Address, network: ipaddress.IPv4Network
+) -> bool:
+    """Espelha `ipv4_unicast_em_cidr` (lib/common.sh:2184): estritamente entre
+    o endereço de rede e o de broadcast, o que deixa /31 e /32 sem unicast."""
+    return (
+        int(network.network_address)
+        < int(address)
+        < int(network.broadcast_address)
+    )
+
+
+def nat_addresses(payload: Mapping[str, Any]) -> dict:
+    """Deriva os endereços da rede NAT a partir do CIDR privado /24.
+
+    Paridade exata com `derivar_parametros_nat`
+    (`etapas/60-rede-bridge.sh:525-534`): as chaves `nat_gateway`,
+    `nat_vm_ip`, `nat_dhcp_inicio` e `nat_dhcp_fim` projetam, no canal de
+    pares, exatamente as variáveis `NAT_GATEWAY`, `NAT_VM_IP`,
+    `NAT_DHCP_INICIO` e `NAT_DHCP_FIM` que o Bash exporta hoje. O IP do host é
+    o próprio gateway virtual (`etapas/60-rede-bridge.sh:1553`), e a netmask e
+    o broadcast saem de `ipaddress` em vez de ficarem literais no XML.
+    """
+    label = "nat"
+    data = _closed(payload, {"cidr"}, label)
+    text = _text(data, "cidr", label)
+    address, prefix, network = parse_ipv4_cidr(text, "nat.cidr")
+    if prefix != NAT_PREFIXLEN:
+        raise DataError(
+            "nat.cidr exige prefixo /%d; o prefixo /%d não é suportado."
+            % (NAT_PREFIXLEN, prefix)
+        )
+    if address != network.network_address:
+        raise DataError(
+            "nat.cidr precisa ser o endereço de rede, com o último octeto 0."
+        )
+    if not _is_private_v4(network):
+        raise DataError(
+            "nat.cidr precisa ser privada RFC 1918 (10/8, 172.16/12 ou "
+            "192.168/16)."
+        )
+    base = int(network.network_address)
+    derived = {
+        "nat_gateway": ipaddress.IPv4Address(base + NAT_GATEWAY_OFFSET),
+        "nat_vm_ip": ipaddress.IPv4Address(base + NAT_VM_OFFSET),
+        "nat_dhcp_inicio": ipaddress.IPv4Address(base + NAT_DHCP_START_OFFSET),
+        "nat_dhcp_fim": ipaddress.IPv4Address(base + NAT_DHCP_END_OFFSET),
+    }
+    for name, value in derived.items():
+        if not _is_unicast_in(value, network):
+            raise InternalError(
+                "Derivação NAT produziu endereço não unicast em %s." % name
+            )
+    result = {name: str(value) for name, value in derived.items()}
+    result.update(
+        {
+            "family": "ipv4",
+            "nat_broadcast": str(network.broadcast_address),
+            "nat_cidr": str(network),
+            "nat_dhcp_count": NAT_DHCP_END_OFFSET - NAT_DHCP_START_OFFSET + 1,
+            "nat_host_ip": str(derived["nat_gateway"]),
+            "nat_netmask": str(network.netmask),
+            "nat_network": str(network.network_address),
+            "nat_prefix": prefix,
+        }
+    )
+    return result
+
+
+def address_check(payload: Mapping[str, Any]) -> dict:
+    """Confere o par host/VM contra um prefixo IPv4 já observado.
+
+    Espelha o corpo do laço de `validar_ips_interface_rede`
+    (`lib/common.sh:2192-2216`): o host precisa ser exatamente o endereço que
+    a interface carrega naquele CIDR, e a VM precisa ser um unicast distinto
+    dentro do mesmo prefixo. Como em `network_xml.network_overlap`, nada é
+    decidido aqui: as cardinalidades voltam para o Bash formular a recusa.
+    """
+    label = "address_check"
+    data = _closed(payload, {"cidr", "host_ip", "vm_ip"}, label)
+    address, prefix, network = parse_ipv4_cidr(
+        _text(data, "cidr", label), "address_check.cidr"
+    )
+    host = parse_ipv4_address(
+        _text(data, "host_ip", label), "address_check.host_ip"
+    )
+    vm = parse_ipv4_address(_text(data, "vm_ip", label), "address_check.vm_ip")
+    first = int(network.network_address) + 1
+    last = int(network.broadcast_address) - 1
+    usable = last - first + 1
+    host_matches = 1 if host == address else 0
+    host_unicast = 1 if _is_unicast_in(host, network) else 0
+    vm_unicast = 1 if _is_unicast_in(vm, network) else 0
+    distinct = 1 if vm != host else 0
+    return {
+        "accepted": 1 if host_matches and vm_unicast and distinct else 0,
+        "broadcast": str(network.broadcast_address),
+        "cidr": str(network),
+        "distinct": distinct,
+        "family": "ipv4",
+        "host_ip": str(host),
+        "host_matches_cidr": host_matches,
+        "host_unicast": host_unicast,
+        "interface_address": str(address),
+        "netmask": str(network.netmask),
+        "network": str(network.network_address),
+        "prefix": prefix,
+        "usable_count": usable if usable > 0 else 0,
+        "usable_first": str(ipaddress.IPv4Address(first)) if usable > 0 else "",
+        "usable_last": str(ipaddress.IPv4Address(last)) if usable > 0 else "",
+        "vm_in_cidr": 1 if vm in network else 0,
+        "vm_ip": str(vm),
+        "vm_unicast": vm_unicast,
+    }
+
+
+def _normalize_managed_network(value: Any) -> dict:
+    """Identidade da rede gerenciada que autoriza a exceção `proto kernel`.
+
+    Corresponde ao que `preparar_excecoes_rotas_rede_atual`
+    (`etapas/60-rede-bridge.sh:1127-1171`) monta a partir do XML ativo:
+    bridge, CIDR derivado do endereço IPv4 e o próprio endereço como gateway.
+    Quando não há exceção (`TEM_EXCECOES_ROTA_REDE_ATUAL=0`), o produtor envia
+    `present=false` e nenhum resíduo.
+    """
+    label = "managed"
+    fields = {"present", "family", "cidr", "gateway", "bridge"}
+    data = _closed(value, fields, label)
+    present = _boolean(data, "present", label)
+    family = _text(data, "family", label, allow_empty=True)
+    cidr = _text(data, "cidr", label, allow_empty=True)
+    gateway = _text(data, "gateway", label, allow_empty=True)
+    bridge = _text(data, "bridge", label, allow_empty=True)
+    if not present:
+        if family or cidr or gateway or bridge:
+            raise DataError(
+                "rede gerenciada ausente contém identidade residual."
+            )
+        return {
+            "bridge": "",
+            "broadcast": "",
+            "cidr": "",
+            "family": "",
+            "gateway": "",
+            "network": None,
+            "network_address": "",
+            "prefix": 0,
+            "present": False,
+        }
+    require_supported_family(family, "managed.family")
+    bridge = _interface_name(bridge, "managed.bridge")
+    address, prefix, network = parse_ipv4_cidr(cidr, "managed.cidr")
+    if address != network.network_address:
+        raise DataError(
+            "managed.cidr precisa ser o endereço de rede canônico; o Bash o "
+            "deriva com inteiro_para_ipv4_rede antes de comparar."
+        )
+    gateway_address = parse_ipv4_address(gateway, "managed.gateway")
+    if not _is_unicast_in(gateway_address, network):
+        raise DataError(
+            "managed.gateway precisa ser um unicast dentro de managed.cidr."
+        )
+    return {
+        "bridge": bridge,
+        "broadcast": str(network.broadcast_address),
+        "cidr": str(network),
+        "family": family,
+        "gateway": str(gateway_address),
+        "network": network,
+        "network_address": str(network.network_address),
+        "prefix": prefix,
+        "present": True,
+    }
+
+
+def _kernel_exception(
+    route: Mapping[str, Any],
+    route_class: str,
+    address: ipaddress.IPv4Address,
+    prefix: int,
+    managed: Mapping[str, Any],
+) -> bool:
+    """Reproduz `rota_kernel_exata_da_rede_atual`
+    (`etapas/60-rede-bridge.sh:1173-1192`), inclusive a exigência de `dev`
+    igual à bridge da rede gerenciada e de `proto kernel` na linha.
+
+    As comparações do Bash são de texto sobre o destino já normalizado, então
+    aqui elas viram igualdade de endereço literal mais prefixo: `192.168.9.5/24`
+    continua não sendo exceção da rede `192.168.9.0/24`, como lá.
+    """
+    if not managed["present"]:
+        return False
+    if route_class not in KERNEL_EXCEPTION_CLASSES:
+        return False
+    if route["device"] != managed["bridge"]:
+        return False
+    if route["protocol"] != KERNEL_PROTOCOL:
+        return False
+    network = managed["network"]
+    if route_class == "conectada":
+        return address == network.network_address and prefix == managed["prefix"]
+    if route_class == "local":
+        return str(address) == managed["gateway"] and prefix == 32
+    if route_class == "broadcast":
+        return prefix == 32 and address in (
+            network.network_address,
+            network.broadcast_address,
+        )
+    return False
+
+
+def route_audit(payload: Mapping[str, Any]) -> dict:
+    """Classifica cada rota e mede a sobreposição com o CIDR candidato.
+
+    Espelha o laço de rotas de `detectar_colisao_subrede`
+    (`etapas/60-rede-bridge.sh:1220-1260`): destino `default` é ignorado,
+    endereço nu vira `/32`, a exceção `proto kernel` da rede gerenciada é a
+    única sobreposição tolerada e qualquer outra é colisão. A ordem é a das
+    rotas já normalizadas (canônica e estável), então `collision_first_index`
+    é determinístico.
+    """
+    label = "route_audit"
+    data = _closed(payload, {"candidate_cidr", "managed", "routes"}, label)
+    _address, _prefix, candidate = parse_ipv4_cidr(
+        _text(data, "candidate_cidr", label), "route_audit.candidate_cidr"
+    )
+    managed = _normalize_managed_network(data["managed"])
+    routes = _normalize_routes(data["routes"])
+
+    result: dict[str, Any] = {}
+    skipped_count = 0
+    exception_count = 0
+    overlap_count = 0
+    collision_count = 0
+    collision_first_index = -1
+    collision_first_destination = ""
+    collision_first_device = ""
+    for index, route in enumerate(routes):
+        prefix_key = "route_%d_" % index
+        destination = route["destination"]
+        route_class = ROUTE_CLASSES[route["type"]]
+        result[prefix_key + "type"] = route["type"]
+        result[prefix_key + "device"] = route["device"]
+        if destination == DEFAULT_DESTINATION:
+            # I7.2: borda preservada. O Bash ignora o destino textual
+            # `default`, mas NÃO ignora um `0.0.0.0/0` escrito por extenso,
+            # que então colide com qualquer candidata.
+            skipped_count += 1
+            result[prefix_key + "class"] = "default"
+            result[prefix_key + "destination"] = DEFAULT_DESTINATION
+            result[prefix_key + "network"] = ""
+            result[prefix_key + "skipped"] = 1
+            result[prefix_key + "kernel_exception"] = 0
+            result[prefix_key + "overlaps"] = 0
+            result[prefix_key + "collision"] = 0
+            continue
+        route_label = "routes[%d].destination" % index
+        text = destination if "/" in destination else "%s/32" % destination
+        address, prefix, network = parse_ipv4_cidr(text, route_label)
+        exception = _kernel_exception(route, route_class, address, prefix, managed)
+        overlaps = network.overlaps(candidate)
+        collision = bool(overlaps and not exception)
+        if exception:
+            exception_count += 1
+        if overlaps:
+            overlap_count += 1
+        if collision:
+            collision_count += 1
+            if collision_first_index < 0:
+                collision_first_index = index
+                collision_first_destination = text
+                collision_first_device = route["device"]
+        result[prefix_key + "class"] = route_class
+        result[prefix_key + "destination"] = text
+        result[prefix_key + "network"] = str(network)
+        result[prefix_key + "skipped"] = 0
+        result[prefix_key + "kernel_exception"] = 1 if exception else 0
+        result[prefix_key + "overlaps"] = 1 if overlaps else 0
+        result[prefix_key + "collision"] = 1 if collision else 0
+
+    result.update(
+        {
+            "candidate_broadcast": str(candidate.broadcast_address),
+            "candidate_cidr": str(candidate),
+            "candidate_network": str(candidate.network_address),
+            "collision": 1 if collision_count else 0,
+            "collision_count": collision_count,
+            "collision_first_destination": collision_first_destination,
+            "collision_first_device": collision_first_device,
+            "collision_first_index": collision_first_index,
+            "exception_count": exception_count,
+            "has_exceptions": 1 if managed["present"] else 0,
+            "managed_bridge": managed["bridge"],
+            "managed_broadcast": managed["broadcast"],
+            "managed_cidr": managed["cidr"],
+            "managed_gateway": managed["gateway"],
+            "managed_network": managed["network_address"],
+            "managed_prefix": managed["prefix"],
+            "managed_present": 1 if managed["present"] else 0,
+            "overlap_count": overlap_count,
+            "route_count": len(routes),
+            "skipped_count": skipped_count,
+        }
+    )
+    return result
