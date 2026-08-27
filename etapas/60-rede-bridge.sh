@@ -43,6 +43,10 @@ TX_REDE_ATIVA=0
 TX_REDE_AUTOSTART=0
 TX_REDE_XML_PERSISTENTE=""
 TX_REDE_XML_ATIVO=""
+# I7.5: fato capturado do estado ATIVO do host. A prova semântica do rollback
+# do perfil de rede não pode depender só do rc de "netplan apply": o master do
+# uplink é o menor fato que separa "bridge desfeita" de "bridge ainda montada".
+TX_UPLINK_MASTER=""
 ROLLBACK_FALHOU=0
 
 ESTADO_REDE_NOME=""
@@ -265,11 +269,51 @@ capturar_estado_transacao() {
         [ "$ESTADO_REDE_AUTOSTART" = "SIM" ] && TX_REDE_AUTOSTART=1
     fi
 
+    TX_UPLINK_MASTER="$(master_da_interface "$INTERFACE_FISICA" || true)"
+
     TX_ARMADA=1
-    info "Transação armada: estado anterior da rede, VM, Netplan dedicado e passthrough.conf capturado."
+    info "Transação armada: estado anterior da rede, VM, Netplan dedicado, master do uplink e passthrough.conf capturado."
+}
+
+# I7.5 (D-NET-ROLLBACK-DIVERGE): cada passo do rollback relê o recurso que
+# acabou de restaurar e o compara SEMANTICAMENTE com o que foi capturado. Antes
+# desta subetapa a única prova era o código de retorno da ferramenta, e por isso
+# uma restauração que devolvesse rc=0 sem aplicar nada era anunciada como
+# "Rollback concluído: estados anteriores restaurados". Divergência agora é erro
+# grave (ROLLBACK_FALHOU=1), nunca mensagem de sucesso.
+#
+# Fora do escopo desta subetapa: reter bundle de evidência e emitir recovery_id
+# (D-NET-RECOVERY-EVIDENCE) continuam sendo de I7.6.
+provar_xml_rede_restaurado() {
+    # $1 = estado (persistente|ativo); $2 = arquivo com o XML capturado.
+    # A comparação é por fingerprint canônico do core, não por bytes: o XML
+    # volta pelo libvirt, que pode reordenar e normalizar o documento.
+    local estado="$1" capturado="$2" anterior atual
+    if [ -z "$capturado" ] || [ ! -s "$capturado" ]; then
+        registrar_falha_rollback "o XML $estado capturado de $REDE_LIBVIRT não está disponível para a prova."
+        return 0
+    fi
+    if ! inspecionar_rede_xml "$(<"$capturado")" RBANT_; then
+        registrar_falha_rollback "não foi possível analisar o XML $estado capturado de $REDE_LIBVIRT."
+        return 0
+    fi
+    anterior="$RBANT_FINGERPRINT"
+    if ! capturar_xml_estado_rede "$REDE_LIBVIRT" "$estado"; then
+        registrar_falha_rollback "não foi possível reler o XML $estado de $REDE_LIBVIRT após a restauração."
+        return 0
+    fi
+    if ! inspecionar_rede_xml "$ESTADO_REDE_XML" RBATU_; then
+        registrar_falha_rollback "não foi possível analisar o XML $estado restaurado de $REDE_LIBVIRT."
+        return 0
+    fi
+    atual="$RBATU_FINGERPRINT"
+    if [ -z "$anterior" ] || [ "$anterior" != "$atual" ]; then
+        registrar_falha_rollback "o XML $estado de $REDE_LIBVIRT diverge do capturado; a restauração não foi comprovada."
+    fi
 }
 
 restaurar_netplan_anterior() {
+    local master_atual
     [ "$TX_NETPLAN_MUTOU" -eq 1 ] || return 0
     if [ "$TX_NETPLAN_EXISTIA" -eq 1 ]; then
         if ! sudo cp -p "$TMP_DIR/netplan-bridge.anterior.yaml" "$NETPLAN_BRIDGE_ARQUIVO"; then
@@ -285,6 +329,22 @@ restaurar_netplan_anterior() {
     fi
     if ! sudo netplan apply; then
         registrar_falha_rollback "'netplan apply' falhou ao reaplicar a configuração anterior."
+    fi
+    # Prova do artefato: conteúdo idêntico ao capturado, ou ausência exata.
+    if [ "$TX_NETPLAN_EXISTIA" -eq 1 ]; then
+        if ! sudo test -e "$NETPLAN_BRIDGE_ARQUIVO"; then
+            registrar_falha_rollback "$NETPLAN_BRIDGE_ARQUIVO não existe após a restauração."
+        elif ! sudo cmp -s "$TMP_DIR/netplan-bridge.anterior.yaml" "$NETPLAN_BRIDGE_ARQUIVO"; then
+            registrar_falha_rollback "o conteúdo restaurado de $NETPLAN_BRIDGE_ARQUIVO diverge do capturado."
+        fi
+    elif sudo test -e "$NETPLAN_BRIDGE_ARQUIVO"; then
+        registrar_falha_rollback "$NETPLAN_BRIDGE_ARQUIVO continua presente após a remoção da criação parcial."
+    fi
+    # Prova do estado ATIVO: o uplink volta ao master capturado. Sem isto,
+    # "netplan apply devolveu 0" seria aceito como bridge desfeita.
+    master_atual="$(master_da_interface "$INTERFACE_FISICA" || true)"
+    if [ "$master_atual" != "$TX_UPLINK_MASTER" ]; then
+        registrar_falha_rollback "o uplink $INTERFACE_FISICA ficou sob master '${master_atual:-nenhum}', mas o capturado era '${TX_UPLINK_MASTER:-nenhum}'."
     fi
 }
 
@@ -360,12 +420,43 @@ restaurar_rede_anterior() {
         || registrar_falha_rollback "estado ativo de $REDE_LIBVIRT não voltou ao valor anterior."
     [ "$atual_autostart" -eq "$TX_REDE_AUTOSTART" ] \
         || registrar_falha_rollback "autostart de $REDE_LIBVIRT não voltou ao valor anterior."
+
+    # As quatro flags provam o ESTADO; o XML prova o CONTEÚDO. Só compara o
+    # estado que os dois lados declaram existir: a divergência de flag já foi
+    # reportada acima e não precisa de uma segunda mensagem derivada.
+    if [ "$TX_REDE_EXISTIA" -eq 1 ] && [ "$atual_existe" -eq 1 ]; then
+        if [ "$TX_REDE_PERSISTENTE" -eq 1 ] && [ "$atual_persistente" -eq 1 ]; then
+            provar_xml_rede_restaurado persistente "$TX_REDE_XML_PERSISTENTE"
+        fi
+        if [ "$TX_REDE_ATIVA" -eq 1 ] && [ "$atual_ativa" -eq 1 ]; then
+            provar_xml_rede_restaurado ativo "$TX_REDE_XML_ATIVO"
+        fi
+    fi
 }
 
 restaurar_vm_anterior() {
+    # O define não é prova: o XML é relido e comparado pelo core, que já
+    # devolve EQUAL/FINGERPRINT_LEFT/FINGERPRINT_RIGHT (lib/common.sh:2996).
+    local observado status
     [ "$TX_VM_MUTOU" -eq 1 ] || return 0
     if ! $VIRSH define "$TMP_DIR/vm-anterior.xml" >/dev/null; then
         registrar_falha_rollback "não foi possível restaurar o XML anterior da VM $VM_NAME."
+        return 0
+    fi
+    observado="$TMP_DIR/vm-restaurada.xml"
+    if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$observado"; then
+        registrar_falha_rollback "não foi possível reler o XML da VM $VM_NAME após a restauração."
+        return 0
+    fi
+    if xml_dominio_equivalente "$TMP_DIR/vm-anterior.xml" "$observado"; then
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 2 ]; then
+        registrar_falha_rollback "não foi possível comparar o XML restaurado da VM $VM_NAME: ${XML_COMPARACAO_ERRO:-sem diagnóstico}."
+    else
+        registrar_falha_rollback "o XML restaurado da VM $VM_NAME diverge do capturado (${XML_COMPARACAO_DIFERENCA:-divergência não detalhada}); a restauração não foi comprovada."
     fi
 }
 
@@ -374,10 +465,18 @@ restaurar_conf_anterior() {
     if [ "$TX_CONF_EXISTIA" -eq 1 ]; then
         if ! cp -p "$TMP_DIR/passthrough.conf.anterior" "$CONF_ARQUIVO"; then
             registrar_falha_rollback "não foi possível restaurar $CONF_ARQUIVO."
+            return 0
+        fi
+        if ! cmp -s "$TMP_DIR/passthrough.conf.anterior" "$CONF_ARQUIVO"; then
+            registrar_falha_rollback "o conteúdo restaurado de $CONF_ARQUIVO diverge do capturado."
         fi
     else
         if ! rm -f "$CONF_ARQUIVO"; then
             registrar_falha_rollback "não foi possível remover o passthrough.conf criado parcialmente."
+            return 0
+        fi
+        if [ -e "$CONF_ARQUIVO" ]; then
+            registrar_falha_rollback "$CONF_ARQUIVO continua presente após a remoção da criação parcial."
         fi
     fi
 }
@@ -423,6 +522,37 @@ commit_transacao() {
     TX_COMMIT=1
     TX_ARMADA=0
     ok "Commit lógico da transação de rede concluído."
+}
+
+# I7.5: a confirmação passou a acontecer ANTES da primeira mutação, nos DOIS
+# modos. No comportamento anterior o passthrough.conf era gravado três vezes
+# logo depois da captura, sem pergunta nenhuma, e só o modo bridge confirmava,
+# ainda assim depois dessas três gravações (a chamada ficava dentro de
+# `configurar_bridge`). O modo NAT nunca confirmava.
+#
+# A pergunta foi MOVIDA, não duplicada: `configurar_bridge` não pergunta mais.
+# Recusar aqui produz zero efeito, porque nenhuma mutação foi tentada, e o
+# código de saída continua sendo o de `falhar "Cancelado."`. Confirmação não é
+# efeito, então as contagens do oráculo I0 (11 NAT / 10 bridge) não mudam.
+#
+# As recusas específicas do modo bridge que não dependem de mutação alguma
+# (netplan ausente, uplink Wi-Fi) subiram junto: se ficassem em
+# `configurar_bridge`, passariam a recusar DEPOIS de gravar a configuração.
+confirmar_primeira_mutacao() {
+    case "$REDE_MODO" in
+        bridge)
+            exigir_comando netplan
+            interface_wifi "$INTERFACE_FISICA" \
+                && falhar "Bridge sobre Wi-Fi station não é suportada. Selecione REDE_MODO=nat na etapa 3."
+            confirmar "Aplicar/verificar bridge $REDE_BRIDGE sobre $INTERFACE_FISICA?" \
+                || falhar "Cancelado."
+            ;;
+        nat)
+            confirmar "Aplicar/verificar a rede NAT libvirt $REDE_LIBVIRT sobre $INTERFACE_FISICA?" \
+                || falhar "Cancelado."
+            ;;
+        *) falhar "REDE_MODO inválido: $REDE_MODO" ;;
+    esac
 }
 
 # --- Inspeção de XML pelo core Python ----------------------------------------
@@ -791,6 +921,7 @@ trap 'tratar_saida $?' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 capturar_estado_transacao
+confirmar_primeira_mutacao
 salvar_conf_transacao REDE_BRIDGE "$REDE_BRIDGE"
 salvar_conf_transacao REDE_LIBVIRT "$REDE_LIBVIRT"
 salvar_conf_transacao REDE_BRIDGE_LIBVIRT "$REDE_BRIDGE_LIBVIRT"
@@ -986,12 +1117,12 @@ preparar_nat_para_bridge() {
 configurar_bridge() {
     local tmp_netplan backup="" arquivo_igual=0 runtime_ok=0 precisa_aplicar=1
     local resposta host_atual
-    exigir_comando netplan
-    interface_wifi "$INTERFACE_FISICA" \
-        && falhar "Bridge sobre Wi-Fi station não é suportada. Selecione REDE_MODO=nat na etapa 3."
     titulo "Etapa 19: bridge Ethernet ($INTERFACE_FISICA -> $REDE_BRIDGE)"
 
-    confirmar "Aplicar/verificar bridge $REDE_BRIDGE sobre $INTERFACE_FISICA?" || falhar "Cancelado."
+    # I7.5: `exigir_comando netplan`, a recusa de Wi-Fi e a confirmação saíram
+    # daqui para `confirmar_primeira_mutacao`, que roda antes da primeira
+    # gravação do passthrough.conf. Aqui não há segunda pergunta.
+    #
     # Antes até mesmo de consultar o arquivo dedicado, trata a eventual rede
     # NAT gerenciada e recusa consumidores definidos, ativos ou não.
     preparar_nat_para_bridge
@@ -1090,20 +1221,6 @@ INSTRUCOES
         aviso "Preencha o IP da VM Windows e o IP do host Linux, renove o DHCP e rode --verificar antes da etapa 20."
     fi
     info "No Windows, 'ipconfig' deve mostrar o IP da VM Windows na mesma sub-rede da LAN."
-}
-
-netmask_para_prefixo() {
-    local mascara="$1" inteiro bit prefixo=0 viu_zero=0
-    inteiro="$(ipv4_para_inteiro "$mascara")" || return 1
-    for ((bit=31; bit>=0; bit--)); do
-        if (( (inteiro >> bit) & 1 )); then
-            [ "$viu_zero" -eq 0 ] || return 1
-            prefixo=$((prefixo + 1))
-        else
-            viu_zero=1
-        fi
-    done
-    echo "$prefixo"
 }
 
 bridge_libvirt_pertence_rede() {

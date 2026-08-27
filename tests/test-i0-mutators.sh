@@ -14,7 +14,12 @@ case $I0_MUTATOR_MATRIX in
     gate|smoke|full) ;;
     *) printf 'Uso: I0_MUTATOR_MATRIX=gate|smoke|full %s\n' "$0" >&2; exit 64 ;;
 esac
-NAT_INPUT=''
+# I7.5: NAT_INPUT era '' (stdin vazio), porque o caminho NAT NUNCA confirmava:
+# a única confirmação da etapa 19 ficava dentro de `configurar_bridge`, e ainda
+# assim depois de três gravações do passthrough.conf. Agora os dois modos
+# confirmam ANTES da primeira mutação, então o NAT consome um 's'. O BRIDGE_INPUT
+# não mudou: a pergunta foi MOVIDA, não duplicada, e continua sendo uma só.
+NAT_INPUT=$'s\n'
 BRIDGE_INPUT=$'s\n\n\n'
 HOOKS_INPUT=$'APLICAR\n'
 AIRLOCK_INPUT=$'s\n\nn\nn\n'
@@ -461,7 +466,17 @@ for network_mode in nat bridge; do
 
 done
 
-# Oráculo da lacuna atual: define de rollback rc=0, mas sem aplicar, é aceito.
+# I7.5 (D-NET-ROLLBACK-DIVERGE): o rollback passou a reler cada recurso e a
+# compará-lo semanticamente com o capturado. O oráculo ANTERIOR media exatamente
+# a lacuna oposta e dizia, literalmente, "Oráculo da lacuna atual: define de
+# rollback rc=0, mas sem aplicar, é aceito": exigia a mensagem 'Rollback
+# concluído: estados anteriores restaurados' e a AUSÊNCIA de 'ROLLBACK
+# INCOMPLETO' no caso divergente, com a justificativa "rollback divergente
+# passou a ser detectado; atualize o oráculo".
+#
+# Agora `restaurar_vm_anterior` executa o define, relê o XML com `virsh dumpxml
+# --inactive` e compara pelo core (`xml_dominio_equivalente`); um define que
+# devolve rc=0 sem aplicar vira erro grave e nunca é anunciado como sucesso.
 for network_mode in nat bridge; do
     prepare_network "$network_mode"
     original_vm_hash=$(mutator_harness_vm_hash)
@@ -475,13 +490,17 @@ for network_mode in nat bridge; do
     assert_nonzero "$MUTATOR_RC" "rollback divergente $network_mode"
     [[ $(mutator_harness_vm_hash) != "$original_vm_hash" ]] \
         || fail "rollback divergente $network_mode foi indevidamente considerado aplicado pelo shim"
-    assert_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
-        "oráculo de falso sucesso do rollback $network_mode mudou"
-    assert_no_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
-        "rollback divergente $network_mode passou a ser detectado; atualize o oráculo"
+    assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
+        "rollback divergente $network_mode deixou de ser detectado pela prova semântica"
+    assert_text "$MUTATOR_ERROR" 'diverge do capturado' \
+        "rollback divergente $network_mode não nomeou a divergência relida"
+    assert_no_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+        "rollback divergente $network_mode voltou a ser anunciado como sucesso"
     assert_text "$MUTATOR_CALL_LOG" '\|DIVERGE\|' 'injeção divergente não foi observada'
 done
-# O código atual também remove o TMP_DIR e não emite recovery_id nessa falha.
+# Retenção de evidência e recovery_id continuam FORA deste caso: são de I7.6
+# (D-NET-RECOVERY-EVIDENCE). O código atual remove o TMP_DIR e não emite
+# recovery_id nessa falha, e estas duas asserções seguem inalteradas.
 [[ -z $(/usr/bin/find "$MUTATOR_TMP" -mindepth 1 -print -quit) ]] || fail 'TMP_DIR da etapa 60 não foi limpo'
 assert_no_text "$MUTATOR_ERROR" 'recovery_id=' 'oráculo atual passou a preservar recovery_id; atualize a classificação'
 pass
@@ -604,7 +623,8 @@ done
 mutator_harness_reset
 mutator_harness_set_conf VM_NIC_MAC ''
 mutator_harness_seed_vm_nics two-distinct
-mutator_harness_run 60-rede-bridge.sh $'2\n'
+# I7.5: era $'2\n'; o 's' inicial responde à confirmação nova do modo NAT.
+mutator_harness_run 60-rede-bridge.sh $'s\n2\n'
 assert_eq 0 "$MUTATOR_RC" 'seleção explícita entre múltiplas NICs legadas'
 assert_text "$MUTATOR_PROJECT/passthrough.conf" '^VM_NIC_MAC="52:54:00:65:43:21"$' 'NIC selecionada não foi persistida'
 pass
