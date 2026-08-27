@@ -15,6 +15,7 @@ import unittest
 from passthrough_core import cli, errors, protocol
 
 import fixtures_i3 as fx
+import fixtures_i7 as pf
 
 NUL = chr(0)
 CANARIO = "CANARIO-SECRETO-I3-4b7f1e"
@@ -66,6 +67,7 @@ class SubcommandRegistryTests(unittest.TestCase):
             "network-inspect",
             "network-nat-addresses",
             "network-overlap",
+            "network-plan",
             "network-route-audit",
             "qemu-image-inspect",
         }
@@ -444,6 +446,7 @@ class NetworkAddressCommandTests(unittest.TestCase):
         for nome in (
             "network-address-check",
             "network-nat-addresses",
+            "network-plan",
             "network-route-audit",
         ):
             with self.subTest(nome=nome):
@@ -567,6 +570,93 @@ class NetworkAddressCommandTests(unittest.TestCase):
         argv = ["network-nat-addresses", "--stdin"]
         entrada = envelope({"cidr": "172.16.0.0/24"})
         self.assertEqual(executar(argv, entrada), executar(argv, entrada))
+
+
+class NetworkPlanCommandTests(unittest.TestCase):
+    """`network-plan` (I7.3): entrada estruturada, saída escalar determinística."""
+
+    def test_plano_nat_por_stdin_em_json(self) -> None:
+        codigo, saida, diagnostico = executar(
+            ["network-plan", "--stdin"], envelope(pf.pedido_nat())
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        self.assertEqual(diagnostico, b"")
+        campos = dados(saida)
+        self.assertEqual(campos["accepted"], 1)
+        self.assertEqual(campos["mode"], "nat")
+        self.assertEqual(campos["operation_count"], 11)
+        self.assertEqual(campos["rollback_count"], 4)
+        self.assertEqual(campos["blocking_precondition"], "")
+        # A projeção é indexada a partir de zero; a operação 5 do plano é
+        # `operation_4_*` no canal escalar.
+        self.assertEqual(campos["operation_4_verb"], "network-define")
+        self.assertEqual(campos["operation_4_id"], "OP-05-NETWORK_DEFINE")
+        self.assertRegex(campos["plan_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_plano_bridge_por_pares_na_saida(self) -> None:
+        codigo, saida, _ = executar(
+            ["network-plan", "--stdin", "--format=pairs"],
+            envelope(pf.pedido_bridge()),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = saida.decode("utf-8").split(NUL)[:-1]
+        mapa = dict(zip(campos[0::2], campos[1::2]))
+        self.assertEqual(mapa["SUBCOMMAND"], "network-plan")
+        self.assertEqual(mapa["MODE"], "bridge")
+        self.assertEqual(mapa["OPERATION_COUNT"], "10")
+        self.assertEqual(mapa["ROLLBACK_COUNT"], "4")
+        self.assertEqual(
+            mapa["ROLLBACK_IDS"].split("\n"),
+            [
+                "RB-01-HOST_PROFILE_DISCARD",
+                "RB-02-HOST_NETWORK_ACTIVATE",
+                "RB-03-DOMAIN_RESTORE",
+                "RB-04-CONFIGURATION_RESTORE",
+            ],
+        )
+        self.assertEqual(mapa["OPERATION_0_ARGUMENT_KEY"], "REDE_BRIDGE")
+
+    def test_plano_recusado_nao_traz_operacao(self) -> None:
+        codigo, saida, diagnostico = executar(
+            ["network-plan", "--stdin"],
+            envelope(pf.pedido_nat(target=pf.alvo(active=True))),
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        self.assertEqual(diagnostico, b"")
+        campos = dados(saida)
+        self.assertEqual(campos["accepted"], 0)
+        self.assertEqual(campos["blocking_precondition"], "P-DOMAIN-STOPPED")
+        self.assertEqual(campos["operation_count"], 0)
+        self.assertEqual(campos["rollback_count"], 0)
+
+    def test_recusa_tipada_nao_escreve_em_stdout(self) -> None:
+        casos = (
+            {},
+            {"schema_version": 1},
+            dict(pf.pedido_nat(), schema_version=2),
+        )
+        for indice, payload in enumerate(casos):
+            with self.subTest(caso=indice):
+                codigo, saida, diagnostico = executar(
+                    ["network-plan", "--stdin"], envelope(payload)
+                )
+                self.assertEqual(codigo, errors.EXIT_DATA)
+                self.assertEqual(saida, b"")
+                self.assertTrue(diagnostico)
+
+    def test_saida_repetida_e_identica(self) -> None:
+        argv = ["network-plan", "--stdin"]
+        entrada = envelope(pf.pedido_bridge())
+        self.assertEqual(executar(argv, entrada), executar(argv, entrada))
+
+    def test_nenhum_token_de_ferramenta_na_resposta(self) -> None:
+        for payload in (pf.pedido_nat(), pf.pedido_bridge()):
+            codigo, saida, _ = executar(["network-plan", "--stdin"], envelope(payload))
+            self.assertEqual(codigo, errors.EXIT_OK)
+            texto = saida.decode("utf-8").lower()
+            for token in pf.TOKENS_DE_FERRAMENTA:
+                self.assertNotIn(token, texto)
+
 
 
 if __name__ == "__main__":

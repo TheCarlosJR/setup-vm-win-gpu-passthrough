@@ -11,8 +11,15 @@ host/VM contra um prefixo e auditoria de rotas com a exceção `proto kernel`.
 Nada aqui decide efeito: as funções devolvem medidas e cardinalidades para
 que o Bash produza a mensagem e a recusa, como já faz `network_xml`.
 
-Geração de planos, descoberta de consumidores e execução transacional
-pertencem, respectivamente, às subetapas I7.3–I7.6.
+I7.3 acrescentou o planner determinístico: precondições com identificador
+estável, operações abstratas ordenadas, pós-condições e rollback inverso, tudo
+sobre o payload recebido. I7.7 mantém a intenção independente de backend: o
+plano descreve um artefato `{escopo, identificador, conteúdo, modo}` e
+parâmetros declarativos de perfil, nunca uma ferramenta, um caminho ou um
+comando. Nenhum YAML é interpretado aqui e nenhum parser de YAML nasce aqui.
+
+Descoberta de consumidores e execução transacional pertencem, respectivamente,
+às subetapas I7.4 e I7.6.
 """
 from __future__ import annotations
 
@@ -22,7 +29,7 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
-from . import xmlutil
+from . import config, network_xml, xmlutil
 from .errors import DataError, InternalError
 from .protocol import safe_label
 
@@ -1187,3 +1194,1728 @@ def route_audit(payload: Mapping[str, Any]) -> dict:
         }
     )
     return result
+
+
+# --- I7.3 e I7.7: plano determinístico, abstrato e backend-neutral -----------
+# Nada abaixo produz comando, caminho de binário, nome de ferramenta ou
+# fragmento de linha de comando. Uma operação do plano é VERBO + ALVO +
+# ARGUMENTOS ESCALARES; quem traduz verbo em comando é o provider Bash (I7.5).
+#
+# I7.7: a configuração de rede do host é modelada como artefato abstrato
+# `{escopo, identificador, conteúdo, modo}` mais os parâmetros declarativos do
+# perfil (bridge, membro, DHCP, STP, atraso de encaminhamento). O identificador
+# é um nome lógico, nunca um caminho: qual arquivo e qual ferramenta o
+# materializam é decisão do provider. Nenhum YAML é interpretado aqui — o Bash
+# de hoje apenas GERA o texto por heredoc e o compara com uma comparação de
+# bytes, então não existe parser a remover e nenhum nasce neste módulo.
+
+PLAN_SCHEMA_VERSION = 1
+
+# Capacidades abstratas exigidas pela etapa. O provider é quem sabe qual
+# executável fornece cada uma; o plano só nomeia a capacidade.
+CAPABILITIES = frozenset(
+    {
+        "domain-schema-validation",
+        "host-link-inspection",
+        "host-network-apply",
+        "hypervisor-control",
+        "text-extraction",
+    }
+)
+REQUIRED_CAPABILITIES = {
+    "bridge": (
+        "domain-schema-validation",
+        "host-link-inspection",
+        "host-network-apply",
+        "hypervisor-control",
+        "text-extraction",
+    ),
+    "nat": (
+        "domain-schema-validation",
+        "host-link-inspection",
+        "hypervisor-control",
+        "text-extraction",
+    ),
+}
+PLAN_RESOURCE_TYPES = frozenset(
+    {
+        "domain",
+        "host-network-profile",
+        "libvirt-network",
+        "project-configuration",
+    }
+)
+PLAN_VERBS = frozenset(
+    {
+        "configuration-publish",
+        "configuration-restore",
+        "domain-redefine",
+        "domain-restore",
+        "host-network-activate",
+        "host-network-activate-reversible",
+        "host-profile-archive",
+        "host-profile-discard",
+        "host-profile-restore",
+        "host-profile-store",
+        "network-activate",
+        "network-autostart-disable",
+        "network-autostart-enable",
+        "network-deactivate",
+        "network-define",
+        "network-recreate",
+        "network-redefine",
+        "network-undefine",
+    }
+)
+SEVERITIES = frozenset({"refuse", "warn"})
+# Componentes cujo fingerprint pode ser exigido antes de aplicar ou de
+# restaurar (D-NET-CONCURRENCY). `target` é a VM gerenciada, que não faz parte
+# do estado compartilhado de I7.1 e por isso tem digest próprio.
+REVALIDATION_COMPONENTS = tuple(sorted(STATE_FIELDS + ("target",)))
+PROJECT_SCOPE = "project"
+NAT_NETMASK = "255.255.255.0"
+NAT_PORT_START = 1024
+NAT_PORT_END = 65535
+# Prova exigida depois da restauração inteira da rede libvirt
+# (`etapas/60-rede-bridge.sh:347-362`).
+NETWORK_STATE_PROOF = (
+    "existence_persistence_activity_and_autostart_equal_the_capture"
+)
+
+
+def _normalize_target(value: Any) -> dict:
+    """Normaliza a VM gerenciada pela etapa.
+
+    Ela não entra em `consumers`: aquele conjunto é, por construção do Bash, o
+    das OUTRAS VMs que consomem a rede gerenciada (`listar_consumidores_rede_
+    gerenciada`, `etapas/60-rede-bridge.sh:921`, já exclui `VM_NAME`). Manter a
+    VM alvo fora dele preserva o modelo fechado de I7.1 e ainda deixa o plano
+    decidir se a fonte da NIC precisa mudar.
+    """
+    label = "target"
+    fields = {
+        "active",
+        "defined",
+        "name",
+        "nic_mac",
+        "nic_match_count",
+        "nic_source",
+        "nic_source_type",
+        "xml",
+    }
+    payload = _closed(value, fields, label)
+    name = _entity_name(_text(payload, "name", label), "target.name")
+    defined = _boolean(payload, "defined", label)
+    active = _boolean(payload, "active", label)
+    mac = _mac(_text(payload, "nic_mac", label), "target.nic_mac")
+    match_count = _integer(payload, "nic_match_count", label)
+    source_type = _text(payload, "nic_source_type", label, allow_empty=True)
+    source = _text(payload, "nic_source", label, allow_empty=True)
+    xml = _text(payload, "xml", label, allow_empty=True)
+    if source_type and source_type not in SOURCE_TYPES:
+        raise DataError("target.nic_source_type não é suportado.")
+    if bool(source_type) != bool(source):
+        raise DataError(
+            "target.nic_source_type e target.nic_source precisam ser "
+            "declarados juntos."
+        )
+    if source_type in {"bridge", "direct"}:
+        source = _interface_name(source, "target.nic_source")
+    elif source_type == "network":
+        source = _entity_name(source, "target.nic_source")
+    if not defined:
+        if active or match_count or source_type or xml:
+            raise DataError("target ausente contém estado residual.")
+    else:
+        if not xml:
+            raise DataError("target definido precisa transportar o XML inativo.")
+        _xml_fingerprint(xml, "domain", name, "XML da VM alvo")
+        if match_count > MAX_INTERFACES_PER_VM:
+            raise DataError("target.nic_match_count excede o limite de interfaces.")
+        if source_type and match_count == 0:
+            raise DataError("target declara fonte de NIC sem NIC correspondente.")
+    return {
+        "active": active,
+        "defined": defined,
+        "name": name,
+        "nic_mac": mac,
+        "nic_match_count": match_count,
+        "nic_source": source,
+        "nic_source_type": source_type,
+        "xml": xml,
+    }
+
+
+def _normalize_host_profile(value: Any) -> dict:
+    """Parâmetros declarativos do perfil de rede do host (I7.7).
+
+    Descrevem a topologia pretendida sem nomear backend: bridge, membro,
+    endereçamento automático e temporização de encaminhamento. Um provider
+    futuro pode renderizar isso em qualquer formato; o conteúdo textual vem da
+    intenção, não daqui.
+    """
+    label = "settings.host_profile"
+    fields = {
+        "dhcp4",
+        "forward_delay",
+        "identifier",
+        "member_dhcp4",
+        "member_dhcp6",
+        "scope",
+        "stp",
+    }
+    payload = _closed(value, fields, label)
+    scope = _text(payload, "scope", label)
+    if scope not in CONFIGURATION_SCOPES:
+        raise DataError("%s.scope não é suportado." % label)
+    identifier = _text(payload, "identifier", label)
+    if "/" in identifier:
+        raise DataError(
+            "%s.identifier é um nome lógico; caminho é decisão do provider."
+            % label
+        )
+    return {
+        "dhcp4": _boolean(payload, "dhcp4", label),
+        "forward_delay": _integer(payload, "forward_delay", label),
+        "identifier": identifier,
+        "member_dhcp4": _boolean(payload, "member_dhcp4", label),
+        "member_dhcp6": _boolean(payload, "member_dhcp6", label),
+        "scope": scope,
+        "stp": _boolean(payload, "stp", label),
+    }
+
+
+def _normalize_settings(value: Any) -> dict:
+    label = "settings"
+    fields = {
+        "capabilities",
+        "configuration_identifier",
+        "host_ip",
+        "host_profile",
+        "marker",
+        "nat_bridge",
+        "nat_cidr",
+        "uplink_effective",
+        "vm_ip",
+    }
+    payload = _closed(value, fields, label)
+    capabilities = _normalized_text_list(
+        payload["capabilities"], "settings.capabilities"
+    )
+    unknown = sorted(set(capabilities) - CAPABILITIES)
+    if unknown:
+        raise DataError(
+            "settings.capabilities declara capacidade desconhecida: %s."
+            % ", ".join(safe_label(item) for item in unknown)
+        )
+    identifier = _text(payload, "configuration_identifier", label)
+    if "/" in identifier:
+        raise DataError(
+            "settings.configuration_identifier é um nome lógico; caminho é "
+            "decisão do provider."
+        )
+    uplink_effective = _text(payload, "uplink_effective", label, allow_empty=True)
+    if uplink_effective:
+        uplink_effective = _interface_name(
+            uplink_effective, "settings.uplink_effective"
+        )
+    host_ip = _text(payload, "host_ip", label, allow_empty=True)
+    vm_ip = _text(payload, "vm_ip", label, allow_empty=True)
+    if host_ip:
+        host_ip = str(parse_ipv4_address(host_ip, "settings.host_ip"))
+    if vm_ip:
+        vm_ip = str(parse_ipv4_address(vm_ip, "settings.vm_ip"))
+    return {
+        "capabilities": capabilities,
+        "configuration_identifier": identifier,
+        "host_ip": host_ip,
+        "host_profile": _normalize_host_profile(payload["host_profile"]),
+        "marker": _text(payload, "marker", label),
+        "nat_bridge": _interface_name(
+            _text(payload, "nat_bridge", label), "settings.nat_bridge"
+        ),
+        "nat_cidr": _text(payload, "nat_cidr", label, allow_empty=True),
+        "uplink_effective": uplink_effective,
+        "vm_ip": vm_ip,
+    }
+
+
+def normalize_plan_request(value: Any) -> dict:
+    """Valida o payload fechado do planner e normaliza cada parte."""
+    fields = {"schema_version", "snapshot", "intent", "target", "settings"}
+    payload = _closed(value, fields, "plan")
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != PLAN_SCHEMA_VERSION
+    ):
+        raise DataError("Versão do schema de plano de rede não suportada.")
+    request = {
+        "intent": normalize_intent(payload["intent"]),
+        "schema_version": PLAN_SCHEMA_VERSION,
+        "settings": _normalize_settings(payload["settings"]),
+        "snapshot": normalize_snapshot(payload["snapshot"]),
+        "target": _normalize_target(payload["target"]),
+    }
+    intent = request["intent"]
+    settings = request["settings"]
+    if intent["uplink"]["name"] != request["snapshot"]["uplink"]["name"]:
+        raise DataError(
+            "A intenção declara um uplink diferente do capturado no snapshot."
+        )
+    snapshot_network = request["snapshot"]["libvirt_network"]["name"]
+    if intent["libvirt_network"]["name"] != snapshot_network:
+        raise DataError(
+            "A intenção declara uma rede libvirt diferente da capturada."
+        )
+    if intent["bridge"]["name"] == settings["nat_bridge"]:
+        raise DataError(
+            "A bridge do host e a bridge da rede libvirt não podem ter o "
+            "mesmo nome."
+        )
+    return request
+
+
+def _artifact(items: Iterable[Mapping[str, Any]], scope: str, identifier: str):
+    for item in items:
+        if item["scope"] == scope and item["identifier"] == identifier:
+            return item
+    return None
+
+
+def _project_values(artifact) -> dict:
+    """Projeta as chaves da configuração do projeto já capturada.
+
+    Reusa o parser estrito de `config` (o mesmo de `config-load`), que lê
+    `CHAVE=literal` e nada mais. Não há leitura de arquivo: o texto vem do
+    snapshot.
+    """
+    if artifact is None or not artifact["exists"]:
+        return {}
+    document = config.parse_document(
+        artifact["content"], "configuração do projeto"
+    )
+    return dict(document["values"])
+
+
+def _managed_facts(network: Mapping[str, Any], marker: str) -> dict:
+    """Lê propriedade, bridge, UUID e sub-rede da rede libvirt capturada.
+
+    Espelha `rede_gerenciada` (`etapas/60-rede-bridge.sh:536`): quando a rede é
+    persistente o oráculo é o XML persistente; caso contrário, o ativo.
+    """
+    empty = {
+        "current_bridge": "",
+        "current_gateway": "",
+        "current_network": "",
+        "current_prefix": 0,
+        "current_uuid": "",
+        "owned": False,
+    }
+    if not network["exists"]:
+        return empty
+    xml = network["persistent_xml"] or network["active_xml"]
+    if not xml:
+        return empty
+    data = network_xml.inspect_network({"xml": xml, "marker": marker})
+    return {
+        "current_bridge": data["bridge_name"],
+        "current_gateway": data.get("ip_0_address", ""),
+        "current_network": data.get("ip_0_network", ""),
+        "current_prefix": data.get("ip_0_prefix", 0),
+        "current_uuid": data["uuid"],
+        "owned": data["marker_match"] == 1,
+    }
+
+
+def _nat_definition_matches(xml: str, expected: Mapping[str, Any]) -> bool:
+    """Reproduz as quatorze igualdades de `rede_nat_xml_confere`
+    (`etapas/60-rede-bridge.sh:596-609`) sobre um XML já capturado."""
+    if not xml:
+        return False
+    data = network_xml.inspect_network(
+        {
+            "xml": xml,
+            "marker": expected["marker"],
+            "nic_mac": expected["mac"],
+            "vm_ip": expected["vm_ip"],
+        }
+    )
+    return bool(
+        data["marker_match"] == 1
+        and data["forward_count"] == 1
+        and data["forward_mode"] == "nat"
+        and data["forward_dev"] == expected["device"]
+        and data["bridge_name"] == expected["bridge"]
+        and data["ip_count"] == 1
+        and data.get("ip_0_address", "") == expected["gateway"]
+        and data.get("ip_0_netmask", "") == expected["netmask"]
+        and data["dhcp_range_count"] == 1
+        and data["dhcp_range_start"] == expected["dhcp_start"]
+        and data["dhcp_range_end"] == expected["dhcp_end"]
+        and data["dhcp_mac_count"] == 1
+        and data["dhcp_mac_ip"] == expected["vm_ip"]
+        and data["dhcp_ip_count"] == 1
+    )
+
+
+def _bridge_runtime_ok(links: Mapping[str, Any], bridge: str, member: str) -> bool:
+    """Espelha `bridge_runtime_confere` (`etapas/60-rede-bridge.sh:511`):
+    bridge presente, administrativamente UP e uplink escravizado a ela."""
+    link = links.get(bridge)
+    if link is None or "UP" not in link["flags"]:
+        return False
+    uplink = links.get(member)
+    return uplink is not None and uplink["master"] == bridge
+
+
+def _plan_facts(request: Mapping[str, Any]) -> dict:
+    snapshot = request["snapshot"]
+    intent = request["intent"]
+    target = request["target"]
+    settings = request["settings"]
+    mode = intent["mode"]
+    links = {item["name"]: item for item in snapshot["links"]}
+    uplink = intent["uplink"]["name"]
+    current = snapshot["libvirt_network"]
+    facts: dict[str, Any] = {
+        "host_bridge": intent["bridge"]["name"],
+        "links": links,
+        "mode": mode,
+        "nat_bridge": settings["nat_bridge"],
+        "network_name": intent["libvirt_network"]["name"],
+        "uplink": uplink,
+    }
+    facts.update(_managed_facts(current, settings["marker"]))
+
+    project = _artifact(
+        snapshot["configuration"],
+        PROJECT_SCOPE,
+        settings["configuration_identifier"],
+    )
+    facts["project_artifact"] = project
+    facts["project_values"] = _project_values(project)
+
+    profile = settings["host_profile"]
+    facts["profile_current"] = _artifact(
+        snapshot["configuration"], profile["scope"], profile["identifier"]
+    )
+    facts["profile_desired"] = _artifact(
+        intent["configuration"], profile["scope"], profile["identifier"]
+    )
+
+    others = [
+        item for item in snapshot["consumers"] if item["name"] != target["name"]
+    ]
+    facts["consumers_other"] = others
+    facts["consumers_active"] = [item for item in others if item["active"]]
+
+    if mode == "nat":
+        addresses = nat_addresses({"cidr": settings["nat_cidr"]})
+        expected = {
+            "bridge": settings["nat_bridge"],
+            "device": uplink,
+            "dhcp_end": addresses["nat_dhcp_fim"],
+            "dhcp_start": addresses["nat_dhcp_inicio"],
+            "gateway": addresses["nat_gateway"],
+            "mac": target["nic_mac"],
+            "marker": settings["marker"],
+            "netmask": NAT_NETMASK,
+            "vm_ip": addresses["nat_vm_ip"],
+        }
+        facts["addresses"] = addresses
+        facts["expected"] = expected
+        facts["persistent_matches"] = bool(
+            current["exists"]
+            and current["persistent"]
+            and _nat_definition_matches(current["persistent_xml"], expected)
+        )
+        facts["active_matches"] = bool(
+            current["exists"]
+            and current["active"]
+            and _nat_definition_matches(current["active_xml"], expected)
+        )
+        facts["needs_define"] = not (
+            current["exists"] and current["persistent"] and facts["persistent_matches"]
+        )
+        facts["needs_restart"] = bool(
+            facts["needs_define"]
+            or (current["active"] and not facts["active_matches"])
+        )
+        # A exceção `proto kernel` só existe quando a rede substituída é nossa
+        # e tem IPv4. Fora disso a identidade vai vazia, porque
+        # `_normalize_managed_network` recusa resíduo em rede ausente.
+        excecao = bool(facts["owned"] and facts["current_network"])
+        managed = {
+            "bridge": facts["current_bridge"] if excecao else "",
+            "cidr": (
+                "%s/%d" % (facts["current_network"], facts["current_prefix"])
+                if excecao
+                else ""
+            ),
+            "family": "ipv4" if excecao else "",
+            "gateway": facts["current_gateway"] if excecao else "",
+            "present": excecao,
+        }
+        facts["route_audit"] = route_audit(
+            {
+                "candidate_cidr": settings["nat_cidr"],
+                "managed": managed,
+                "routes": [dict(item) for item in snapshot["routes"]],
+            }
+        )
+        facts["desired_source_type"] = "network"
+        facts["desired_source"] = facts["network_name"]
+    else:
+        facts["addresses"] = {}
+        facts["expected"] = {}
+        facts["persistent_matches"] = False
+        facts["active_matches"] = False
+        facts["needs_define"] = False
+        facts["needs_restart"] = False
+        facts["route_audit"] = {}
+        facts["desired_source_type"] = "bridge"
+        facts["desired_source"] = facts["host_bridge"]
+        desired = facts["profile_desired"]
+        current_profile = facts["profile_current"]
+        facts["profile_content_equal"] = bool(
+            desired is not None
+            and current_profile is not None
+            and current_profile["exists"]
+            and desired["exists"]
+            and current_profile["content"] == desired["content"]
+        )
+        facts["profile_runtime_ok"] = _bridge_runtime_ok(
+            links, facts["host_bridge"], uplink
+        )
+        facts["needs_apply"] = not (
+            facts["profile_content_equal"] and facts["profile_runtime_ok"]
+        )
+
+    facts["domain_converged"] = bool(
+        target["defined"]
+        and target["nic_match_count"] == 1
+        and target["nic_source_type"] == facts["desired_source_type"]
+        and target["nic_source"] == facts["desired_source"]
+    )
+    return facts
+
+
+def _configuration_targets(request: Mapping[str, Any], facts: Mapping[str, Any]):
+    """Ordena as publicações de configuração como a etapa 19 as executa.
+
+    Estágio um: as três chaves de nomes gravadas antes de tocar em qualquer
+    recurso (`etapas/60-rede-bridge.sh:794-796`) e o MAC persistido por
+    `garantir_vm_nic_mac`. Estágio dois: os endereços gravados no final do
+    caminho escolhido.
+    """
+    intent = request["intent"]
+    settings = request["settings"]
+    target = request["target"]
+    stage_one = (
+        ("REDE_BRIDGE", intent["bridge"]["name"]),
+        ("REDE_LIBVIRT", intent["libvirt_network"]["name"]),
+        ("REDE_BRIDGE_LIBVIRT", settings["nat_bridge"]),
+        ("VM_NIC_MAC", target["nic_mac"]),
+    )
+    if facts["mode"] == "nat":
+        addresses = facts["addresses"]
+        stage_two = (
+            ("REDE_NAT_CIDR", addresses["nat_cidr"]),
+            ("VM_IP_FIXO", addresses["nat_vm_ip"]),
+            ("IP_FIXO_HOST", addresses["nat_gateway"]),
+        )
+    else:
+        stage_two = tuple(
+            item
+            for item in (
+                ("VM_IP_FIXO", settings["vm_ip"]),
+                ("IP_FIXO_HOST", settings["host_ip"]),
+            )
+            if item[1]
+        )
+    return stage_one, stage_two
+
+
+def _precondition(
+    identifier: str,
+    requires: str,
+    evidence: str,
+    subject: str,
+    satisfied: bool,
+    *,
+    severity: str = "refuse",
+    detail: str = "",
+) -> dict:
+    if severity not in SEVERITIES:
+        raise InternalError("Severidade de precondição fora do vocabulário.")
+    return {
+        "detail": detail,
+        "evidence": evidence,
+        "id": identifier,
+        "requires": requires,
+        "satisfied": 1 if satisfied else 0,
+        "severity": severity,
+        "subject": subject,
+    }
+
+
+def _network_consumers(facts: Mapping[str, Any]) -> list[str]:
+    """VMs, além da alvo, presas à rede gerenciada ou às bridges dela.
+
+    Mesma pergunta de `listar_consumidores_rede_gerenciada`
+    (`etapas/60-rede-bridge.sh:921`) e de `rede_nat_usada_por_outra_vm_ativa`
+    (`etapas/60-rede-bridge.sh:1383`): consumo por nome de rede ou por uma das
+    duas bridges (a atual da rede e a pretendida).
+    """
+    bridges = {facts["nat_bridge"]}
+    if facts["current_bridge"]:
+        bridges.add(facts["current_bridge"])
+    names: list[str] = []
+    for consumer in facts["consumers_other"]:
+        for interface in consumer["interfaces"]:
+            if (
+                interface["source_type"] == "network"
+                and interface["source"] == facts["network_name"]
+            ) or (
+                interface["source_type"] in ("bridge", "direct")
+                and interface["source"] in bridges
+            ):
+                names.append(consumer["name"])
+                break
+    return sorted(names)
+
+
+def _plan_preconditions(
+    request: Mapping[str, Any], facts: Mapping[str, Any]
+) -> list[dict]:
+    intent = request["intent"]
+    settings = request["settings"]
+    snapshot = request["snapshot"]
+    target = request["target"]
+    mode = facts["mode"]
+    links = facts["links"]
+    network = snapshot["libvirt_network"]
+    checks: list[dict] = []
+
+    missing = sorted(set(REQUIRED_CAPABILITIES[mode]) - set(settings["capabilities"]))
+    checks.append(
+        _precondition(
+            "P-CAPABILITIES-AVAILABLE",
+            "required_capabilities_present",
+            "settings.capabilities",
+            "host-tooling",
+            not missing,
+            detail=",".join(missing),
+        )
+    )
+    project = facts["project_artifact"]
+    checks.append(
+        _precondition(
+            "P-CONFIGURATION-PRESENT",
+            "project_configuration_artifact_exists",
+            "snapshot.configuration",
+            settings["configuration_identifier"],
+            project is not None and project["exists"],
+        )
+    )
+    checks.append(
+        _precondition(
+            "P-DOMAIN-DEFINED",
+            "managed_domain_is_defined",
+            "target.defined",
+            target["name"],
+            target["defined"],
+        )
+    )
+    checks.append(
+        _precondition(
+            "P-DOMAIN-STOPPED",
+            "managed_domain_is_not_running",
+            "target.active",
+            target["name"],
+            not target["active"],
+        )
+    )
+    checks.append(
+        _precondition(
+            "P-DOMAIN-NIC-UNIQUE",
+            "exactly_one_interface_matches_persisted_mac",
+            "target.nic_match_count",
+            target["nic_mac"],
+            target["nic_match_count"] == 1,
+            detail=str(target["nic_match_count"]),
+        )
+    )
+    checks.append(
+        _precondition(
+            "P-UPLINK-PRESENT",
+            "intended_uplink_exists_in_capture",
+            "snapshot.links",
+            facts["uplink"],
+            facts["uplink"] in links,
+        )
+    )
+    if mode == "nat":
+        effective = settings["uplink_effective"]
+        checks.append(
+            _precondition(
+                "P-UPLINK-EFFECTIVE",
+                "intended_uplink_carries_the_effective_ipv4_route",
+                "settings.uplink_effective",
+                facts["uplink"],
+                bool(effective) and effective == facts["uplink"],
+                detail=effective,
+            )
+        )
+        master = links[facts["uplink"]]["master"] if facts["uplink"] in links else ""
+        detail = ""
+        if master:
+            detail = (
+                "host-bridge" if master == facts["host_bridge"] else "foreign-master"
+            )
+        checks.append(
+            _precondition(
+                "P-UPLINK-NOT-ENSLAVED",
+                "intended_uplink_is_not_a_bridge_port",
+                "snapshot.links[uplink].master",
+                facts["uplink"],
+                not master,
+                detail=detail,
+            )
+        )
+    # D-NET-UNMANAGED-BRIDGE: rede homônima sem o marcador deste projeto tem de
+    # recusar nos DOIS modos. Hoje o caminho bridge só avisa
+    # (`etapas/60-rede-bridge.sh:949-955`); o plano modela a recusa segura sem
+    # alterar a etapa, que continua sendo fiada em I7.5.
+    if not network["exists"]:
+        owned_detail = ""
+    else:
+        owned_detail = "owned" if facts["owned"] else "unmanaged"
+    checks.append(
+        _precondition(
+            "P-LIBVIRT-NETWORK-OWNED",
+            "homonymous_libvirt_network_carries_the_project_marker",
+            "snapshot.libvirt_network.persistent_xml",
+            facts["network_name"],
+            (not network["exists"]) or facts["owned"],
+            detail=owned_detail,
+        )
+    )
+    if mode == "nat":
+        bridge_link = facts["nat_bridge"] in links
+        checks.append(
+            _precondition(
+                "P-LIBVIRT-BRIDGE-OWNED",
+                "existing_libvirt_bridge_belongs_to_the_managed_network",
+                "snapshot.links",
+                facts["nat_bridge"],
+                (not bridge_link)
+                or (facts["owned"] and facts["current_bridge"] == facts["nat_bridge"]),
+            )
+        )
+        blocking = _network_consumers(facts) if facts["needs_restart"] else []
+        blocking = [
+            name
+            for name in blocking
+            if name in {item["name"] for item in facts["consumers_active"]}
+        ]
+        checks.append(
+            _precondition(
+                "P-NETWORK-CONSUMERS-ABSENT",
+                "no_other_running_domain_consumes_the_managed_network",
+                "snapshot.consumers",
+                facts["network_name"],
+                not blocking,
+                detail=",".join(blocking),
+            )
+        )
+        audit = facts["route_audit"]
+        checks.append(
+            _precondition(
+                "P-ROUTE-COLLISION-FREE",
+                "candidate_subnet_does_not_overlap_an_existing_route",
+                "snapshot.routes",
+                settings["nat_cidr"],
+                audit["collision_count"] == 0,
+                detail=audit["collision_first_destination"],
+            )
+        )
+    else:
+        blocking = (
+            _network_consumers(facts)
+            if network["exists"] and facts["owned"]
+            else []
+        )
+        checks.append(
+            _precondition(
+                "P-NETWORK-CONSUMERS-ABSENT",
+                "no_other_defined_domain_consumes_the_managed_network",
+                "snapshot.consumers",
+                facts["network_name"],
+                not blocking,
+                detail=",".join(blocking),
+            )
+        )
+        desired = facts["profile_desired"]
+        checks.append(
+            _precondition(
+                "P-HOST-PROFILE-DECLARED",
+                "intent_declares_the_host_network_profile_artifact",
+                "intent.configuration",
+                settings["host_profile"]["identifier"],
+                desired is not None and desired["exists"] and bool(desired["content"]),
+            )
+        )
+        checks.append(
+            _precondition(
+                "P-BRIDGE-MEMBER-DECLARED",
+                "intended_bridge_declares_the_uplink_as_its_only_port",
+                "intent.bridge.ports",
+                facts["host_bridge"],
+                intent["bridge"]["exists"]
+                and intent["bridge"]["ports"] == [facts["uplink"]],
+            )
+        )
+    return checks
+
+
+def _text_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _scalar_arguments(arguments: Mapping[str, Any], label: str) -> dict:
+    result: dict[str, Any] = {}
+    for key in sorted(arguments):
+        value = arguments[key]
+        if not isinstance(key, str) or not key.replace("_", "").isalnum():
+            raise InternalError("Argumento com nome inválido em %s." % label)
+        if isinstance(value, bool):
+            value = 1 if value else 0
+        if not isinstance(value, (str, int)):
+            raise InternalError(
+                "O plano só transporta argumentos escalares (%s)." % label
+            )
+        result[key] = value
+    return result
+
+
+def _plan_operations(request: Mapping[str, Any], facts: Mapping[str, Any]):
+    snapshot = request["snapshot"]
+    settings = request["settings"]
+    target = request["target"]
+    network = snapshot["libvirt_network"]
+    mode = facts["mode"]
+    values = facts["project_values"]
+    operations: list[dict] = []
+    postconditions: list[dict] = []
+
+    def emit(
+        verb: str,
+        resource_type: str,
+        resource: str,
+        arguments: Mapping[str, Any],
+        *,
+        converged: bool,
+        revalidate: Iterable[str],
+        proofs: Iterable[tuple],
+    ) -> None:
+        if verb not in PLAN_VERBS:
+            raise InternalError("Verbo fora do vocabulário do plano: %s." % verb)
+        if resource_type not in PLAN_RESOURCE_TYPES:
+            raise InternalError("Recurso fora do vocabulário do plano.")
+        index = len(operations) + 1
+        identifier = "OP-%02d-%s" % (index, verb.upper().replace("-", "_"))
+        components = sorted(set(revalidate))
+        for component in components:
+            if component not in REVALIDATION_COMPONENTS:
+                raise InternalError("Componente de revalidação desconhecido.")
+        proof_ids: list[str] = []
+        for kind, requires, evidence, subject in proofs:
+            proof_id = "PC-OP-%02d-%s" % (index, kind)
+            proof_ids.append(proof_id)
+            postconditions.append(
+                {
+                    "evidence": evidence,
+                    "id": proof_id,
+                    "requires": requires,
+                    "scope": "operation",
+                    "step": identifier,
+                    "subject": subject,
+                }
+            )
+        operations.append(
+            {
+                "arguments": _scalar_arguments(arguments, identifier),
+                "converged": 1 if converged else 0,
+                "id": identifier,
+                "index": index,
+                "mutating": 0 if converged else 1,
+                "postconditions": proof_ids,
+                "resource": resource,
+                "resource_type": resource_type,
+                "revalidate": components,
+                "undo": [],
+                "verb": verb,
+            }
+        )
+
+    def publish(key: str, value: str) -> None:
+        emit(
+            "configuration-publish",
+            "project-configuration",
+            settings["configuration_identifier"],
+            {"key": key, "value": value},
+            converged=key in values and values[key] == value,
+            revalidate=["configuration"],
+            proofs=[
+                (
+                    "CONFIGURATION-VALUE",
+                    "configuration_key_holds_intended_value",
+                    "configuration.values",
+                    key,
+                )
+            ],
+        )
+
+    stage_one, stage_two = _configuration_targets(request, facts)
+    for key, value in stage_one:
+        publish(key, value)
+
+    state = {
+        "active": network["active"],
+        "autostart": network["autostart"],
+        "exists": network["exists"],
+        "persistent": network["persistent"],
+    }
+    if mode == "nat":
+        addresses = facts["addresses"]
+        definition = {
+            "bridge": facts["nat_bridge"],
+            "bridge_delay": 0,
+            "bridge_stp": 1,
+            "dhcp_end": addresses["nat_dhcp_fim"],
+            "dhcp_start": addresses["nat_dhcp_inicio"],
+            "family": "ipv4",
+            "forward_device": facts["uplink"],
+            "forward_mode": "nat",
+            "forward_port_end": NAT_PORT_END,
+            "forward_port_start": NAT_PORT_START,
+            "gateway": addresses["nat_gateway"],
+            "marker": settings["marker"],
+            "name": facts["network_name"],
+            "netmask": NAT_NETMASK,
+            "prefix": addresses["nat_prefix"],
+            "reservation_ip": addresses["nat_vm_ip"],
+            "reservation_mac": target["nic_mac"],
+            "uuid": facts["current_uuid"],
+        }
+        if facts["needs_define"]:
+            if state["exists"] and not state["persistent"] and state["active"]:
+                # Instância transitória ativa precisa desaparecer antes de
+                # ganhar definição persistente (`etapas/60-rede-bridge.sh:1508-1512`).
+                emit(
+                    "network-deactivate",
+                    "libvirt-network",
+                    facts["network_name"],
+                    {"reason": "transient-instance-blocks-definition"},
+                    converged=False,
+                    revalidate=["consumers", "libvirt_network"],
+                    proofs=[
+                        (
+                            "NETWORK-INACTIVE",
+                            "managed_network_is_not_running",
+                            "libvirt_network.active",
+                            facts["network_name"],
+                        )
+                    ],
+                )
+                state["active"] = False
+                state["exists"] = False
+            emit(
+                "network-define",
+                "libvirt-network",
+                facts["network_name"],
+                definition,
+                converged=False,
+                revalidate=["libvirt_network"],
+                proofs=[
+                    (
+                        "NETWORK-PERSISTENT",
+                        "persistent_definition_matches_the_intended_nat_topology",
+                        "libvirt_network.persistent_xml",
+                        facts["network_name"],
+                    )
+                ],
+            )
+            state["exists"] = True
+            state["persistent"] = True
+        if (
+            network["active"]
+            and (facts["needs_define"] or not facts["active_matches"])
+            and state["active"]
+        ):
+            emit(
+                "network-deactivate",
+                "libvirt-network",
+                facts["network_name"],
+                {"reason": "backend-restart"},
+                converged=False,
+                revalidate=["consumers", "libvirt_network"],
+                proofs=[
+                    (
+                        "NETWORK-INACTIVE",
+                        "managed_network_is_not_running",
+                        "libvirt_network.active",
+                        facts["network_name"],
+                    )
+                ],
+            )
+            state["active"] = False
+        if not state["active"]:
+            emit(
+                "network-activate",
+                "libvirt-network",
+                facts["network_name"],
+                {"bridge": facts["nat_bridge"]},
+                converged=False,
+                revalidate=["libvirt_network"],
+                proofs=[
+                    (
+                        "NETWORK-ACTIVE",
+                        "active_backend_matches_the_persistent_definition",
+                        "libvirt_network.active_xml",
+                        facts["network_name"],
+                    )
+                ],
+            )
+            state["active"] = True
+        if not state["autostart"]:
+            emit(
+                "network-autostart-enable",
+                "libvirt-network",
+                facts["network_name"],
+                {"enabled": 1},
+                converged=False,
+                revalidate=["libvirt_network"],
+                proofs=[
+                    (
+                        "NETWORK-AUTOSTART",
+                        "managed_network_starts_with_the_host",
+                        "libvirt_network.autostart",
+                        facts["network_name"],
+                    )
+                ],
+            )
+            state["autostart"] = True
+    else:
+        profile = settings["host_profile"]
+        desired = facts["profile_desired"]
+        current = facts["profile_current"]
+        if network["exists"] and facts["owned"]:
+            if state["autostart"]:
+                emit(
+                    "network-autostart-disable",
+                    "libvirt-network",
+                    facts["network_name"],
+                    {"enabled": 0},
+                    converged=False,
+                    revalidate=["libvirt_network"],
+                    proofs=[
+                        (
+                            "NETWORK-AUTOSTART-OFF",
+                            "managed_network_does_not_start_with_the_host",
+                            "libvirt_network.autostart",
+                            facts["network_name"],
+                        )
+                    ],
+                )
+                state["autostart"] = False
+            if state["active"]:
+                emit(
+                    "network-deactivate",
+                    "libvirt-network",
+                    facts["network_name"],
+                    {"reason": "host-bridge-migration"},
+                    converged=False,
+                    revalidate=["consumers", "libvirt_network"],
+                    proofs=[
+                        (
+                            "NETWORK-INACTIVE",
+                            "managed_network_is_not_running",
+                            "libvirt_network.active",
+                            facts["network_name"],
+                        )
+                    ],
+                )
+                state["active"] = False
+        if facts["needs_apply"]:
+            if current is not None and current["exists"]:
+                emit(
+                    "host-profile-archive",
+                    "host-network-profile",
+                    profile["identifier"],
+                    {
+                        "content_sha256": _text_digest(current["content"]),
+                        "mode": current["mode"],
+                        "scope": profile["scope"],
+                    },
+                    converged=False,
+                    revalidate=["configuration"],
+                    proofs=[
+                        (
+                            "PROFILE-ARCHIVED",
+                            "archived_copy_matches_the_previous_artifact",
+                            "configuration.content",
+                            profile["identifier"],
+                        )
+                    ],
+                )
+            if not facts["profile_content_equal"]:
+                emit(
+                    "host-profile-store",
+                    "host-network-profile",
+                    profile["identifier"],
+                    {
+                        "bridge": facts["host_bridge"],
+                        "content": desired["content"],
+                        "content_sha256": _text_digest(desired["content"]),
+                        "dhcp4": profile["dhcp4"],
+                        "family": "ipv4",
+                        "forward_delay": profile["forward_delay"],
+                        "member": facts["uplink"],
+                        "member_dhcp4": profile["member_dhcp4"],
+                        "member_dhcp6": profile["member_dhcp6"],
+                        "mode": desired["mode"],
+                        "scope": profile["scope"],
+                        "stp": profile["stp"],
+                    },
+                    converged=False,
+                    revalidate=["configuration"],
+                    proofs=[
+                        (
+                            "PROFILE-CONTENT",
+                            "stored_artifact_matches_the_intended_content",
+                            "configuration.content",
+                            profile["identifier"],
+                        ),
+                        (
+                            "PROFILE-MODE",
+                            "stored_artifact_keeps_the_intended_mode",
+                            "configuration.mode",
+                            profile["identifier"],
+                        ),
+                    ],
+                )
+            emit(
+                "host-network-activate-reversible",
+                "host-network-profile",
+                profile["identifier"],
+                {
+                    "bridge": facts["host_bridge"],
+                    "member": facts["uplink"],
+                    "revert_without_confirmation": 1,
+                },
+                converged=False,
+                revalidate=["links", "routes"],
+                proofs=[
+                    (
+                        "PROFILE-REVERSIBLE",
+                        "operator_confirmed_the_reversible_activation",
+                        "links",
+                        facts["host_bridge"],
+                    )
+                ],
+            )
+            emit(
+                "host-network-activate",
+                "host-network-profile",
+                profile["identifier"],
+                {"bridge": facts["host_bridge"], "member": facts["uplink"]},
+                converged=False,
+                revalidate=["links", "routes"],
+                proofs=[
+                    (
+                        "BRIDGE-RUNTIME",
+                        "bridge_is_up_and_owns_the_uplink_as_a_port",
+                        "links",
+                        facts["host_bridge"],
+                    )
+                ],
+            )
+
+    if not facts["domain_converged"]:
+        emit(
+            "domain-redefine",
+            "domain",
+            target["name"],
+            {
+                "nic_mac": target["nic_mac"],
+                "source": facts["desired_source"],
+                "source_type": facts["desired_source_type"],
+            },
+            converged=False,
+            revalidate=["target"],
+            proofs=[
+                (
+                    "DOMAIN-NIC-SOURCE",
+                    "interface_with_the_persisted_mac_points_to_the_intended_source",
+                    "target.nic_source",
+                    target["nic_mac"],
+                )
+            ],
+        )
+
+    for key, value in stage_two:
+        publish(key, value)
+
+    touched = {item["resource_type"] for item in operations}
+    return operations, postconditions, touched, state
+
+
+def _plan_rollback(
+    request: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    touched: Iterable[str],
+    state: Mapping[str, Any],
+):
+    """Sequência inversa explícita, na ordem que `executar_rollback`
+    (`etapas/60-rede-bridge.sh:385`) já executa: perfil de rede do host, rede
+    libvirt, domínio e configuração do projeto.
+
+    O plano é estático, então a restauração é dimensionada pelo pior caso: o
+    conjunto de recursos que o plano inteiro tocaria. É exatamente a situação
+    que o oráculo I0 congela ao sinalizar depois da última operação mutante.
+
+    D-NET-ROLLBACK-DIVERGE: cada passo carrega a própria prova e
+    `on_divergence=fatal`. Nenhum passo aceita o código de retorno da
+    ferramenta como evidência, nem mesmo a restauração do domínio, que hoje
+    confia no rc (`etapas/60-rede-bridge.sh:365-371`).
+    """
+    snapshot = request["snapshot"]
+    settings = request["settings"]
+    target = request["target"]
+    network = snapshot["libvirt_network"]
+    touched = set(touched)
+    steps: list[dict] = []
+    postconditions: list[dict] = []
+
+    def emit(
+        verb: str,
+        resource_type: str,
+        resource: str,
+        arguments: Mapping[str, Any],
+        *,
+        revalidate: Iterable[str],
+        proofs: Iterable[tuple],
+    ) -> None:
+        if verb not in PLAN_VERBS:
+            raise InternalError("Verbo fora do vocabulário do plano: %s." % verb)
+        index = len(steps) + 1
+        identifier = "RB-%02d-%s" % (index, verb.upper().replace("-", "_"))
+        components = sorted(set(revalidate))
+        for component in components:
+            if component not in REVALIDATION_COMPONENTS:
+                raise InternalError("Componente de revalidação desconhecido.")
+        proof_ids: list[str] = []
+        for kind, requires, evidence, subject in proofs:
+            proof_id = "PC-RB-%02d-%s" % (index, kind)
+            proof_ids.append(proof_id)
+            postconditions.append(
+                {
+                    "evidence": evidence,
+                    "id": proof_id,
+                    "requires": requires,
+                    "scope": "rollback",
+                    "step": identifier,
+                    "subject": subject,
+                }
+            )
+        steps.append(
+            {
+                "arguments": _scalar_arguments(arguments, identifier),
+                "id": identifier,
+                "index": index,
+                "on_divergence": "fatal",
+                "postconditions": proof_ids,
+                "resource": resource,
+                "resource_type": resource_type,
+                "revalidate": components,
+                "verb": verb,
+            }
+        )
+
+    profile = settings["host_profile"]
+    if "host-network-profile" in touched:
+        current = facts["profile_current"]
+        if current is not None and current["exists"]:
+            emit(
+                "host-profile-restore",
+                "host-network-profile",
+                profile["identifier"],
+                {
+                    "content_sha256": _text_digest(current["content"]),
+                    "mode": current["mode"],
+                    "scope": profile["scope"],
+                },
+                revalidate=["configuration"],
+                proofs=[
+                    (
+                        "PROFILE-DIGEST",
+                        "restored_artifact_digest_equals_the_captured_digest",
+                        "configuration.content",
+                        profile["identifier"],
+                    ),
+                    (
+                        "PROFILE-RENDERABLE",
+                        "restored_profile_is_renderable_before_activation",
+                        "configuration.content",
+                        profile["identifier"],
+                    ),
+                ],
+            )
+        else:
+            emit(
+                "host-profile-discard",
+                "host-network-profile",
+                profile["identifier"],
+                {"scope": profile["scope"]},
+                revalidate=["configuration"],
+                proofs=[
+                    (
+                        "PROFILE-ABSENT",
+                        "partial_artifact_no_longer_exists",
+                        "configuration",
+                        profile["identifier"],
+                    ),
+                    (
+                        "PROFILE-RENDERABLE",
+                        "remaining_profiles_are_renderable_before_activation",
+                        "configuration",
+                        profile["identifier"],
+                    ),
+                ],
+            )
+        emit(
+            "host-network-activate",
+            "host-network-profile",
+            profile["identifier"],
+            {"member": facts["uplink"], "restore": 1},
+            revalidate=["links", "routes"],
+            proofs=[
+                (
+                    "LINK-TOPOLOGY",
+                    "link_topology_equals_the_captured_topology",
+                    "links",
+                    facts["uplink"],
+                )
+            ],
+        )
+
+    if "libvirt-network" in touched:
+        if state["active"]:
+            emit(
+                "network-deactivate",
+                "libvirt-network",
+                facts["network_name"],
+                {"reason": "rollback"},
+                revalidate=["libvirt_network"],
+                proofs=[
+                    (
+                        "NETWORK-INACTIVE",
+                        "managed_network_is_not_running",
+                        "libvirt_network.active",
+                        facts["network_name"],
+                    )
+                ],
+            )
+        if state["persistent"]:
+            emit(
+                "network-undefine",
+                "libvirt-network",
+                facts["network_name"],
+                {"reason": "rollback"},
+                revalidate=["libvirt_network"],
+                proofs=[
+                    (
+                        "NETWORK-UNDEFINED",
+                        "definition_created_by_this_run_no_longer_exists",
+                        "libvirt_network.persistent",
+                        facts["network_name"],
+                    )
+                ],
+            )
+        if network["exists"]:
+            if network["persistent"]:
+                if network["active"]:
+                    emit(
+                        "network-recreate",
+                        "libvirt-network",
+                        facts["network_name"],
+                        {"from": "captured-active-definition"},
+                        revalidate=["libvirt_network"],
+                        proofs=[
+                            (
+                                "NETWORK-ACTIVE-CAPTURE",
+                                "running_backend_equals_the_captured_active_definition",
+                                "libvirt_network.active_xml",
+                                facts["network_name"],
+                            )
+                        ],
+                    )
+                emit(
+                    "network-redefine",
+                    "libvirt-network",
+                    facts["network_name"],
+                    {"from": "captured-persistent-definition"},
+                    revalidate=["libvirt_network"],
+                    proofs=[
+                        (
+                            "NETWORK-PERSISTENT-CAPTURE",
+                            "persistent_definition_equals_the_captured_definition",
+                            "libvirt_network.persistent_xml",
+                            facts["network_name"],
+                        )
+                    ],
+                )
+                emit(
+                    "network-autostart-enable"
+                    if network["autostart"]
+                    else "network-autostart-disable",
+                    "libvirt-network",
+                    facts["network_name"],
+                    {"enabled": 1 if network["autostart"] else 0},
+                    revalidate=["libvirt_network"],
+                    proofs=[
+                        (
+                            "NETWORK-AUTOSTART-CAPTURE",
+                            "autostart_equals_the_captured_value",
+                            "libvirt_network.autostart",
+                            facts["network_name"],
+                        )
+                    ],
+                )
+            elif network["active"]:
+                emit(
+                    "network-recreate",
+                    "libvirt-network",
+                    facts["network_name"],
+                    {"from": "captured-active-definition"},
+                    revalidate=["libvirt_network"],
+                    proofs=[
+                        (
+                            "NETWORK-ACTIVE-CAPTURE",
+                            "transient_instance_equals_the_captured_definition",
+                            "libvirt_network.active_xml",
+                            facts["network_name"],
+                        )
+                    ],
+                )
+        # Revalidação das quatro flags depois da restauração inteira
+        # (`etapas/60-rede-bridge.sh:347-362`).
+        if not steps:
+            raise InternalError(
+                "Plano tocou a rede libvirt sem produzir passo de restauração."
+            )
+        last = steps[-1]
+        proof_id = "PC-RB-%02d-NETWORK-STATE" % last["index"]
+        last["postconditions"] = list(last["postconditions"]) + [proof_id]
+        postconditions.append(
+            {
+                "evidence": "libvirt_network",
+                "id": proof_id,
+                "requires": NETWORK_STATE_PROOF,
+                "scope": "rollback",
+                "step": last["id"],
+                "subject": facts["network_name"],
+            }
+        )
+
+    if "domain" in touched:
+        emit(
+            "domain-restore",
+            "domain",
+            target["name"],
+            {"from": "captured-inactive-definition"},
+            revalidate=["target"],
+            proofs=[
+                (
+                    "DOMAIN-FINGERPRINT",
+                    "restored_definition_fingerprint_equals_the_captured_fingerprint",
+                    "target.xml",
+                    target["name"],
+                )
+            ],
+        )
+
+    if "project-configuration" in touched:
+        project = facts["project_artifact"]
+        if project is None or not project["exists"]:
+            # `P-CONFIGURATION-PRESENT` já recusou o plano nesse caso, então
+            # chegar aqui seria plano inconsistente, não configuração criada
+            # pela metade.
+            raise InternalError(
+                "Plano publicou configuração sem artefato capturado."
+            )
+        emit(
+            "configuration-restore",
+            "project-configuration",
+            settings["configuration_identifier"],
+            {
+                "content_sha256": _text_digest(project["content"]),
+                "mode": project["mode"],
+                "scope": PROJECT_SCOPE,
+            },
+            revalidate=["configuration"],
+            proofs=[
+                (
+                    "CONFIGURATION-DIGEST",
+                    "restored_configuration_digest_equals_the_captured_digest",
+                    "configuration.content",
+                    settings["configuration_identifier"],
+                )
+            ],
+        )
+    return steps, postconditions
+
+
+def _plan_postconditions(
+    request: Mapping[str, Any], facts: Mapping[str, Any]
+) -> list[dict]:
+    """Provas do plano inteiro, além das de cada operação."""
+    settings = request["settings"]
+    target = request["target"]
+    entries: list[tuple] = []
+    if facts["mode"] == "nat":
+        addresses = facts["addresses"]
+        entries.extend(
+            (
+                (
+                    "NETWORK-PERSISTENT",
+                    "persistent_definition_matches_the_intended_nat_topology",
+                    "libvirt_network.persistent_xml",
+                    facts["network_name"],
+                ),
+                (
+                    "NETWORK-ACTIVE",
+                    "active_backend_matches_the_persistent_definition",
+                    "libvirt_network.active_xml",
+                    facts["network_name"],
+                ),
+                (
+                    "NETWORK-AUTOSTART",
+                    "managed_network_starts_with_the_host",
+                    "libvirt_network.autostart",
+                    facts["network_name"],
+                ),
+                (
+                    "ADDRESS-PAIR",
+                    "host_and_domain_addresses_share_the_effective_prefix",
+                    "links",
+                    "%s %s %s"
+                    % (
+                        facts["nat_bridge"],
+                        addresses["nat_vm_ip"],
+                        addresses["nat_gateway"],
+                    ),
+                ),
+            )
+        )
+    else:
+        entries.append(
+            (
+                "BRIDGE-RUNTIME",
+                "bridge_is_up_and_owns_the_uplink_as_a_port",
+                "links",
+                facts["host_bridge"],
+            )
+        )
+        if settings["vm_ip"] and settings["host_ip"]:
+            entries.append(
+                (
+                    "ADDRESS-PAIR",
+                    "host_and_domain_addresses_share_the_effective_prefix",
+                    "links",
+                    "%s %s %s"
+                    % (facts["host_bridge"], settings["vm_ip"], settings["host_ip"]),
+                )
+            )
+    entries.append(
+        (
+            "DOMAIN-NIC-SOURCE",
+            "interface_with_the_persisted_mac_points_to_the_intended_source",
+            "target.nic_source",
+            target["nic_mac"],
+        )
+    )
+    entries.append(
+        (
+            "CONFIGURATION-CONVERGED",
+            "every_published_key_holds_the_intended_value",
+            "configuration.values",
+            settings["configuration_identifier"],
+        )
+    )
+    return [
+        {
+            "evidence": evidence,
+            "id": "PC-PLAN-%s" % kind,
+            "requires": requires,
+            "scope": "plan",
+            "step": "",
+            "subject": subject,
+        }
+        for kind, requires, evidence, subject in entries
+    ]
+
+
+def build_plan(payload: Mapping[str, Any]) -> dict:
+    """Devolve o plano determinístico de rede a partir de snapshot e intenção.
+
+    O plano é fechado, ordenado e não depende de hora, aleatoriedade, ordem de
+    dicionário ou ambiente: a mesma entrada produz o mesmo documento byte a
+    byte. Quando uma precondição de recusa falha, o plano não traz operação,
+    pós-condição nem rollback: recusa é fail-closed, não plano parcial.
+    """
+    request = normalize_plan_request(payload)
+    facts = _plan_facts(request)
+    preconditions = _plan_preconditions(request, facts)
+    blocking = ""
+    failed = 0
+    for check in preconditions:
+        if check["satisfied"]:
+            continue
+        failed += 1
+        if check["severity"] == "refuse" and not blocking:
+            blocking = check["id"]
+    operations: list[dict] = []
+    postconditions: list[dict] = []
+    rollback: list[dict] = []
+    if not blocking:
+        operations, operation_proofs, touched, state = _plan_operations(
+            request, facts
+        )
+        rollback, rollback_proofs = _plan_rollback(request, facts, touched, state)
+        undo: dict[str, list[str]] = {}
+        for step in rollback:
+            undo.setdefault(step["resource_type"], []).append(step["id"])
+        for operation in operations:
+            operation["undo"] = list(undo.get(operation["resource_type"], []))
+        postconditions = (
+            operation_proofs
+            + _plan_postconditions(request, facts)
+            + rollback_proofs
+        )
+    target = dict(request["target"])
+    target["xml"] = _xml_fingerprint(
+        target["xml"], "domain", target["name"], "XML da VM alvo"
+    )
+    mutating = sum(item["mutating"] for item in operations)
+    return {
+        "family": "ipv4",
+        "fingerprints": {
+            "intent": _fingerprints(request["intent"]),
+            "snapshot": _fingerprints(request["snapshot"]),
+            "target": _digest(target),
+        },
+        "mode": facts["mode"],
+        "operations": operations,
+        "postconditions": postconditions,
+        "preconditions": preconditions,
+        "rollback": rollback,
+        "schema_version": PLAN_SCHEMA_VERSION,
+        "summary": {
+            "accepted": 0 if blocking else 1,
+            "blocking_precondition": blocking,
+            "converged_count": len(operations) - mutating,
+            "failed_precondition_count": failed,
+            "mutating_count": mutating,
+            "operation_count": len(operations),
+            "postcondition_count": len(postconditions),
+            "precondition_count": len(preconditions),
+            "rollback_count": len(rollback),
+        },
+    }
+
+
+def network_plan(payload: Mapping[str, Any]) -> dict:
+    """Projeta o plano no canal escalar da ponte, como `network-route-audit`.
+
+    O canal de pares só transporta escalares, então o documento estruturado é
+    achatado com índices estáveis. `plan_sha256` prende a projeção ao plano
+    inteiro: I7.5 pode comparar o digest antes de executar qualquer verbo.
+    """
+    plan = build_plan(payload)
+    summary = plan["summary"]
+    fingerprints = plan["fingerprints"]
+    data: dict[str, Any] = {
+        "accepted": summary["accepted"],
+        "blocking_precondition": summary["blocking_precondition"],
+        "converged_count": summary["converged_count"],
+        "failed_precondition_count": summary["failed_precondition_count"],
+        "family": plan["family"],
+        "fingerprint_intent_exact": fingerprints["intent"]["exact"],
+        "fingerprint_intent_semantic": fingerprints["intent"]["semantic"],
+        "fingerprint_snapshot_exact": fingerprints["snapshot"]["exact"],
+        "fingerprint_snapshot_semantic": fingerprints["snapshot"]["semantic"],
+        "fingerprint_target": fingerprints["target"],
+        "mode": plan["mode"],
+        "mutating_count": summary["mutating_count"],
+        "operation_count": summary["operation_count"],
+        "plan_sha256": _digest(plan),
+        "postcondition_count": summary["postcondition_count"],
+        "precondition_count": summary["precondition_count"],
+        "rollback_count": summary["rollback_count"],
+        "schema_version": plan["schema_version"],
+    }
+    for field in STATE_FIELDS:
+        data["fingerprint_component_%s" % field] = fingerprints["snapshot"][
+            "components"
+        ][field]
+    for index, check in enumerate(plan["preconditions"]):
+        prefix = "precondition_%d_" % index
+        data[prefix + "detail"] = check["detail"]
+        data[prefix + "evidence"] = check["evidence"]
+        data[prefix + "id"] = check["id"]
+        data[prefix + "requires"] = check["requires"]
+        data[prefix + "satisfied"] = check["satisfied"]
+        data[prefix + "severity"] = check["severity"]
+        data[prefix + "subject"] = check["subject"]
+    for index, operation in enumerate(plan["operations"]):
+        prefix = "operation_%d_" % index
+        data[prefix + "arguments"] = "\n".join(sorted(operation["arguments"]))
+        data[prefix + "converged"] = operation["converged"]
+        data[prefix + "id"] = operation["id"]
+        data[prefix + "mutating"] = operation["mutating"]
+        data[prefix + "postconditions"] = "\n".join(operation["postconditions"])
+        data[prefix + "resource"] = operation["resource"]
+        data[prefix + "resource_type"] = operation["resource_type"]
+        data[prefix + "revalidate"] = "\n".join(operation["revalidate"])
+        data[prefix + "undo"] = "\n".join(operation["undo"])
+        data[prefix + "verb"] = operation["verb"]
+        for name, value in operation["arguments"].items():
+            data[prefix + "argument_" + name] = value
+    for index, step in enumerate(plan["rollback"]):
+        prefix = "rollback_%d_" % index
+        data[prefix + "arguments"] = "\n".join(sorted(step["arguments"]))
+        data[prefix + "id"] = step["id"]
+        data[prefix + "on_divergence"] = step["on_divergence"]
+        data[prefix + "postconditions"] = "\n".join(step["postconditions"])
+        data[prefix + "resource"] = step["resource"]
+        data[prefix + "resource_type"] = step["resource_type"]
+        data[prefix + "revalidate"] = "\n".join(step["revalidate"])
+        data[prefix + "verb"] = step["verb"]
+        for name, value in step["arguments"].items():
+            data[prefix + "argument_" + name] = value
+    for index, proof in enumerate(plan["postconditions"]):
+        prefix = "postcondition_%d_" % index
+        data[prefix + "evidence"] = proof["evidence"]
+        data[prefix + "id"] = proof["id"]
+        data[prefix + "requires"] = proof["requires"]
+        data[prefix + "scope"] = proof["scope"]
+        data[prefix + "step"] = proof["step"]
+        data[prefix + "subject"] = proof["subject"]
+    data["operation_ids"] = "\n".join(
+        item["id"] for item in plan["operations"]
+    )
+    data["rollback_ids"] = "\n".join(item["id"] for item in plan["rollback"])
+    return data

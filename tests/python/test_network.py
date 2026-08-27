@@ -5,6 +5,7 @@ I7.1 entregou sem cobertura alguma, e o cálculo de endereços de I7.2, cuja
 paridade com o Bash de hoje é oráculo explícito aqui.
 """
 import copy
+import hashlib
 import ipaddress
 import json
 import unittest
@@ -13,6 +14,40 @@ from passthrough_core import network
 from passthrough_core.errors import DataError
 
 import fixtures_i3 as fx
+from fixtures_i7 import (
+    CONF_ARQUIVO,
+    CONF_TEXTO,
+    EFEITOS_BRIDGE,
+    EFEITOS_NAT,
+    PERFIL_ARQUIVO,
+    PERFIL_TEXTO,
+    PLANO_BRIDGE,
+    PLANO_BRIDGE_NAT,
+    PLANO_CAPACIDADES,
+    PLANO_CIDR,
+    PLANO_CONF,
+    PLANO_MARCADOR,
+    PLANO_PERFIL,
+    PLANO_REDE,
+    PLANO_UPLINK,
+    ROLLBACK_BRIDGE,
+    ROLLBACK_NAT,
+    TOKENS_DE_FERRAMENTA,
+    XML_ALHEIO,
+    XML_NAT,
+    ajustes,
+    alvo,
+    efeitos,
+    efeitos_rollback,
+    intencao_bridge,
+    intencao_nat,
+    pedido_bridge,
+    pedido_nat,
+    precondicao,
+    rede_gerenciada,
+    snapshot_plano,
+    textos,
+)
 
 REDE = "vm-passthrough-nat"
 VM = "fixture-win11"
@@ -1409,6 +1444,880 @@ class DeterminismTests(unittest.TestCase):
         antes = self._canonico(payload)
         network.snapshot_fingerprints(payload)
         self.assertEqual(self._canonico(payload), antes)
+
+
+class PlanSchemaTests(unittest.TestCase):
+    def test_topo_fechado(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        self.assertEqual(
+            sorted(plano),
+            [
+                "family",
+                "fingerprints",
+                "mode",
+                "operations",
+                "postconditions",
+                "preconditions",
+                "rollback",
+                "schema_version",
+                "summary",
+            ],
+        )
+        self.assertEqual(plano["schema_version"], network.PLAN_SCHEMA_VERSION)
+        self.assertEqual(plano["mode"], "nat")
+        self.assertEqual(plano["family"], "ipv4")
+
+    def test_forma_de_precondicao_operacao_e_pos_condicao(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        for check in plano["preconditions"]:
+            self.assertEqual(
+                sorted(check),
+                [
+                    "detail",
+                    "evidence",
+                    "id",
+                    "requires",
+                    "satisfied",
+                    "severity",
+                    "subject",
+                ],
+            )
+            self.assertIn(check["severity"], sorted(network.SEVERITIES))
+            self.assertIn(check["satisfied"], (0, 1))
+        for operation in plano["operations"]:
+            self.assertEqual(
+                sorted(operation),
+                [
+                    "arguments",
+                    "converged",
+                    "id",
+                    "index",
+                    "mutating",
+                    "postconditions",
+                    "resource",
+                    "resource_type",
+                    "revalidate",
+                    "undo",
+                    "verb",
+                ],
+            )
+            self.assertIn(operation["verb"], network.PLAN_VERBS)
+            self.assertIn(operation["resource_type"], network.PLAN_RESOURCE_TYPES)
+            self.assertEqual(operation["mutating"], 1 - operation["converged"])
+            for componente in operation["revalidate"]:
+                self.assertIn(componente, network.REVALIDATION_COMPONENTS)
+            for valor in operation["arguments"].values():
+                self.assertIsInstance(valor, (str, int))
+        for proof in plano["postconditions"]:
+            self.assertEqual(
+                sorted(proof),
+                ["evidence", "id", "requires", "scope", "step", "subject"],
+            )
+            self.assertIn(proof["scope"], ("operation", "plan", "rollback"))
+        for step in plano["rollback"]:
+            self.assertEqual(
+                sorted(step),
+                [
+                    "arguments",
+                    "id",
+                    "index",
+                    "on_divergence",
+                    "postconditions",
+                    "resource",
+                    "resource_type",
+                    "revalidate",
+                    "verb",
+                ],
+            )
+            self.assertEqual(step["on_divergence"], "fatal")
+            self.assertTrue(step["postconditions"])
+
+    def test_identificadores_sao_unicos(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            plano = network.build_plan(pedido)
+            for campo in ("preconditions", "operations", "postconditions", "rollback"):
+                identificadores = [item["id"] for item in plano[campo]]
+                self.assertEqual(len(identificadores), len(set(identificadores)), campo)
+
+    def test_campo_extra_no_pedido(self) -> None:
+        pedido = pedido_nat()
+        pedido["extra"] = 1
+        with self.assertRaises(DataError):
+            network.build_plan(pedido)
+
+    def test_versao_de_schema_do_plano(self) -> None:
+        for valor in (0, 2, "1", True, None):
+            with self.subTest(valor=valor):
+                with self.assertRaises(DataError):
+                    network.build_plan(pedido_nat(schema_version=valor))
+
+    def test_alvo_ausente_com_estado_residual(self) -> None:
+        with self.assertRaises(DataError):
+            network.build_plan(pedido_nat(target=alvo(defined=False)))
+
+    def test_capacidade_desconhecida(self) -> None:
+        with self.assertRaises(DataError):
+            network.build_plan(
+                pedido_nat(settings=ajustes(capabilities=["fazer-cafe"]))
+            )
+
+    def test_identificador_de_artefato_nao_e_caminho(self) -> None:
+        with self.assertRaises(DataError) as contexto:
+            network.build_plan(
+                pedido_nat(settings=ajustes(configuration_identifier="a/b.conf"))
+            )
+        self.assertIn("nome lógico", str(contexto.exception))
+
+    def test_intencao_de_outra_rede_ou_uplink(self) -> None:
+        for chave, valor in (
+            ("uplink", {"kind": "", "mac": UPLINK_MAC, "name": "enp4s0"}),
+            ("libvirt_network", rede_gerenciada(name="outra-rede")),
+        ):
+            with self.subTest(chave=chave):
+                intencao = intencao_nat()
+                intencao[chave] = valor
+                if chave == "uplink":
+                    intencao["links"] = [
+                        link("enp4s0", mac=UPLINK_MAC, addresses=["192.168.0.7/24"])
+                    ]
+                    intencao["routes"] = [
+                        rota(destino="default", dev="enp4s0", protocolo="dhcp"),
+                        rota(destino="192.168.0.0/24", dev="enp4s0", origem="192.168.0.7"),
+                    ]
+                else:
+                    intencao["libvirt_network"]["active_xml"] = fx.network(
+                        nome="outra-rede", descricao=PLANO_MARCADOR
+                    )
+                    intencao["libvirt_network"]["persistent_xml"] = intencao[
+                        "libvirt_network"
+                    ]["active_xml"]
+                with self.assertRaises(DataError):
+                    network.build_plan(pedido_nat(intent=intencao))
+
+
+class PlanSequenceTests(unittest.TestCase):
+    """Paridade com o oráculo I0 de efeitos da etapa 19."""
+
+    def test_nat_reproduz_os_onze_efeitos_na_ordem(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        self.assertEqual(plano["summary"]["accepted"], 1)
+        self.assertEqual(len(plano["operations"]), 11)
+        self.assertEqual(efeitos(plano), EFEITOS_NAT)
+        chaves = [
+            item["arguments"]["key"]
+            for item in plano["operations"]
+            if item["verb"] == "configuration-publish"
+        ]
+        self.assertEqual(
+            chaves,
+            [
+                "REDE_BRIDGE",
+                "REDE_LIBVIRT",
+                "REDE_BRIDGE_LIBVIRT",
+                "VM_NIC_MAC",
+                "REDE_NAT_CIDR",
+                "VM_IP_FIXO",
+                "IP_FIXO_HOST",
+            ],
+        )
+
+    def test_bridge_reproduz_os_dez_efeitos_na_ordem(self) -> None:
+        plano = network.build_plan(pedido_bridge())
+        self.assertEqual(plano["summary"]["accepted"], 1)
+        self.assertEqual(len(plano["operations"]), 10)
+        self.assertEqual(efeitos(plano), EFEITOS_BRIDGE)
+        chaves = [
+            item["arguments"]["key"]
+            for item in plano["operations"]
+            if item["verb"] == "configuration-publish"
+        ]
+        self.assertEqual(
+            chaves,
+            [
+                "REDE_BRIDGE",
+                "REDE_LIBVIRT",
+                "REDE_BRIDGE_LIBVIRT",
+                "VM_NIC_MAC",
+                "VM_IP_FIXO",
+                "IP_FIXO_HOST",
+            ],
+        )
+
+    def test_bridge_sem_enderecos_nao_publica_reservas(self) -> None:
+        # ENTER nas duas perguntas de `perguntar_ipv4_opcional` não publica nada.
+        plano = network.build_plan(
+            pedido_bridge(settings=ajustes(host_ip="", vm_ip=""))
+        )
+        self.assertEqual(len(plano["operations"]), 8)
+        self.assertEqual(efeitos(plano), EFEITOS_BRIDGE[:4] + EFEITOS_BRIDGE[4:8])
+
+    def test_perfil_ja_igual_so_reaplica(self) -> None:
+        # Arquivo idêntico mas runtime incompleto: sem `fs:install`, com
+        # backup datado, porque o artefato anterior existe.
+        snapshot = snapshot_plano(
+            configuration=[
+                artefato(scope="host", identifier=PLANO_PERFIL, content=PERFIL_TEXTO),
+                artefato(scope="project", identifier=PLANO_CONF, content=CONF_TEXTO),
+            ]
+        )
+        plano = network.build_plan(pedido_bridge(snapshot=snapshot))
+        self.assertEqual(
+            efeitos(plano),
+            EFEITOS_BRIDGE[:4]
+            + [
+                "fs:cp:" + PERFIL_ARQUIVO,
+                "netplan:try",
+                "netplan:apply",
+                "virsh:define",
+            ]
+            + EFEITOS_BRIDGE[8:],
+        )
+        # Artefato anterior existente: o rollback restaura em vez de remover.
+        self.assertEqual(
+            efeitos_rollback(plano),
+            "fs:cp:%s;netplan:apply;virsh:define;fs:cp:%s"
+            % (PERFIL_ARQUIVO, CONF_ARQUIVO),
+        )
+
+    def test_nic_ja_correta_nao_redefine_o_dominio(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(target=alvo(nic_source=PLANO_REDE))
+        )
+        self.assertNotIn("virsh:define", efeitos(plano))
+        self.assertEqual(len(plano["operations"]), 10)
+
+    def test_rede_transitoria_ativa_e_parada_antes_da_definicao(self) -> None:
+        snapshot = snapshot_plano(
+            libvirt_network=rede_gerenciada(
+                autostart=False, persistent=False, persistent_xml=""
+            ),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(
+            efeitos(plano)[4:8],
+            [
+                "virsh:net-destroy",
+                "virsh:net-define",
+                "virsh:net-start",
+                "virsh:net-autostart",
+            ],
+        )
+
+
+class PlanRollbackTests(unittest.TestCase):
+    def test_ordem_exata_do_rollback_nat(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        self.assertEqual(efeitos_rollback(plano), ROLLBACK_NAT)
+
+    def test_ordem_exata_do_rollback_bridge(self) -> None:
+        plano = network.build_plan(pedido_bridge())
+        self.assertEqual(efeitos_rollback(plano), ROLLBACK_BRIDGE)
+
+    def test_cada_passo_tem_prova_e_divergencia_fatal(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            plano = network.build_plan(pedido)
+            provas = {item["id"]: item for item in plano["postconditions"]}
+            for step in plano["rollback"]:
+                self.assertEqual(step["on_divergence"], "fatal")
+                self.assertTrue(step["postconditions"])
+                for identificador in step["postconditions"]:
+                    self.assertIn(identificador, provas)
+                    self.assertEqual(provas[identificador]["scope"], "rollback")
+                    self.assertEqual(provas[identificador]["step"], step["id"])
+
+    def test_restauracao_da_vm_nao_confia_no_retorno(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        passo = [item for item in plano["rollback"] if item["verb"] == "domain-restore"]
+        self.assertEqual(len(passo), 1)
+        provas = {item["id"]: item for item in plano["postconditions"]}
+        exigencias = [provas[i]["requires"] for i in passo[0]["postconditions"]]
+        self.assertIn(
+            "restored_definition_fingerprint_equals_the_captured_fingerprint",
+            exigencias,
+        )
+
+    def test_quatro_flags_da_rede_sao_revalidadas(self) -> None:
+        snapshot = snapshot_plano(
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        plano = network.build_plan(
+            pedido_bridge(
+                snapshot=snapshot,
+                intent=intencao_bridge(),
+            )
+        )
+        provas = [item["requires"] for item in plano["postconditions"]]
+        self.assertIn(
+            "existence_persistence_activity_and_autostart_equal_the_capture", provas
+        )
+
+    def test_operacao_aponta_o_passo_que_a_desfaz(self) -> None:
+        plano = network.build_plan(pedido_bridge())
+        passos = {item["id"]: item for item in plano["rollback"]}
+        for operation in plano["operations"]:
+            self.assertTrue(operation["undo"], operation["id"])
+            for identificador in operation["undo"]:
+                self.assertIn(identificador, passos)
+                self.assertEqual(
+                    passos[identificador]["resource_type"], operation["resource_type"]
+                )
+
+    def test_plano_recusado_nao_traz_operacao_nem_rollback(self) -> None:
+        snapshot = snapshot_plano(configuration=[])
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(plano["summary"]["accepted"], 0)
+        self.assertEqual(
+            plano["summary"]["blocking_precondition"], "P-CONFIGURATION-PRESENT"
+        )
+        self.assertEqual(plano["operations"], [])
+        self.assertEqual(plano["rollback"], [])
+
+
+class PlanPreconditionTests(unittest.TestCase):
+    def _bloqueio(self, plano) -> str:
+        return plano["summary"]["blocking_precondition"]
+
+    def test_todas_as_precondicoes_estao_satisfeitas_no_caminho_feliz(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            plano = network.build_plan(pedido)
+            self.assertEqual(plano["summary"]["failed_precondition_count"], 0)
+            self.assertEqual(plano["summary"]["accepted"], 1)
+
+    def test_capacidade_ausente_recusa(self) -> None:
+        plano = network.build_plan(
+            pedido_bridge(
+                settings=ajustes(
+                    host_ip="192.168.0.7",
+                    vm_ip="192.168.0.55",
+                    capabilities=[
+                        item for item in PLANO_CAPACIDADES if item != "host-network-apply"
+                    ],
+                )
+            )
+        )
+        self.assertEqual(self._bloqueio(plano), "P-CAPABILITIES-AVAILABLE")
+        check = plano["preconditions"][0]
+        self.assertEqual(check["detail"], "host-network-apply")
+
+    def test_nat_nao_exige_a_capacidade_de_aplicar_rede_do_host(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(
+                settings=ajustes(
+                    capabilities=[
+                        item for item in PLANO_CAPACIDADES if item != "host-network-apply"
+                    ]
+                )
+            )
+        )
+        self.assertEqual(plano["summary"]["accepted"], 1)
+
+    def test_vm_ligada_recusa(self) -> None:
+        plano = network.build_plan(pedido_nat(target=alvo(active=True)))
+        self.assertEqual(self._bloqueio(plano), "P-DOMAIN-STOPPED")
+
+    def test_vm_indefinida_recusa(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(
+                target=alvo(
+                    defined=False,
+                    active=False,
+                    nic_match_count=0,
+                    nic_source="",
+                    nic_source_type="",
+                    xml="",
+                )
+            )
+        )
+        self.assertEqual(self._bloqueio(plano), "P-DOMAIN-DEFINED")
+
+    def test_mac_ambiguo_recusa(self) -> None:
+        plano = network.build_plan(pedido_nat(target=alvo(nic_match_count=2)))
+        self.assertEqual(self._bloqueio(plano), "P-DOMAIN-NIC-UNIQUE")
+        self.assertEqual(plano["preconditions"][4]["detail"], "2")
+
+    def test_uplink_ipv4_efetivo_divergente_recusa(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(settings=ajustes(uplink_effective="wlp2s0"))
+        )
+        self.assertEqual(self._bloqueio(plano), "P-UPLINK-EFFECTIVE")
+
+    def test_uplink_ipv4_efetivo_indeterminado_recusa(self) -> None:
+        plano = network.build_plan(pedido_nat(settings=ajustes(uplink_effective="")))
+        self.assertEqual(self._bloqueio(plano), "P-UPLINK-EFFECTIVE")
+
+    def test_uplink_escravizado_a_terceiro_recusa(self) -> None:
+        snapshot = snapshot_plano(
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, master="brOutra"),
+                link("brOutra", kind="bridge", addresses=["192.168.0.7/24"]),
+            ],
+            routes=[rota(destino="192.168.0.0/24", dev="brOutra", origem="192.168.0.7")],
+        )
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(self._bloqueio(plano), "P-UPLINK-NOT-ENSLAVED")
+        check = precondicao(plano, "P-UPLINK-NOT-ENSLAVED")
+        self.assertEqual(check["detail"], "foreign-master")
+
+    def test_bridge_libvirt_de_terceiro_recusa(self) -> None:
+        snapshot = snapshot_plano(
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(PLANO_BRIDGE_NAT, kind="bridge", addresses=["10.9.0.1/24"]),
+            ]
+        )
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(self._bloqueio(plano), "P-LIBVIRT-BRIDGE-OWNED")
+
+    def test_colisao_de_rota_recusa(self) -> None:
+        snapshot = snapshot_plano(
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.177.7/24"])
+            ],
+            routes=[
+                rota(destino="default", dev=PLANO_UPLINK, protocolo="dhcp"),
+                rota(destino="192.168.177.0/24", dev=PLANO_UPLINK, origem="192.168.177.7"),
+            ],
+        )
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(self._bloqueio(plano), "P-ROUTE-COLLISION-FREE")
+        check = precondicao(plano, "P-ROUTE-COLLISION-FREE")
+        self.assertEqual(check["detail"], "192.168.177.0/24")
+
+    def test_consumidor_ativo_bloqueia_o_restart_nat(self) -> None:
+        outro = consumidor(
+            name="outra-vm",
+            active=True,
+            xml=fx.domain(),
+            interfaces=[
+                {
+                    "mac": "52:54:00:aa:bb:cc",
+                    "source": PLANO_REDE,
+                    "source_type": "network",
+                }
+            ],
+        )
+        outro["xml"] = fx.domain().replace("fixture-win11", "outra-vm")
+        snapshot = snapshot_plano(
+            consumers=[outro],
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        plano = network.build_plan(
+            pedido_nat(snapshot=snapshot, settings=ajustes(nat_cidr="192.168.178.0/24"))
+        )
+        self.assertEqual(self._bloqueio(plano), "P-NETWORK-CONSUMERS-ABSENT")
+        check = precondicao(plano, "P-NETWORK-CONSUMERS-ABSENT")
+        self.assertEqual(check["detail"], "outra-vm")
+
+    def test_consumidor_definido_bloqueia_a_migracao_para_bridge(self) -> None:
+        outro = consumidor(
+            name="outra-vm",
+            active=False,
+            interfaces=[
+                {
+                    "mac": "52:54:00:aa:bb:cc",
+                    "source": PLANO_REDE,
+                    "source_type": "network",
+                }
+            ],
+        )
+        outro["xml"] = fx.domain().replace("fixture-win11", "outra-vm")
+        snapshot = snapshot_plano(
+            consumers=[outro],
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        plano = network.build_plan(pedido_bridge(snapshot=snapshot))
+        self.assertEqual(self._bloqueio(plano), "P-NETWORK-CONSUMERS-ABSENT")
+
+    def test_perfil_de_rede_do_host_precisa_estar_na_intencao(self) -> None:
+        intencao = intencao_bridge(
+            configuration=[
+                artefato(scope="project", identifier=PLANO_CONF, content=CONF_TEXTO)
+            ]
+        )
+        plano = network.build_plan(pedido_bridge(intent=intencao))
+        self.assertEqual(self._bloqueio(plano), "P-HOST-PROFILE-DECLARED")
+
+    def test_bridge_precisa_declarar_o_uplink_como_porta(self) -> None:
+        intencao = intencao_bridge()
+        intencao["bridge"] = {"exists": False, "name": PLANO_BRIDGE, "ports": []}
+        intencao["links"] = [
+            link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"])
+        ]
+        intencao["routes"] = [rota(destino="default", dev=PLANO_UPLINK, protocolo="dhcp")]
+        plano = network.build_plan(pedido_bridge(intent=intencao))
+        self.assertEqual(self._bloqueio(plano), "P-BRIDGE-MEMBER-DECLARED")
+
+    def test_rede_homonima_nao_gerenciada_recusa_no_nat(self) -> None:
+        snapshot = snapshot_plano(
+            libvirt_network=rede_gerenciada(
+                marker="", active_xml=XML_ALHEIO, persistent_xml=XML_ALHEIO
+            ),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link("virbr9", kind="bridge", addresses=["192.168.77.1/24"]),
+            ],
+        )
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(self._bloqueio(plano), "P-LIBVIRT-NETWORK-OWNED")
+
+    def test_rede_homonima_nao_gerenciada_recusa_tambem_no_bridge(self) -> None:
+        # D-NET-UNMANAGED-BRIDGE: hoje `etapas/60-rede-bridge.sh:949-955` só
+        # avisa e segue. O plano modela a recusa segura; a etapa continua
+        # intacta até I7.5.
+        snapshot = snapshot_plano(
+            libvirt_network=rede_gerenciada(
+                marker="", active_xml=XML_ALHEIO, persistent_xml=XML_ALHEIO
+            ),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link("virbr9", kind="bridge", addresses=["192.168.77.1/24"]),
+            ],
+        )
+        plano = network.build_plan(pedido_bridge(snapshot=snapshot))
+        self.assertEqual(self._bloqueio(plano), "P-LIBVIRT-NETWORK-OWNED")
+        check = precondicao(plano, "P-LIBVIRT-NETWORK-OWNED")
+        self.assertEqual(check["detail"], "unmanaged")
+        self.assertEqual(check["severity"], "refuse")
+        self.assertEqual(plano["operations"], [])
+        self.assertEqual(plano["rollback"], [])
+        self.assertEqual(plano["postconditions"], [])
+
+
+class PlanTransitionTests(unittest.TestCase):
+    def test_nat_para_bridge_e_permitida_e_desarma_a_rede(self) -> None:
+        snapshot = snapshot_plano(
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        plano = network.build_plan(pedido_bridge(snapshot=snapshot))
+        self.assertEqual(plano["summary"]["accepted"], 1)
+        self.assertEqual(
+            [item["verb"] for item in plano["operations"][4:6]],
+            ["network-autostart-disable", "network-deactivate"],
+        )
+        self.assertEqual(
+            efeitos(plano)[4:],
+            [
+                "virsh:net-autostart",
+                "virsh:net-destroy",
+                "fs:install:" + PERFIL_ARQUIVO,
+                "netplan:try",
+                "netplan:apply",
+                "virsh:define",
+                "custom:config-publish",
+                "custom:config-publish",
+            ],
+        )
+
+    def test_bridge_para_nat_e_recusada(self) -> None:
+        snapshot = snapshot_plano(
+            bridge={"exists": True, "name": PLANO_BRIDGE, "ports": [PLANO_UPLINK]},
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, master=PLANO_BRIDGE),
+                link(
+                    PLANO_BRIDGE,
+                    kind="bridge",
+                    mac=UPLINK_MAC,
+                    addresses=["192.168.0.7/24"],
+                ),
+            ],
+            routes=[
+                rota(
+                    destino="192.168.0.0/24",
+                    dev=PLANO_BRIDGE,
+                    origem="192.168.0.7",
+                )
+            ],
+            configuration=[
+                artefato(scope="host", identifier=PLANO_PERFIL, content=PERFIL_TEXTO),
+                artefato(scope="project", identifier=PLANO_CONF, content=CONF_TEXTO),
+            ],
+        )
+        plano = network.build_plan(pedido_nat(snapshot=snapshot))
+        self.assertEqual(plano["summary"]["accepted"], 0)
+        self.assertEqual(
+            plano["summary"]["blocking_precondition"], "P-UPLINK-NOT-ENSLAVED"
+        )
+        check = precondicao(plano, "P-UPLINK-NOT-ENSLAVED")
+        self.assertEqual(check["detail"], "host-bridge")
+        self.assertEqual(plano["operations"], [])
+
+
+class PlanIdempotenceTests(unittest.TestCase):
+    def _snapshot_nat_convergido(self) -> dict:
+        return snapshot_plano(
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+
+    def test_segunda_execucao_nat_nao_muta(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=self._snapshot_nat_convergido(),
+                target=alvo(nic_source=PLANO_REDE),
+            )
+        )
+        self.assertEqual(plano["summary"]["mutating_count"], 0)
+        self.assertEqual(plano["summary"]["operation_count"], 7)
+        self.assertEqual(plano["summary"]["converged_count"], 7)
+        self.assertEqual(
+            sorted({item["resource_type"] for item in plano["operations"]}),
+            ["project-configuration"],
+        )
+        self.assertEqual(
+            [item["verb"] for item in plano["rollback"]], ["configuration-restore"]
+        )
+
+    def test_segunda_execucao_bridge_nao_muta(self) -> None:
+        snapshot = snapshot_plano(
+            bridge={"exists": True, "name": PLANO_BRIDGE, "ports": [PLANO_UPLINK]},
+            configuration=[
+                artefato(scope="host", identifier=PLANO_PERFIL, content=PERFIL_TEXTO),
+                artefato(scope="project", identifier=PLANO_CONF, content=CONF_TEXTO),
+            ],
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, master=PLANO_BRIDGE),
+                link(
+                    PLANO_BRIDGE,
+                    kind="bridge",
+                    mac=UPLINK_MAC,
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+            routes=[
+                rota(
+                    destino="192.168.177.0/24",
+                    dev=PLANO_BRIDGE,
+                    origem="192.168.177.1",
+                )
+            ],
+        )
+        plano = network.build_plan(
+            pedido_bridge(
+                snapshot=snapshot,
+                settings=ajustes(host_ip="192.168.177.1", vm_ip="192.168.177.10"),
+                target=alvo(nic_source=PLANO_BRIDGE, nic_source_type="bridge"),
+            )
+        )
+        self.assertEqual(plano["summary"]["mutating_count"], 0)
+        self.assertEqual(plano["summary"]["operation_count"], 6)
+        self.assertEqual(
+            sorted({item["resource_type"] for item in plano["operations"]}),
+            ["project-configuration"],
+        )
+
+
+class PlanBackendNeutralityTests(unittest.TestCase):
+    """I7.7: prova objetiva de que o plano não nomeia backend nem ferramenta."""
+
+    def _planos(self):
+        transitoria = snapshot_plano(
+            libvirt_network=rede_gerenciada(
+                autostart=False, persistent=False, persistent_xml=""
+            ),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        snapshot_nat_pronto = snapshot_plano(
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(
+                    PLANO_BRIDGE_NAT,
+                    kind="bridge",
+                    addresses=["192.168.177.1/24"],
+                ),
+            ],
+        )
+        return (
+            ("nat", network.build_plan(pedido_nat())),
+            ("bridge", network.build_plan(pedido_bridge())),
+            (
+                "nat->bridge",
+                network.build_plan(pedido_bridge(snapshot=snapshot_nat_pronto)),
+            ),
+            (
+                "nat-transitoria",
+                network.build_plan(pedido_nat(snapshot=transitoria)),
+            ),
+        )
+
+    def test_nenhum_token_de_ferramenta_no_plano(self) -> None:
+        for nome, plano in self._planos():
+            for texto in textos(plano):
+                minusculo = texto.lower()
+                for token in TOKENS_DE_FERRAMENTA:
+                    self.assertNotIn(
+                        token,
+                        minusculo,
+                        "%s: token de ferramenta '%s' vazou no plano" % (nome, token),
+                    )
+
+    def test_nenhum_token_de_ferramenta_na_projecao(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            dados = network.network_plan(pedido)
+            for chave, valor in dados.items():
+                for texto in (chave, valor if isinstance(valor, str) else ""):
+                    for token in TOKENS_DE_FERRAMENTA:
+                        self.assertNotIn(token, texto.lower())
+
+    def test_artefato_e_abstrato(self) -> None:
+        plano = network.build_plan(pedido_bridge())
+        operacao = [
+            item for item in plano["operations"] if item["verb"] == "host-profile-store"
+        ][0]
+        self.assertEqual(operacao["resource"], PLANO_PERFIL)
+        self.assertEqual(operacao["resource_type"], "host-network-profile")
+        self.assertEqual(operacao["arguments"]["scope"], "host")
+        self.assertEqual(operacao["arguments"]["mode"], 0o600)
+        self.assertEqual(operacao["arguments"]["content"], PERFIL_TEXTO)
+        self.assertEqual(
+            operacao["arguments"]["content_sha256"],
+            hashlib.sha256(PERFIL_TEXTO.encode("utf-8")).hexdigest(),
+        )
+        # Parâmetros declarativos: um provider de outro backend renderiza a
+        # mesma topologia sem reaproveitar o texto.
+        for chave in ("bridge", "member", "dhcp4", "stp", "forward_delay"):
+            self.assertIn(chave, operacao["arguments"])
+        self.assertNotIn("/", operacao["resource"])
+
+    def test_operacoes_nao_carregam_xml_de_rede(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        definicao = [
+            item for item in plano["operations"] if item["verb"] == "network-define"
+        ][0]
+        for valor in definicao["arguments"].values():
+            if isinstance(valor, str):
+                self.assertNotIn("<", valor)
+        self.assertEqual(definicao["arguments"]["forward_mode"], "nat")
+        self.assertEqual(definicao["arguments"]["bridge"], PLANO_BRIDGE_NAT)
+        self.assertEqual(definicao["arguments"]["gateway"], "192.168.177.1")
+        self.assertEqual(definicao["arguments"]["dhcp_start"], "192.168.177.100")
+        self.assertEqual(definicao["arguments"]["dhcp_end"], "192.168.177.254")
+        self.assertEqual(definicao["arguments"]["reservation_ip"], "192.168.177.10")
+
+
+class PlanRevalidationTests(unittest.TestCase):
+    def test_toda_operacao_declara_ponto_de_revalidacao(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            plano = network.build_plan(pedido)
+            for operation in plano["operations"]:
+                self.assertTrue(operation["revalidate"], operation["id"])
+            for step in plano["rollback"]:
+                self.assertTrue(step["revalidate"], step["id"])
+
+    def test_fingerprints_acompanham_o_plano(self) -> None:
+        plano = network.build_plan(pedido_nat())
+        self.assertEqual(
+            sorted(plano["fingerprints"]), ["intent", "snapshot", "target"]
+        )
+        self.assertEqual(
+            plano["fingerprints"]["snapshot"],
+            network.snapshot_fingerprints(snapshot_plano()),
+        )
+        componentes = plano["fingerprints"]["snapshot"]["components"]
+        for operation in plano["operations"]:
+            for nome in operation["revalidate"]:
+                if nome != "target":
+                    self.assertIn(nome, componentes)
+
+
+class PlanDeterminismTests(unittest.TestCase):
+    def _canonico(self, valor) -> str:
+        return json.dumps(
+            valor, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+
+    def test_mesma_entrada_mesmo_plano_byte_a_byte(self) -> None:
+        for nome, construtor in (("nat", pedido_nat), ("bridge", pedido_bridge)):
+            with self.subTest(nome=nome):
+                primeira = self._canonico(network.build_plan(construtor()))
+                segunda = self._canonico(network.build_plan(construtor()))
+                self.assertEqual(primeira, segunda)
+                self.assertEqual(
+                    self._canonico(network.network_plan(construtor())),
+                    self._canonico(network.network_plan(construtor())),
+                )
+
+    def test_ordem_das_chaves_da_entrada_nao_muda_o_plano(self) -> None:
+        pedido = pedido_nat()
+        invertido = {chave: pedido[chave] for chave in reversed(sorted(pedido))}
+        self.assertEqual(
+            self._canonico(network.build_plan(pedido)),
+            self._canonico(network.build_plan(invertido)),
+        )
+
+    def test_entrada_nao_e_mutada(self) -> None:
+        pedido = pedido_nat()
+        antes = self._canonico(pedido)
+        network.build_plan(pedido)
+        self.assertEqual(self._canonico(pedido), antes)
+
+    def test_projecao_e_escalar(self) -> None:
+        dados = network.network_plan(pedido_bridge())
+        for chave, valor in dados.items():
+            self.assertRegex(chave.upper(), r"^[A-Z][A-Z0-9_]{0,63}$")
+            self.assertIsInstance(valor, (str, int))
+        self.assertEqual(
+            dados["plan_sha256"],
+            hashlib.sha256(
+                self._canonico(network.build_plan(pedido_bridge())).encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertEqual(dados["operation_count"], 10)
+        self.assertEqual(dados["rollback_count"], 4)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 libexec/passthrough_core/colors.py
 libexec/passthrough_core/network.py
 tests/manifests/i7-files.txt
+tests/python/fixtures_i7.py
 tests/python/test_network.py
 tests/test-gpu-udev-loop.sh
