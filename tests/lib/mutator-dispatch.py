@@ -1203,6 +1203,29 @@ def handle_xmlstarlet(args: list[str]) -> int:
     return 1
 
 
+# I7.5: o snapshot de rede da etapa 60 enumera TODOS os links e TODOS os
+# endereços IPv4 de uma vez, em vez de perguntar interface por interface. O
+# fixture passou a responder as duas formas sem `dev`, e a incluir `master` e
+# `link/ether`, porque o modelo fechado de I7.1 exige MAC, master e MTU de cada
+# link. A bridge da rede libvirt ativa aparece como link real, que é o que o
+# host faz quando `net-start` materializa o backend.
+def _bridge_da_rede_ativa() -> tuple[str, str]:
+    active = STATE / "network-active.xml"
+    if not active.exists():
+        return "", ""
+    try:
+        root = ET.parse(active).getroot()
+    except ET.ParseError:
+        return "", ""
+    bridge = root.find("bridge")
+    nome = bridge.get("name", "") if bridge is not None else ""
+    endereco = ""
+    ip_node = root.find("ip")
+    if ip_node is not None and ip_node.get("address"):
+        endereco = "%s/24" % ip_node.get("address")
+    return nome, endereco
+
+
 def handle_ip(args: list[str]) -> int:
     key = "ip:" + (args[0] if args else "")
     occurrence = call_occurrence(key)
@@ -1211,6 +1234,21 @@ def handle_ip(args: list[str]) -> int:
         return failure
     log("CALL", key, " ".join(args))
     bridge_active = (STATE / "bridge-active").exists()
+    bridge_libvirt, endereco_libvirt = _bridge_da_rede_ativa()
+
+    if args == ["-4", "-o", "addr", "show"]:
+        linhas = []
+        if bridge_active:
+            linhas.append("8: br0    inet 10.0.0.2/24 brd 10.0.0.255 scope global br0")
+        else:
+            linhas.append("2: enp3s0    inet 10.0.0.2/24 brd 10.0.0.255 scope global enp3s0")
+        if bridge_libvirt and endereco_libvirt:
+            linhas.append(
+                "7: %s    inet %s brd 192.168.177.255 scope global %s"
+                % (bridge_libvirt, endereco_libvirt, bridge_libvirt)
+            )
+        print("\n".join(linhas))
+        return 0
 
     if args == ["-4", "route", "get", "1.1.1.1"]:
         print("1.1.1.1 via 10.0.0.1 dev enp3s0 src 10.0.0.2 uid 1000")
@@ -1234,7 +1272,34 @@ def handle_ip(args: list[str]) -> int:
         return 0
     if len(args) in (3, 4) and args[:3] == ["-o", "link", "show"]:
         if len(args) == 3:
-            print("2: enp3s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP")
+            linhas = []
+            if bridge_active:
+                linhas.append(
+                    "8: br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue "
+                    "state UP mode DEFAULT group default\\    link/ether "
+                    "aa:bb:cc:dd:ee:01 brd ff:ff:ff:ff:ff:ff"
+                )
+            linhas.append(
+                "2: enp3s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel%s "
+                "state UP mode DEFAULT group default qlen 1000\\    link/ether "
+                "aa:bb:cc:dd:ee:01 brd ff:ff:ff:ff:ff:ff"
+                % (" master br0" if bridge_active else "")
+            )
+            if bridge_libvirt:
+                linhas.append(
+                    "7: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue "
+                    "state UP mode DEFAULT group default\\    link/ether "
+                    "52:54:00:aa:00:01 brd ff:ff:ff:ff:ff:ff" % bridge_libvirt
+                )
+            if (STATE / "route-collision").exists():
+                # A rota semeada usa `dev enp9s0`: o link precisa existir no
+                # inventário, senão o snapshot é inconsistente por fixture.
+                linhas.append(
+                    "9: enp9s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc "
+                    "fq_codel state UP mode DEFAULT group default qlen 1000\\    "
+                    "link/ether aa:bb:cc:dd:ee:09 brd ff:ff:ff:ff:ff:ff"
+                )
+            print("\n".join(linhas))
             return 0
         interface = args[3]
         if interface == "br0":

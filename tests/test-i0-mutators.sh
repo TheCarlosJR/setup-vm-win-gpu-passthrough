@@ -505,14 +505,32 @@ done
 assert_no_text "$MUTATOR_ERROR" 'recovery_id=' 'oráculo atual passou a preservar recovery_id; atualize a classificação'
 pass
 
-# Mudança concorrente é registrada pelo harness, mas não detectada pela etapa.
+# I7.5 (D-NET-CONCURRENCY): a etapa passou a guardar os fingerprints do estado
+# capturado (`network-snapshot`) e a revalidá-los (`network-revalidate`) nas
+# fronteiras da transação. O oráculo ANTERIOR media exatamente a lacuna oposta e
+# dizia, literalmente, "Mudança concorrente é registrada pelo harness, mas não
+# detectada pela etapa": exigia `rc=0` com a descrição 'concorrência atual da
+# etapa 60' e a AUSÊNCIA de 'conflito'/'concorrência' no stderr, justificada por
+# "etapa 60 detectou concorrência sem atualização do oráculo".
+#
+# Agora a injeção externa no efeito 8 muda o componente `libvirt_network`, que a
+# operação em curso (`domain-redefine`, cujo `revalidate` do plano é só
+# `target`) não está autorizada a mudar. A etapa recusa fail-closed antes da
+# publicação seguinte, e o rollback pula exatamente os passos que
+# sobrescreveriam o recurso alterado por terceiro — por isso o XML da rede
+# continua com a metadata externa: ela é PRESERVADA de propósito, não ignorada,
+# e o define da VM continua sobrescrevendo a mudança feita no XML do domínio.
 prepare_network nat
 MUTATOR_TEST_CONCURRENT_EFFECT=8
 mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
 unset MUTATOR_TEST_CONCURRENT_EFFECT
-assert_eq 0 "$MUTATOR_RC" 'concorrência atual da etapa 60'
+assert_nonzero "$MUTATOR_RC" 'concorrência não recusada pela etapa 60'
 assert_text "$MUTATOR_CALL_LOG" '\|CONCURRENT\|' 'injeção concorrente ausente'
-assert_no_text "$MUTATOR_ERROR" '[Cc]onflito|[Cc]oncorr' 'etapa 60 detectou concorrência sem atualização do oráculo'
+assert_text "$MUTATOR_ERROR" '[Cc]onflito de concorrência' 'etapa 60 deixou de nomear o conflito'
+assert_text "$MUTATOR_ERROR" 'libvirt_network' 'conflito sem nomear o componente divergente'
+assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' 'rollback não sinalizou o passo bloqueado pelo conflito'
+assert_no_text "$MUTATOR_OUTPUT" 'Commit lógico da transação de rede concluído' \
+    'conflito de concorrência produziu falso commit'
 /usr/bin/python3 - "$MUTATOR_STATE_DIR/vm.xml" "$MUTATOR_STATE_DIR/network-persistent.xml" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
