@@ -55,6 +55,7 @@ def link(
     mtu: int = 1500,
     flags=None,
     addresses=None,
+    wireless: bool = False,
 ) -> dict:
     return {
         "addresses": list(addresses or []),
@@ -65,6 +66,7 @@ def link(
         "mtu": mtu,
         "name": nome,
         "operstate": operstate,
+        "wireless": wireless,
     }
 
 
@@ -267,6 +269,7 @@ def snapshot_plano(**overrides) -> dict:
             artefato(scope="project", identifier=PLANO_CONF, content=CONF_TEXTO)
         ],
         "consumers": [],
+        "foreign_networks": [],
         "libvirt_network": rede_plano(),
         "links": [
             link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"])
@@ -410,3 +413,113 @@ def textos(valor):
     elif isinstance(valor, list):
         for item in valor:
             yield from textos(item)
+
+
+# --- I7.4: inventário de domínios e de redes libvirt -------------------------
+# O Bash captura `virsh list --all --name`, o `dumpxml` de cada domínio e
+# `virsh net-list --all`; estas fixtures reproduzem esse inventário já
+# estruturado, que é o único formato que o core aceita.
+
+OUTRA_VM = "outra-vm"
+OUTRO_MAC = "52:54:00:aa:bb:cc"
+REDE_TERCEIRO = "default"
+BRIDGE_TERCEIRO = "virbr0"
+
+
+def nic(
+    *,
+    mac: str = fx.NIC_MAC,
+    source_type: str = "network",
+    source: str = PLANO_REDE,
+) -> dict:
+    return {"mac": mac, "source": source, "source_type": source_type}
+
+
+def dominio(
+    nome: str,
+    *,
+    active: bool = False,
+    defined: bool = True,
+    interfaces=None,
+) -> dict:
+    return {
+        "active": active,
+        "defined": defined,
+        "interfaces": [nic()] if interfaces is None else list(interfaces),
+        "name": nome,
+    }
+
+
+def registro_rede(
+    nome: str,
+    *,
+    marker: str = "",
+    active: bool = True,
+    persistent: bool = True,
+    active_bridge: str = "",
+    persistent_bridge: str = "",
+) -> dict:
+    return {
+        "active": active,
+        "active_bridge": active_bridge,
+        "marker": marker,
+        "name": nome,
+        "persistent": persistent,
+        "persistent_bridge": persistent_bridge,
+    }
+
+
+def rede_gerenciada_registro(**overrides) -> dict:
+    base = dict(
+        marker=PLANO_MARCADOR,
+        active_bridge=PLANO_BRIDGE_NAT,
+        persistent_bridge=PLANO_BRIDGE_NAT,
+    )
+    base.update(overrides)
+    return registro_rede(PLANO_REDE, **base)
+
+
+def inventario(**overrides) -> dict:
+    """Alvo mais uma VM definida presa à rede gerenciada, o caso do oráculo I0."""
+    base = {
+        "bridges": [PLANO_BRIDGE_NAT],
+        "domains": [dominio(VM), dominio(OUTRA_VM)],
+        "marker": PLANO_MARCADOR,
+        "network_name": PLANO_REDE,
+        "networks": [rede_gerenciada_registro()],
+        "schema_version": 1,
+        "target": VM,
+    }
+    base.update(overrides)
+    return copy.deepcopy(base)
+
+
+def nic_xml(item: Mapping) -> str:
+    """Renderiza a interface do inventário como o `<interface>` equivalente."""
+    mac = (
+        "<mac address='%s'/>" % item["mac"] if item["mac"] else ""
+    )
+    if item["source_type"] == "network":
+        corpo = "<source network='%s'/>" % item["source"]
+        tipo = "network"
+    elif item["source_type"] == "bridge":
+        corpo = "<source bridge='%s'/>" % item["source"]
+        tipo = "bridge"
+    elif item["source_type"] == "direct":
+        corpo = "<source dev='%s' mode='bridge'/>" % item["source"]
+        tipo = "direct"
+    else:
+        corpo = ""
+        tipo = "user"
+    return "<interface type='%s'>%s%s<model type='virtio'/></interface>" % (
+        tipo,
+        mac,
+        corpo,
+    )
+
+
+def xml_dominio(item: Mapping) -> str:
+    """XML do domínio do inventário, para conferir a paridade com o Bash."""
+    return fx.domain(
+        interfaces="".join(nic_xml(nic_item) for nic_item in item["interfaces"])
+    ).replace("fixture-win11", item["name"])

@@ -18,8 +18,11 @@ plano descreve um artefato `{escopo, identificador, conteúdo, modo}` e
 parâmetros declarativos de perfil, nunca uma ferramenta, um caminho ou um
 comando. Nenhum YAML é interpretado aqui e nenhum parser de YAML nasce aqui.
 
-Descoberta de consumidores e execução transacional pertencem, respectivamente,
-às subetapas I7.4 e I7.6.
+I7.4 acrescentou a detecção de consumidores por MAC, cardinalidade e marcador
+sobre o inventário de domínios que o Bash captura, mais as duas evidências que
+faltavam ao snapshot para fechar precondições abertas em I7.3: se o link é
+estação sem fio e quais redes libvirt de terceiros existem (nome, marcador,
+bridge por estado). A execução transacional pertence a I7.6.
 """
 from __future__ import annotations
 
@@ -43,9 +46,14 @@ STATE_FIELDS = (
     "links",
     "bridge",
     "libvirt_network",
+    "foreign_networks",
     "consumers",
     "configuration",
 )
+# I7.4: interface de inventário bruto pode não ter fonte compartilhada alguma
+# (`type='user'`, `type='vhostuser'`, NIC de hostdev). Ela é representada com
+# `source_type` explícito em vez de fonte vazia adivinhada.
+INVENTORY_SOURCE_TYPES = frozenset(SOURCE_TYPES | {"other"})
 MAX_TEXT_BYTES = 4 * 1024 * 1024
 MAX_ROUTES = 4096
 MAX_LINKS = 4096
@@ -53,6 +61,9 @@ MAX_CONSUMERS = 1024
 MAX_CONFIGURATIONS = 128
 MAX_INTERFACES_PER_VM = 64
 MAX_LIST_ITEMS = 4096
+# I7.4: `virsh net-list --all` de um host real tem dezenas de entradas; o teto
+# existe só para impedir payload absurdo, como os demais desta seção.
+MAX_NETWORKS = 256
 # I7.2: alinhado a `nome_interface_valido` (lib/common.sh:1823), que aceita `_`
 # como primeiro caractere. Sem o `_` inicial um nome legítimo para o Bash
 # viraria DataError quando I7.5 ligar o snapshot real. O conjunto continua
@@ -357,6 +368,7 @@ def _normalize_link(value: Any, index: int) -> dict:
         "mtu",
         "flags",
         "addresses",
+        "wireless",
     }
     payload = _closed(value, fields, label)
     name = _interface_name(_text(payload, "name", label), "%s.name" % label)
@@ -379,6 +391,12 @@ def _normalize_link(value: Any, index: int) -> dict:
         "mtu": _integer(payload, "mtu", label),
         "name": name,
         "operstate": _text(payload, "operstate", label),
+        # I7.4: evidência de `interface_wifi` (`lib/common.sh:2243`), que testa
+        # a existência de `/sys/class/net/NOME/wireless`. O Python nunca sonda
+        # `/sys`: quem captura é o Bash, e o campo é obrigatório para que um
+        # captor que esqueça a evidência falhe alto em vez de aprovar bridge
+        # sobre Wi-Fi por omissão.
+        "wireless": _boolean(payload, "wireless", label),
     }
 
 
@@ -481,6 +499,70 @@ def _normalize_libvirt_network(value: Any) -> dict:
         "persistent": persistent,
         "persistent_xml": persistent_xml,
     }
+
+
+def _normalize_network_record(value: Any, index: int, prefix: str) -> dict:
+    """Uma rede libvirt vizinha, como `validar_bridge_libvirt_disponivel` a vê.
+
+    O Bash (`etapas/60-rede-bridge.sh:1357-1379`) percorre `virsh net-list
+    --all --name`, consulta ativa/persistente e captura o XML de CADA estado,
+    porque `net-edit` pode deixar a bridge persistente diferente da ativa. Por
+    isso a bridge aqui é declarada POR ESTADO, e a recusa consegue nomear o
+    estado exatamente como a mensagem histórica faz.
+    """
+    label = "%s[%d]" % (prefix, index)
+    fields = {
+        "active",
+        "active_bridge",
+        "marker",
+        "name",
+        "persistent",
+        "persistent_bridge",
+    }
+    payload = _closed(value, fields, label)
+    name = _entity_name(_text(payload, "name", label), "%s.name" % label)
+    active = _boolean(payload, "active", label)
+    persistent = _boolean(payload, "persistent", label)
+    if not active and not persistent:
+        raise DataError(
+            "%s não está ativa nem persistente; a rede não existiria." % label
+        )
+    bridges: dict[str, str] = {}
+    for key, present in (("active_bridge", active), ("persistent_bridge", persistent)):
+        bridge = _text(payload, key, label, allow_empty=True)
+        if bridge:
+            if not present:
+                raise DataError(
+                    "%s.%s exige o estado correspondente." % (label, key)
+                )
+            bridge = _interface_name(bridge, "%s.%s" % (label, key))
+        bridges[key] = bridge
+    return {
+        "active": active,
+        "active_bridge": bridges["active_bridge"],
+        "marker": _text(payload, "marker", label, allow_empty=True),
+        "name": name,
+        "persistent": persistent,
+        "persistent_bridge": bridges["persistent_bridge"],
+    }
+
+
+def _normalize_network_records(value: Any, prefix: str) -> list[dict]:
+    records = [
+        _normalize_network_record(item, index, prefix)
+        for index, item in enumerate(_list(value, prefix, MAX_NETWORKS))
+    ]
+    names = [item["name"] for item in records]
+    if len(names) != len(set(names)):
+        raise DataError("%s contém nomes de rede duplicados." % prefix)
+    return sorted(records, key=lambda item: item["name"])
+
+
+def _record_bridges(record: Mapping[str, Any]) -> list[str]:
+    """Bridges declaradas pela rede, sem repetição e em ordem canônica."""
+    return sorted(
+        {record["active_bridge"], record["persistent_bridge"]} - {""}
+    )
 
 
 def _normalize_vm_interface(value: Any, vm_index: int, index: int) -> dict:
@@ -687,10 +769,24 @@ def _validate_relations(state: Mapping[str, Any]) -> None:
         raise DataError("bridge ausente colide com um link existente.")
 
     network = state["libvirt_network"]
+    # I7.4: `foreign_networks` são as OUTRAS redes libvirt do host. A rede
+    # gerenciada nunca aparece nas duas listas, exatamente como o laço do Bash
+    # pula `$REDE_LIBVIRT` (`etapas/60-rede-bridge.sh:1360`).
+    foreign = {item["name"] for item in state["foreign_networks"]}
+    if network["name"] in foreign:
+        raise DataError(
+            "foreign_networks repete a rede gerenciada: %s."
+            % safe_label(network["name"])
+        )
     for consumer in state["consumers"]:
         for interface in consumer["interfaces"]:
             if interface["source_type"] == "network":
-                if not network["exists"] or interface["source"] != network["name"]:
+                # Consumidor de rede de terceiros é REPRESENTÁVEL: o Bash lista
+                # todas as VMs do host, e uma delas pode estar presa a uma rede
+                # que não é a gerenciada. A validação continua onde é legítima:
+                # a fonte precisa ser uma rede que o snapshot conhece.
+                managed = network["exists"] and interface["source"] == network["name"]
+                if not managed and interface["source"] not in foreign:
                     raise DataError(
                         "VM consumidora referencia rede libvirt fora do snapshot."
                     )
@@ -710,6 +806,9 @@ def _normalize_state(payload: Mapping[str, Any]) -> dict:
         "bridge": _normalize_bridge(payload["bridge"]),
         "configuration": _normalize_configurations(payload["configuration"]),
         "consumers": _normalize_consumers(payload["consumers"]),
+        "foreign_networks": _normalize_network_records(
+            payload["foreign_networks"], "foreign_networks"
+        ),
         "libvirt_network": _normalize_libvirt_network(payload["libvirt_network"]),
         "links": _normalize_links(payload["links"]),
         "routes": _normalize_routes(payload["routes"]),
@@ -1196,6 +1295,486 @@ def route_audit(payload: Mapping[str, Any]) -> dict:
     return result
 
 
+# --- I7.4: consumidores por MAC, cardinalidade e marcador --------------------
+# O Bash captura o inventário (`virsh list --all --name`, `dumpxml`, `virsh
+# net-list`) e passa os fatos; aqui só há classificação determinística. Duas
+# perguntas DIFERENTES da etapa 19 continuam separadas de propósito:
+#
+# * `listar_consumidores_rede_gerenciada` (`etapas/60-rede-bridge.sh:921`) olha
+#   TODAS as VMs do `--all` e bloqueia a conversão NAT -> bridge;
+# * `rede_nat_usada_por_outra_vm_ativa` (`etapas/60-rede-bridge.sh:1383`) olha
+#   só as ATIVAS e bloqueia o restart da rede NAT.
+#
+# Unificar a detecção não pode unificar a decisão: o relatório publica os dois
+# conjuntos, e é o chamador que escolhe qual usar.
+
+CONSUMER_SCHEMA_VERSION = 1
+# Como UMA interface consome o recurso gerenciado. Toda classe é explícita;
+# ausência de classe é string vazia, nunca um default implícito.
+CONSUMER_MATCH_KINDS = (
+    "bridge",  # <source bridge='...'> em uma das bridges candidatas
+    "direct",  # macvtap <source dev='...'> sobre uma bridge candidata
+    "marker",  # outra rede libvirt com o marcador exato, ou a bridge dela
+    "network",  # a rede gerenciada, pelo nome, com o marcador confirmado
+    "unknown-network",  # homônima que o inventário não conhece (fail-closed)
+    "unmanaged-network",  # homônima SEM o marcador: não é nossa
+)
+# Consumo do recurso QUE ESTE PROJETO GERENCIA. `unmanaged-network` fica fora
+# de propósito: rede homônima sem o marcador não é nossa e destruí-la nunca
+# esteve em questão.
+CONSUMER_OWNED_KINDS = frozenset(
+    {"bridge", "direct", "marker", "network", "unknown-network"}
+)
+# Paridade exata com `CONSU_CONSUMER_COUNT` (`domain_xml.interface_state`), que
+# conta `source/@network == network_name` mais `source/@bridge in bridge_names`,
+# sem consultar marcador algum e sem olhar `source/@dev`.
+CONSUMER_PARITY_KINDS = frozenset(
+    {"bridge", "network", "unknown-network", "unmanaged-network"}
+)
+CONSUMER_ANOMALIES = (
+    "domain-without-interface",
+    "mac-missing",
+    "mac-repeated",
+    "mac-shared",
+    "network-unknown",
+)
+
+
+def _normalize_inventory_interface(value: Any, domain_index: int, index: int) -> dict:
+    label = "domains[%d].interfaces[%d]" % (domain_index, index)
+    payload = _closed(value, {"mac", "source_type", "source"}, label)
+    source_type = _text(payload, "source_type", label)
+    if source_type not in INVENTORY_SOURCE_TYPES:
+        raise DataError("%s.source_type não é suportado." % label)
+    source = _text(payload, "source", label, allow_empty=True)
+    if source_type == "other":
+        if source:
+            raise DataError(
+                "%s sem fonte compartilhada não pode declarar source." % label
+            )
+    elif not source:
+        raise DataError("%s.source precisa ser texto não vazio." % label)
+    elif source_type in {"bridge", "direct"}:
+        source = _interface_name(source, "%s.source" % label)
+    else:
+        source = _entity_name(source, "%s.source" % label)
+    return {
+        # MAC vazio é ESTADO TIPADO: `<interface>` sem `<mac address=...>` é
+        # legal no XML inativo e o libvirt sorteia um no start. A identidade da
+        # NIC não existe nesse caso, e o relatório diz isso em vez de inventar.
+        "mac": _mac(
+            _text(payload, "mac", label, allow_empty=True),
+            "%s.mac" % label,
+            allow_empty=True,
+        ),
+        "source": source,
+        "source_type": source_type,
+    }
+
+
+def _normalize_inventory_domain(value: Any, index: int) -> dict:
+    label = "domains[%d]" % index
+    payload = _closed(value, {"name", "active", "defined", "interfaces"}, label)
+    name = _entity_name(_text(payload, "name", label), "%s.name" % label)
+    active = _boolean(payload, "active", label)
+    defined = _boolean(payload, "defined", label)
+    if not active and not defined:
+        raise DataError(
+            "%s não está ativo nem definido; o domínio não seria listado." % label
+        )
+    interfaces = [
+        _normalize_inventory_interface(item, index, interface_index)
+        for interface_index, item in enumerate(
+            _list(payload["interfaces"], "%s.interfaces" % label, MAX_INTERFACES_PER_VM)
+        )
+    ]
+    return {
+        "active": active,
+        "defined": defined,
+        # Domínio SEM NIC é representável e vira anomalia tipada no relatório:
+        # ele existe no `--all` e simplesmente não consome rede alguma.
+        "interfaces": sorted(interfaces, key=_canonical),
+        "name": name,
+    }
+
+
+def normalize_consumer_request(value: Any) -> dict:
+    """Valida o inventário fechado de domínios e redes já capturado pelo Bash."""
+    fields = {
+        "bridges",
+        "domains",
+        "marker",
+        "network_name",
+        "networks",
+        "schema_version",
+        "target",
+    }
+    payload = _closed(value, fields, "consumers")
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != CONSUMER_SCHEMA_VERSION
+    ):
+        raise DataError("Versão do schema de consumidores não suportada.")
+    target = _text(payload, "target", "consumers", allow_empty=True)
+    if target:
+        target = _entity_name(target, "consumers.target")
+    domains = [
+        _normalize_inventory_domain(item, index)
+        for index, item in enumerate(
+            _list(payload["domains"], "consumers.domains", MAX_CONSUMERS)
+        )
+    ]
+    names = [item["name"] for item in domains]
+    if len(names) != len(set(names)):
+        raise DataError("consumers.domains contém domínios duplicados.")
+    return {
+        "bridges": _normalized_text_list(
+            payload["bridges"], "consumers.bridges", interface_names=True
+        ),
+        "domains": sorted(domains, key=lambda item: item["name"]),
+        # Marcador vazio tornaria "sem marcador" indistinguível de "nosso"; a
+        # etapa sempre tem `REDE_MARCADOR` (`etapas/60-rede-bridge.sh:22`).
+        "marker": _text(payload, "marker", "consumers"),
+        "network_name": _entity_name(
+            _text(payload, "network_name", "consumers"), "consumers.network_name"
+        ),
+        "networks": _normalize_network_records(
+            payload["networks"], "consumers.networks"
+        ),
+        "schema_version": CONSUMER_SCHEMA_VERSION,
+        "target": target,
+    }
+
+
+def _consumer_context(
+    *,
+    marker: str,
+    network_name: str,
+    network_known: bool,
+    network_owned: bool,
+    bridges: Iterable[str],
+    networks: Iterable[Mapping[str, Any]],
+) -> dict:
+    """Fecha o vocabulário usado para classificar cada interface.
+
+    `network_owned` chega pronto porque a propriedade da rede gerenciada é
+    provada de formas diferentes conforme o chamador: o planner já a derivou do
+    XML por `network_xml.inspect_network`, e o subcomando a deriva do marcador
+    capturado. Em ambos a comparação é de IGUALDADE EXATA, nunca prefixo.
+    """
+    marker_networks = {
+        item["name"]
+        for item in networks
+        if item["name"] != network_name and item["marker"] == marker
+    }
+    marker_bridges: set[str] = set()
+    for item in networks:
+        if item["name"] in marker_networks:
+            marker_bridges.update(_record_bridges(item))
+    known = {item["name"] for item in networks}
+    if network_known:
+        known.add(network_name)
+    return {
+        "bridges": frozenset(bridges),
+        "known_networks": frozenset(known),
+        "marker_bridges": frozenset(marker_bridges),
+        "marker_networks": frozenset(marker_networks),
+        "network_known": bool(network_known),
+        "network_name": network_name,
+        "network_owned": bool(network_owned),
+    }
+
+
+def _classify_interface(
+    interface: Mapping[str, Any], context: Mapping[str, Any]
+) -> str:
+    """Classe de consumo de UMA interface; string vazia quando não consome."""
+    source_type = interface["source_type"]
+    source = interface["source"]
+    if source_type == "network":
+        if source == context["network_name"]:
+            if not context["network_known"]:
+                return "unknown-network"
+            return "network" if context["network_owned"] else "unmanaged-network"
+        if source in context["marker_networks"]:
+            return "marker"
+        return ""
+    if source_type in {"bridge", "direct"}:
+        if source in context["bridges"]:
+            return "bridge" if source_type == "bridge" else "direct"
+        if source in context["marker_bridges"]:
+            return "marker"
+    return ""
+
+
+def _anomaly(kind: str, subject: str, detail: str) -> dict:
+    if kind not in CONSUMER_ANOMALIES:
+        raise InternalError("Anomalia de consumidor fora do vocabulário.")
+    return {"detail": detail, "kind": kind, "subject": subject}
+
+
+def _consumer_records(
+    domains: Iterable[Mapping[str, Any]],
+    target: str,
+    context: Mapping[str, Any],
+) -> dict:
+    """Classifica o inventário inteiro em consumidores, MACs e anomalias."""
+    consumers: list[dict] = []
+    anomalies: list[dict] = []
+    macs: dict[str, dict] = {}
+    kind_totals = {kind: 0 for kind in CONSUMER_MATCH_KINDS}
+    interface_total = 0
+    target_seen = False
+    target_interfaces = 0
+    target_matches = 0
+    target_parity = 0
+
+    for domain in domains:
+        name = domain["name"]
+        # A VM alvo é identificada pelo NOME, nunca pelo MAC: o oráculo I0
+        # semeia `other-vm` como cópia de `vm.xml` (tests/lib/mutator-harness.
+        # sh:497-508), então alvo e consumidor compartilham o MESMO MAC. Excluir
+        # por MAC apagaria o consumidor que a etapa precisa recusar.
+        is_target = bool(target) and name == target
+        target_seen = target_seen or is_target
+        interfaces = domain["interfaces"]
+        interface_total += len(interfaces)
+        if not interfaces:
+            anomalies.append(_anomaly("domain-without-interface", name, ""))
+        matched: list[dict] = []
+        kinds: set[str] = set()
+        parity = 0
+        for interface in interfaces:
+            kind = _classify_interface(interface, context)
+            owned = kind in CONSUMER_OWNED_KINDS
+            if (
+                interface["source_type"] == "network"
+                and interface["source"] not in context["known_networks"]
+            ):
+                anomalies.append(
+                    _anomaly("network-unknown", name, interface["source"])
+                )
+            if interface["mac"]:
+                record = macs.setdefault(
+                    interface["mac"],
+                    {
+                        "domains": set(),
+                        "interface_count": 0,
+                        "mac": interface["mac"],
+                        "match_count": 0,
+                        "match_domains": set(),
+                    },
+                )
+                record["domains"].add(name)
+                record["interface_count"] += 1
+                if owned and not is_target:
+                    record["match_count"] += 1
+                    record["match_domains"].add(name)
+            else:
+                anomalies.append(_anomaly("mac-missing", name, interface["source"]))
+            if kind:
+                # `match_kinds` guarda TODA classe encontrada, inclusive a que
+                # não é nossa: é ela que explica por que a VM aparece na lista
+                # sem bloquear nada.
+                kinds.add(kind)
+                if not is_target:
+                    kind_totals[kind] += 1
+            if kind in CONSUMER_PARITY_KINDS:
+                parity += 1
+            if owned:
+                matched.append(interface)
+        if is_target:
+            target_interfaces = len(interfaces)
+            target_matches = len(matched)
+            target_parity = parity
+            continue
+        if not matched and not parity:
+            continue
+        consumers.append(
+            {
+                "active": 1 if domain["active"] else 0,
+                "defined": 1 if domain["defined"] else 0,
+                "interface_count": len(interfaces),
+                "macs": sorted(item["mac"] for item in matched),
+                "match_count": len(matched),
+                "match_kinds": sorted(kinds),
+                "name": name,
+                "parity_count": parity,
+                # Domínio ativo e não persistente: some no próximo desligamento,
+                # mas aparece no `--all` e bloqueia igual.
+                "transient": 1 if domain["active"] and not domain["defined"] else 0,
+            }
+        )
+
+    for mac, record in macs.items():
+        if len(record["domains"]) > 1:
+            anomalies.append(
+                _anomaly("mac-shared", mac, ",".join(sorted(record["domains"])))
+            )
+        if record["interface_count"] > len(record["domains"]):
+            anomalies.append(
+                _anomaly("mac-repeated", mac, ",".join(sorted(record["domains"])))
+            )
+
+    mac_records = [
+        {
+            "domain_count": len(record["domains"]),
+            "domains": sorted(record["domains"]),
+            "interface_count": record["interface_count"],
+            "mac": record["mac"],
+            "match_count": record["match_count"],
+            "match_domain_count": len(record["match_domains"]),
+            "shared": 1 if len(record["domains"]) > 1 else 0,
+        }
+        for record in macs.values()
+    ]
+    return {
+        "anomalies": sorted(
+            anomalies, key=lambda item: (item["kind"], item["subject"], item["detail"])
+        ),
+        "consumers": sorted(consumers, key=lambda item: item["name"]),
+        "interface_total": interface_total,
+        "kind_totals": kind_totals,
+        "macs": sorted(mac_records, key=lambda item: item["mac"]),
+        "target_interfaces": target_interfaces,
+        "target_matches": target_matches,
+        "target_parity": target_parity,
+        "target_seen": target_seen,
+    }
+
+
+def _consumer_summary(records: Mapping[str, Any], domain_count: int) -> dict:
+    consumers = records["consumers"]
+    owned = [item for item in consumers if item["match_count"]]
+    active = [item for item in owned if item["active"]]
+    kinds = records["kind_totals"]
+    counted = {kind: kinds[kind] for kind in CONSUMER_OWNED_KINDS}
+    anomaly_totals = {kind: 0 for kind in CONSUMER_ANOMALIES}
+    for item in records["anomalies"]:
+        anomaly_totals[item["kind"]] += 1
+    return {
+        "active_consumer_count": len(active),
+        "active_consumer_names": [item["name"] for item in active],
+        "anomaly_count": len(records["anomalies"]),
+        "consumer_interface_count": sum(item["match_count"] for item in owned),
+        "consumer_mac_count": sum(
+            1 for item in records["macs"] if item["match_count"]
+        ),
+        # "Definida" tem aqui o mesmo alcance que em `virsh list --all`: toda VM
+        # do inventário, inclusive a transitória que está ligada. É esse o
+        # conjunto que recusa a conversão NAT -> bridge.
+        "defined_consumer_count": len(owned),
+        "defined_consumer_names": [item["name"] for item in owned],
+        "direct_match_count": counted["direct"],
+        "domain_count": domain_count,
+        "domain_without_interface_count": anomaly_totals["domain-without-interface"],
+        "interface_count": records["interface_total"],
+        "mac_missing_count": anomaly_totals["mac-missing"],
+        "mac_repeated_count": anomaly_totals["mac-repeated"],
+        "mac_shared_count": anomaly_totals["mac-shared"],
+        "marker_match_count": counted["marker"],
+        "network_match_count": counted["network"],
+        "network_unknown_count": anomaly_totals["network-unknown"],
+        # Paridade byte a byte com a soma de `CONSU_CONSUMER_COUNT` sobre as
+        # mesmas VMs; a divergência deliberada está nos campos `direct_*`,
+        # `marker_*` e `unmanaged_*`.
+        "parity_consumer_count": sum(item["parity_count"] for item in consumers),
+        "parity_target_count": records["target_parity"],
+        "target_interface_count": records["target_interfaces"],
+        "target_match_count": records["target_matches"],
+        "target_present": 1 if records["target_seen"] else 0,
+        "transient_consumer_count": sum(item["transient"] for item in owned),
+        "unknown_network_match_count": counted["unknown-network"],
+        "unmanaged_match_count": kinds["unmanaged-network"],
+    }
+
+
+def consumer_report(payload: Mapping[str, Any]) -> dict:
+    """Detecta consumidores da rede gerenciada por MAC, bridge e marcador.
+
+    Devolve documento fechado e ordenado: quem consome, com quantas NICs, com
+    quais MACs, por qual caminho, e o que ficou anômalo. Nenhuma decisão é
+    tomada aqui — a etapa continua escolhendo entre o conjunto "definido" e o
+    conjunto "ativo", que saem separados de propósito.
+    """
+    request = normalize_consumer_request(payload)
+    networks = request["networks"]
+    marker = request["marker"]
+    name = request["network_name"]
+    managed = next((item for item in networks if item["name"] == name), None)
+    context = _consumer_context(
+        marker=marker,
+        network_name=name,
+        network_known=managed is not None,
+        network_owned=managed is not None and managed["marker"] == marker,
+        bridges=request["bridges"],
+        networks=networks,
+    )
+    records = _consumer_records(request["domains"], request["target"], context)
+    return {
+        "anomalies": records["anomalies"],
+        "bridges": sorted(context["bridges"]),
+        "consumers": records["consumers"],
+        "macs": records["macs"],
+        "marker_bridges": sorted(context["marker_bridges"]),
+        "marker_networks": sorted(context["marker_networks"]),
+        "network_known": 1 if context["network_known"] else 0,
+        "network_name": name,
+        "network_owned": 1 if context["network_owned"] else 0,
+        "schema_version": CONSUMER_SCHEMA_VERSION,
+        "summary": _consumer_summary(records, len(request["domains"])),
+        "target": request["target"],
+    }
+
+
+def network_consumers(payload: Mapping[str, Any]) -> dict:
+    """Projeta o relatório no canal escalar da ponte, como `network-plan`."""
+    report = consumer_report(payload)
+    summary = report["summary"]
+    data: dict[str, Any] = {
+        "network_known": report["network_known"],
+        "network_name": report["network_name"],
+        "network_owned": report["network_owned"],
+        "report_sha256": _digest(report),
+        "schema_version": report["schema_version"],
+        "target": report["target"],
+    }
+    data.update(summary)
+    data["active_consumer_names"] = "\n".join(summary["active_consumer_names"])
+    data["defined_consumer_names"] = "\n".join(summary["defined_consumer_names"])
+    data["bridges"] = "\n".join(report["bridges"])
+    data["marker_bridges"] = "\n".join(report["marker_bridges"])
+    data["marker_networks"] = "\n".join(report["marker_networks"])
+    data["consumer_count"] = len(report["consumers"])
+    data["mac_count"] = len(report["macs"])
+    for index, consumer in enumerate(report["consumers"]):
+        prefix = "consumer_%d_" % index
+        data[prefix + "active"] = consumer["active"]
+        data[prefix + "defined"] = consumer["defined"]
+        data[prefix + "interface_count"] = consumer["interface_count"]
+        data[prefix + "macs"] = "\n".join(consumer["macs"])
+        data[prefix + "match_count"] = consumer["match_count"]
+        data[prefix + "match_kinds"] = "\n".join(consumer["match_kinds"])
+        data[prefix + "name"] = consumer["name"]
+        data[prefix + "parity_count"] = consumer["parity_count"]
+        data[prefix + "transient"] = consumer["transient"]
+    for index, record in enumerate(report["macs"]):
+        prefix = "mac_%d_" % index
+        data[prefix + "domain_count"] = record["domain_count"]
+        data[prefix + "domains"] = "\n".join(record["domains"])
+        data[prefix + "interface_count"] = record["interface_count"]
+        data[prefix + "mac"] = record["mac"]
+        data[prefix + "match_count"] = record["match_count"]
+        data[prefix + "match_domain_count"] = record["match_domain_count"]
+        data[prefix + "shared"] = record["shared"]
+    for index, anomaly in enumerate(report["anomalies"]):
+        prefix = "anomaly_%d_" % index
+        data[prefix + "detail"] = anomaly["detail"]
+        data[prefix + "kind"] = anomaly["kind"]
+        data[prefix + "subject"] = anomaly["subject"]
+    return data
+
+
 # --- I7.3 e I7.7: plano determinístico, abstrato e backend-neutral -----------
 # Nada abaixo produz comando, caminho de binário, nome de ferramenta ou
 # fragmento de linha de comando. Uma operação do plano é VERBO + ALVO +
@@ -1578,10 +2157,13 @@ def _plan_facts(request: Mapping[str, Any]) -> dict:
     uplink = intent["uplink"]["name"]
     current = snapshot["libvirt_network"]
     facts: dict[str, Any] = {
+        "foreign_networks": snapshot["foreign_networks"],
         "host_bridge": intent["bridge"]["name"],
         "links": links,
+        "marker": settings["marker"],
         "mode": mode,
         "nat_bridge": settings["nat_bridge"],
+        "network_exists": current["exists"],
         "network_name": intent["libvirt_network"]["name"],
         "uplink": uplink,
     }
@@ -1607,7 +2189,9 @@ def _plan_facts(request: Mapping[str, Any]) -> dict:
         item for item in snapshot["consumers"] if item["name"] != target["name"]
     ]
     facts["consumers_other"] = others
-    facts["consumers_active"] = [item for item in others if item["active"]]
+    # I7.4: a separação definida/ativa saiu daqui e passou a vir do relatório,
+    # que classifica cada NIC antes de contar VM alguma.
+    facts["consumer_summary"] = _consumer_facts(facts)
 
     if mode == "nat":
         addresses = nat_addresses({"cidr": settings["nat_cidr"]})
@@ -1759,30 +2343,61 @@ def _precondition(
     }
 
 
-def _network_consumers(facts: Mapping[str, Any]) -> list[str]:
-    """VMs, além da alvo, presas à rede gerenciada ou às bridges dela.
+def _foreign_bridge_owner(facts: Mapping[str, Any]) -> str:
+    """Rede de terceiros que já declara a bridge pretendida, com o estado.
+
+    Espelha o laço de `validar_bridge_libvirt_disponivel`
+    (`etapas/60-rede-bridge.sh:1357-1379`), que percorre as OUTRAS redes
+    libvirt e recusa nomeando o estado do XML onde a bridge apareceu. A ordem é
+    canônica: redes por nome e, dentro de cada uma, ativo antes de persistente,
+    como o Bash monta `estados_xml`.
+    """
+    bridge = facts["nat_bridge"]
+    for record in facts["foreign_networks"]:
+        for state, key in (
+            ("active", "active_bridge"),
+            ("persistent", "persistent_bridge"),
+        ):
+            if record[key] == bridge:
+                return "%s:%s" % (record["name"], state)
+    return ""
+
+
+def _consumer_facts(facts: Mapping[str, Any]) -> dict:
+    """Relatório de consumidores (I7.4) sobre o snapshot já normalizado.
 
     Mesma pergunta de `listar_consumidores_rede_gerenciada`
     (`etapas/60-rede-bridge.sh:921`) e de `rede_nat_usada_por_outra_vm_ativa`
     (`etapas/60-rede-bridge.sh:1383`): consumo por nome de rede ou por uma das
-    duas bridges (a atual da rede e a pretendida).
+    duas bridges (a atual da rede e a pretendida). A diferença entre as duas é
+    o CONJUNTO, não a detecção, e é por isso que o relatório publica os dois.
+
+    `consumers[]` do snapshot é, por construção do Bash, a listagem `virsh list
+    --all --name` sem a VM alvo: estar na lista já é o bucket "definida". O
+    bucket "ativa" sai do campo `active` de cada VM.
     """
     bridges = {facts["nat_bridge"]}
     if facts["current_bridge"]:
         bridges.add(facts["current_bridge"])
-    names: list[str] = []
-    for consumer in facts["consumers_other"]:
-        for interface in consumer["interfaces"]:
-            if (
-                interface["source_type"] == "network"
-                and interface["source"] == facts["network_name"]
-            ) or (
-                interface["source_type"] in ("bridge", "direct")
-                and interface["source"] in bridges
-            ):
-                names.append(consumer["name"])
-                break
-    return sorted(names)
+    context = _consumer_context(
+        marker=facts["marker"],
+        network_name=facts["network_name"],
+        network_known=facts["network_exists"],
+        network_owned=facts["owned"],
+        bridges=bridges,
+        networks=facts["foreign_networks"],
+    )
+    domains = [
+        {
+            "active": consumer["active"],
+            "defined": True,
+            "interfaces": consumer["interfaces"],
+            "name": consumer["name"],
+        }
+        for consumer in facts["consumers_other"]
+    ]
+    records = _consumer_records(domains, "", context)
+    return _consumer_summary(records, len(domains))
 
 
 def _plan_preconditions(
@@ -1913,12 +2528,13 @@ def _plan_preconditions(
                 or (facts["owned"] and facts["current_bridge"] == facts["nat_bridge"]),
             )
         )
-        blocking = _network_consumers(facts) if facts["needs_restart"] else []
-        blocking = [
-            name
-            for name in blocking
-            if name in {item["name"] for item in facts["consumers_active"]}
-        ]
+        # Só o conjunto ATIVO bloqueia o restart, como
+        # `rede_nat_usada_por_outra_vm_ativa` (`etapas/60-rede-bridge.sh:1383`).
+        blocking = (
+            list(facts["consumer_summary"]["active_consumer_names"])
+            if facts["needs_restart"]
+            else []
+        )
         checks.append(
             _precondition(
                 "P-NETWORK-CONSUMERS-ABSENT",
@@ -1927,6 +2543,17 @@ def _plan_preconditions(
                 facts["network_name"],
                 not blocking,
                 detail=",".join(blocking),
+            )
+        )
+        owner = _foreign_bridge_owner(facts)
+        checks.append(
+            _precondition(
+                "P-LIBVIRT-BRIDGE-UNIQUE",
+                "no_other_libvirt_network_declares_the_intended_bridge",
+                "snapshot.foreign_networks",
+                facts["nat_bridge"],
+                not owner,
+                detail=owner,
             )
         )
         audit = facts["route_audit"]
@@ -1941,8 +2568,10 @@ def _plan_preconditions(
             )
         )
     else:
+        # Aqui o conjunto é o DEFINIDO (`virsh list --all`), ativo ou não, como
+        # `listar_consumidores_rede_gerenciada` (`etapas/60-rede-bridge.sh:921`).
         blocking = (
-            _network_consumers(facts)
+            list(facts["consumer_summary"]["defined_consumer_names"])
             if network["exists"] and facts["owned"]
             else []
         )
@@ -1954,6 +2583,21 @@ def _plan_preconditions(
                 facts["network_name"],
                 not blocking,
                 detail=",".join(blocking),
+            )
+        )
+        wireless = facts["uplink"] in links and links[facts["uplink"]]["wireless"]
+        checks.append(
+            _precondition(
+                "P-UPLINK-NOT-WIRELESS",
+                "intended_uplink_is_not_a_wireless_station",
+                "snapshot.links[uplink].wireless",
+                facts["uplink"],
+                facts["uplink"] in links and not wireless,
+                detail=(
+                    "wireless"
+                    if wireless
+                    else ("" if facts["uplink"] in links else "absent")
+                ),
             )
         )
         desired = facts["profile_desired"]

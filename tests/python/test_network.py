@@ -10,15 +10,18 @@ import ipaddress
 import json
 import unittest
 
-from passthrough_core import network
+from passthrough_core import domain_xml, network
 from passthrough_core.errors import DataError
 
 import fixtures_i3 as fx
 from fixtures_i7 import (
+    BRIDGE_TERCEIRO,
     CONF_ARQUIVO,
     CONF_TEXTO,
     EFEITOS_BRIDGE,
     EFEITOS_NAT,
+    OUTRA_VM,
+    OUTRO_MAC,
     PERFIL_ARQUIVO,
     PERFIL_TEXTO,
     PLANO_BRIDGE,
@@ -30,6 +33,7 @@ from fixtures_i7 import (
     PLANO_PERFIL,
     PLANO_REDE,
     PLANO_UPLINK,
+    REDE_TERCEIRO,
     ROLLBACK_BRIDGE,
     ROLLBACK_NAT,
     TOKENS_DE_FERRAMENTA,
@@ -37,16 +41,22 @@ from fixtures_i7 import (
     XML_NAT,
     ajustes,
     alvo,
+    dominio,
     efeitos,
     efeitos_rollback,
     intencao_bridge,
     intencao_nat,
+    inventario,
+    nic,
     pedido_bridge,
     pedido_nat,
     precondicao,
     rede_gerenciada,
+    rede_gerenciada_registro,
+    registro_rede,
     snapshot_plano,
     textos,
+    xml_dominio,
 )
 
 REDE = "vm-passthrough-nat"
@@ -100,6 +110,7 @@ def link(
     mtu: int = 1500,
     flags=None,
     addresses=None,
+    wireless: bool = False,
 ) -> dict:
     return {
         "addresses": list(addresses or []),
@@ -110,6 +121,7 @@ def link(
         "mtu": mtu,
         "name": nome,
         "operstate": operstate,
+        "wireless": wireless,
     }
 
 
@@ -173,6 +185,7 @@ def snapshot(**overrides) -> dict:
         "bridge": {"exists": True, "name": "br0", "ports": ["enp3s0"]},
         "configuration": [artefato()],
         "consumers": [consumidor()],
+        "foreign_networks": [],
         "libvirt_network": rede_libvirt(),
         "links": [
             link("enp3s0", mac=UPLINK_MAC, master="br0"),
@@ -2318,6 +2331,911 @@ class PlanDeterminismTests(unittest.TestCase):
         )
         self.assertEqual(dados["operation_count"], 10)
         self.assertEqual(dados["rollback_count"], 4)
+
+
+class ConsumerSchemaTests(unittest.TestCase):
+    """Schema fechado do inventário de domínios e redes (I7.4)."""
+
+    def test_normalizacao_e_canonica(self) -> None:
+        pedido = inventario(
+            domains=[dominio(OUTRA_VM), dominio(VM)],
+            networks=[
+                registro_rede(REDE_TERCEIRO, active_bridge=BRIDGE_TERCEIRO),
+                rede_gerenciada_registro(),
+            ],
+        )
+        normalizado = network.normalize_consumer_request(pedido)
+        self.assertEqual(
+            [item["name"] for item in normalizado["domains"]], [VM, OUTRA_VM]
+        )
+        self.assertEqual(
+            [item["name"] for item in normalizado["networks"]],
+            [REDE_TERCEIRO, PLANO_REDE],
+        )
+        self.assertEqual(sorted(normalizado), [
+            "bridges",
+            "domains",
+            "marker",
+            "network_name",
+            "networks",
+            "schema_version",
+            "target",
+        ])
+
+    def test_campo_extra_recusado(self) -> None:
+        pedido = inventario()
+        pedido["extra"] = 1
+        with self.assertRaises(DataError):
+            network.consumer_report(pedido)
+
+    def test_versao_de_schema(self) -> None:
+        for valor in (0, 2, "1", True, None):
+            with self.subTest(valor=valor):
+                with self.assertRaises(DataError):
+                    network.consumer_report(inventario(schema_version=valor))
+
+    def test_marcador_vazio_recusado(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(inventario(marker=""))
+
+    def test_dominio_nem_ativo_nem_definido(self) -> None:
+        with self.assertRaises(DataError) as contexto:
+            network.consumer_report(
+                inventario(domains=[dominio(OUTRA_VM, active=False, defined=False)])
+            )
+        self.assertIn("não está ativo nem definido", str(contexto.exception))
+
+    def test_dominio_duplicado(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(domains=[dominio(OUTRA_VM), dominio(OUTRA_VM)])
+            )
+
+    def test_rede_duplicada(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(
+                    networks=[rede_gerenciada_registro(), rede_gerenciada_registro()]
+                )
+            )
+
+    def test_rede_nem_ativa_nem_persistente(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(
+                    networks=[
+                        registro_rede(PLANO_REDE, active=False, persistent=False)
+                    ]
+                )
+            )
+
+    def test_bridge_de_estado_ausente(self) -> None:
+        with self.assertRaises(DataError) as contexto:
+            network.consumer_report(
+                inventario(
+                    networks=[
+                        registro_rede(
+                            PLANO_REDE,
+                            active=False,
+                            persistent=True,
+                            active_bridge=PLANO_BRIDGE_NAT,
+                        )
+                    ]
+                )
+            )
+        self.assertIn("exige o estado correspondente", str(contexto.exception))
+
+    def test_source_type_desconhecido(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(
+                    domains=[
+                        dominio(OUTRA_VM, interfaces=[nic(source_type="vepa")])
+                    ]
+                )
+            )
+
+    def test_interface_sem_fonte_nao_pode_declarar_source(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(
+                    domains=[
+                        dominio(
+                            OUTRA_VM,
+                            interfaces=[nic(source_type="other", source="virbr0")],
+                        )
+                    ]
+                )
+            )
+
+    def test_fonte_vazia_so_e_valida_em_other(self) -> None:
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(
+                    domains=[
+                        dominio(
+                            OUTRA_VM,
+                            interfaces=[nic(source_type="network", source="")],
+                        )
+                    ]
+                )
+            )
+
+    def test_limite_de_interfaces_por_vm(self) -> None:
+        excesso = [
+            nic(mac="52:54:00:00:%02x:%02x" % (indice // 256, indice % 256))
+            for indice in range(network.MAX_INTERFACES_PER_VM + 1)
+        ]
+        with self.assertRaises(DataError):
+            network.consumer_report(
+                inventario(domains=[dominio(OUTRA_VM, interfaces=excesso)])
+            )
+
+
+class ConsumerDetectionTests(unittest.TestCase):
+    """Detecção por MAC, cardinalidade, marcador e a assimetria definida/ativa."""
+
+    def _relatorio(self, **overrides) -> dict:
+        return network.consumer_report(inventario(**overrides))
+
+    def test_consumidor_definido_nao_entra_no_conjunto_ativo(self) -> None:
+        relatorio = self._relatorio(
+            domains=[dominio(VM), dominio(OUTRA_VM, active=False)]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        self.assertEqual(resumo["active_consumer_names"], [])
+        self.assertEqual(resumo["defined_consumer_count"], 1)
+        self.assertEqual(resumo["active_consumer_count"], 0)
+
+    def test_consumidor_ativo_entra_nos_dois_conjuntos(self) -> None:
+        relatorio = self._relatorio(
+            domains=[dominio(VM), dominio(OUTRA_VM, active=True)]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        self.assertEqual(resumo["active_consumer_names"], [OUTRA_VM])
+
+    def test_vm_transitoria_ativa_e_definida_para_a_conversao(self) -> None:
+        relatorio = self._relatorio(
+            domains=[dominio(VM), dominio(OUTRA_VM, active=True, defined=False)]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        self.assertEqual(resumo["active_consumer_names"], [OUTRA_VM])
+        self.assertEqual(resumo["transient_consumer_count"], 1)
+
+    def test_alvo_nao_se_conta_como_consumidor(self) -> None:
+        relatorio = self._relatorio(domains=[dominio(VM)])
+        resumo = relatorio["summary"]
+        self.assertEqual(relatorio["consumers"], [])
+        self.assertEqual(resumo["defined_consumer_count"], 0)
+        self.assertEqual(resumo["target_match_count"], 1)
+        self.assertEqual(resumo["target_present"], 1)
+
+    def test_alvo_ausente_do_inventario_e_estado_declarado(self) -> None:
+        relatorio = self._relatorio(domains=[dominio(OUTRA_VM)])
+        self.assertEqual(relatorio["summary"]["target_present"], 0)
+        self.assertEqual(relatorio["summary"]["target_match_count"], 0)
+
+    def test_consumo_por_nome_de_rede(self) -> None:
+        relatorio = self._relatorio()
+        consumidor = relatorio["consumers"][0]
+        self.assertEqual(consumidor["match_kinds"], ["network"])
+        self.assertEqual(relatorio["summary"]["network_match_count"], 1)
+
+    def test_consumo_por_bridge(self) -> None:
+        relatorio = self._relatorio(
+            domains=[
+                dominio(
+                    OUTRA_VM,
+                    interfaces=[nic(source_type="bridge", source=PLANO_BRIDGE_NAT)],
+                )
+            ]
+        )
+        self.assertEqual(relatorio["consumers"][0]["match_kinds"], ["bridge"])
+        self.assertEqual(relatorio["summary"]["defined_consumer_count"], 1)
+
+    def test_consumo_por_marcador_em_rede_de_outro_nome(self) -> None:
+        relatorio = self._relatorio(
+            networks=[
+                rede_gerenciada_registro(),
+                registro_rede(
+                    "sobra-antiga",
+                    marker=PLANO_MARCADOR,
+                    active_bridge="virbr-antiga",
+                    persistent_bridge="virbr-antiga",
+                ),
+            ],
+            domains=[
+                dominio(
+                    OUTRA_VM,
+                    interfaces=[nic(source="sobra-antiga")],
+                ),
+                dominio(
+                    "terceira-vm",
+                    interfaces=[nic(source_type="bridge", source="virbr-antiga")],
+                ),
+            ],
+        )
+        self.assertEqual(relatorio["marker_networks"], ["sobra-antiga"])
+        self.assertEqual(relatorio["marker_bridges"], ["virbr-antiga"])
+        self.assertEqual(relatorio["summary"]["marker_match_count"], 2)
+        self.assertEqual(
+            relatorio["summary"]["defined_consumer_names"], [OUTRA_VM, "terceira-vm"]
+        )
+        # Marcador comparado por IGUALDADE EXATA: nenhuma delas entra na
+        # paridade, porque o Bash de hoje só olha nome e bridge candidata.
+        self.assertEqual(relatorio["summary"]["parity_consumer_count"], 0)
+
+    def test_marcador_e_igualdade_exata_nao_prefixo(self) -> None:
+        relatorio = self._relatorio(
+            networks=[
+                rede_gerenciada_registro(),
+                registro_rede(
+                    "quase", marker=PLANO_MARCADOR + ":v2", active_bridge="virbr-q"
+                ),
+            ],
+            domains=[dominio(OUTRA_VM, interfaces=[nic(source="quase")])],
+        )
+        self.assertEqual(relatorio["marker_networks"], [])
+        self.assertEqual(relatorio["summary"]["defined_consumer_count"], 0)
+
+    def test_rede_homonima_nao_gerenciada_nao_conta_como_nossa(self) -> None:
+        relatorio = self._relatorio(
+            networks=[
+                registro_rede(
+                    PLANO_REDE,
+                    marker="",
+                    active_bridge="virbr9",
+                    persistent_bridge="virbr9",
+                )
+            ],
+            domains=[dominio(VM), dominio(OUTRA_VM)],
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(relatorio["network_known"], 1)
+        self.assertEqual(relatorio["network_owned"], 0)
+        self.assertEqual(resumo["defined_consumer_names"], [])
+        self.assertEqual(resumo["unmanaged_match_count"], 1)
+        # A VM continua listada, com a classe que explica por que não bloqueia.
+        self.assertEqual(
+            relatorio["consumers"][0]["match_kinds"], ["unmanaged-network"]
+        )
+        # E a paridade com o Bash de hoje continua contando: é o marcador, e
+        # não a contagem, que separa os dois casos.
+        self.assertEqual(resumo["parity_consumer_count"], 1)
+
+    def test_rede_homonima_desconhecida_falha_fechado(self) -> None:
+        relatorio = self._relatorio(
+            networks=[registro_rede(REDE_TERCEIRO, active_bridge=BRIDGE_TERCEIRO)],
+            domains=[dominio(OUTRA_VM)],
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(relatorio["network_known"], 0)
+        self.assertEqual(resumo["unknown_network_match_count"], 1)
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        # A homônima desconhecida é as DUAS coisas: consumo contado por
+        # segurança e anomalia declarada, para o chamador saber que a
+        # propriedade não pôde ser provada.
+        self.assertEqual(resumo["network_unknown_count"], 1)
+
+    def test_rede_desconhecida_vira_anomalia(self) -> None:
+        relatorio = self._relatorio(
+            domains=[dominio(OUTRA_VM, interfaces=[nic(source="rede-fantasma")])]
+        )
+        self.assertEqual(
+            relatorio["anomalies"],
+            [
+                {
+                    "detail": "rede-fantasma",
+                    "kind": "network-unknown",
+                    "subject": OUTRA_VM,
+                }
+            ],
+        )
+        self.assertEqual(relatorio["summary"]["defined_consumer_count"], 0)
+
+    def test_mac_duplicado_entre_vms_nao_apaga_o_consumidor(self) -> None:
+        # É o caso do oráculo I0: `other-vm` é cópia byte a byte de `vm.xml`
+        # (tests/lib/mutator-harness.sh:499), logo compartilha o MAC do alvo.
+        relatorio = self._relatorio(
+            domains=[
+                dominio(VM, interfaces=[nic(mac=fx.NIC_MAC)]),
+                dominio(OUTRA_VM, interfaces=[nic(mac=fx.NIC_MAC)]),
+            ]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        self.assertEqual(resumo["mac_shared_count"], 1)
+        registro = relatorio["macs"][0]
+        self.assertEqual(registro["domains"], [VM, OUTRA_VM])
+        self.assertEqual(registro["domain_count"], 2)
+        self.assertEqual(registro["shared"], 1)
+        # A identidade é do MAC, mas a exclusão do alvo é por NOME: só a NIC da
+        # outra VM conta como consumo.
+        self.assertEqual(registro["match_count"], 1)
+        self.assertEqual(registro["match_domain_count"], 1)
+
+    def test_mac_repetido_na_mesma_vm(self) -> None:
+        relatorio = self._relatorio(
+            domains=[
+                dominio(
+                    OUTRA_VM,
+                    interfaces=[
+                        nic(mac=OUTRO_MAC),
+                        nic(
+                            mac=OUTRO_MAC,
+                            source_type="bridge",
+                            source=PLANO_BRIDGE_NAT,
+                        ),
+                    ],
+                )
+            ]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["mac_repeated_count"], 1)
+        self.assertEqual(resumo["mac_shared_count"], 0)
+        self.assertEqual(relatorio["macs"][0]["interface_count"], 2)
+        self.assertEqual(relatorio["macs"][0]["domain_count"], 1)
+
+    def test_mac_ausente_e_estado_tipado(self) -> None:
+        relatorio = self._relatorio(
+            domains=[dominio(OUTRA_VM, interfaces=[nic(mac="")])]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["mac_missing_count"], 1)
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        # A NIC sem MAC conta na cardinalidade e some da tabela de identidade.
+        self.assertEqual(resumo["consumer_interface_count"], 1)
+        self.assertEqual(relatorio["macs"], [])
+        self.assertEqual(relatorio["consumers"][0]["macs"], [""])
+
+    def test_vm_sem_nic_e_estado_tipado(self) -> None:
+        relatorio = self._relatorio(
+            domains=[dominio(VM), dominio(OUTRA_VM, interfaces=[])]
+        )
+        self.assertEqual(relatorio["summary"]["domain_without_interface_count"], 1)
+        self.assertEqual(relatorio["summary"]["defined_consumer_names"], [])
+        self.assertEqual(
+            relatorio["anomalies"],
+            [{"detail": "", "kind": "domain-without-interface", "subject": OUTRA_VM}],
+        )
+
+    def test_varias_nics_da_mesma_vm_na_mesma_rede(self) -> None:
+        relatorio = self._relatorio(
+            domains=[
+                dominio(
+                    OUTRA_VM,
+                    interfaces=[
+                        nic(mac=OUTRO_MAC),
+                        nic(mac="52:54:00:aa:bb:dd"),
+                        nic(mac="52:54:00:aa:bb:ee", source_type="other", source=""),
+                    ],
+                )
+            ]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(resumo["defined_consumer_count"], 1)
+        self.assertEqual(resumo["consumer_interface_count"], 2)
+        self.assertEqual(resumo["consumer_mac_count"], 2)
+        self.assertEqual(relatorio["consumers"][0]["interface_count"], 3)
+        self.assertEqual(relatorio["consumers"][0]["match_count"], 2)
+
+    def test_macvtap_sobre_a_bridge_candidata_conta_e_diverge_da_paridade(self) -> None:
+        relatorio = self._relatorio(
+            domains=[
+                dominio(
+                    OUTRA_VM,
+                    interfaces=[nic(source_type="direct", source=PLANO_BRIDGE_NAT)],
+                )
+            ]
+        )
+        resumo = relatorio["summary"]
+        self.assertEqual(relatorio["consumers"][0]["match_kinds"], ["direct"])
+        self.assertEqual(resumo["direct_match_count"], 1)
+        self.assertEqual(resumo["defined_consumer_names"], [OUTRA_VM])
+        # Divergência deliberada: `domain-interfaces` não olha `source/@dev`.
+        self.assertEqual(resumo["parity_consumer_count"], 0)
+
+    def test_interface_sem_fonte_compartilhada_nao_consome(self) -> None:
+        relatorio = self._relatorio(
+            domains=[
+                dominio(OUTRA_VM, interfaces=[nic(source_type="other", source="")])
+            ]
+        )
+        self.assertEqual(relatorio["consumers"], [])
+        self.assertEqual(relatorio["summary"]["defined_consumer_count"], 0)
+
+    def test_bridge_de_terceiro_nao_conta(self) -> None:
+        relatorio = self._relatorio(
+            domains=[
+                dominio(
+                    OUTRA_VM,
+                    interfaces=[nic(source_type="bridge", source=BRIDGE_TERCEIRO)],
+                )
+            ]
+        )
+        self.assertEqual(relatorio["summary"]["defined_consumer_count"], 0)
+
+    def test_determinismo_byte_a_byte(self) -> None:
+        pedido = inventario(
+            domains=[dominio(OUTRA_VM), dominio(VM), dominio("z-vm", active=True)],
+            networks=[
+                registro_rede(REDE_TERCEIRO, active_bridge=BRIDGE_TERCEIRO),
+                rede_gerenciada_registro(),
+            ],
+        )
+        primeiro = json.dumps(
+            network.consumer_report(copy.deepcopy(pedido)), sort_keys=True
+        )
+        segundo = json.dumps(
+            network.consumer_report(copy.deepcopy(pedido)), sort_keys=True
+        )
+        self.assertEqual(primeiro, segundo)
+
+    def test_entrada_nao_e_mutada(self) -> None:
+        pedido = inventario()
+        antes = json.dumps(pedido, sort_keys=True)
+        network.consumer_report(pedido)
+        self.assertEqual(json.dumps(pedido, sort_keys=True), antes)
+
+
+class ConsumerParityTests(unittest.TestCase):
+    """A contagem nova reproduz `CONSU_CONSUMER_COUNT` domínio a domínio."""
+
+    def _paridade(self, pedido: dict) -> None:
+        relatorio = network.consumer_report(pedido)
+        por_nome = {item["name"]: item for item in relatorio["consumers"]}
+        for item in pedido["domains"]:
+            with self.subTest(dominio=item["name"]):
+                bash = domain_xml.interface_state(
+                    {
+                        "xml": xml_dominio(item),
+                        "network_name": pedido["network_name"],
+                        "bridge_names": list(pedido["bridges"]),
+                    }
+                )
+                nosso = por_nome.get(item["name"])
+                if item["name"] == pedido["target"]:
+                    esperado = relatorio["summary"]["parity_target_count"]
+                else:
+                    esperado = nosso["parity_count"] if nosso else 0
+                self.assertEqual(bash["consumer_count"], esperado)
+
+    def test_paridade_no_caso_do_oraculo_i0(self) -> None:
+        # `mutator_harness_seed_other_vm_consumer` (tests/lib/mutator-harness.
+        # sh:497) copia a VM alvo e troca a fonte para `passthrough-nat`.
+        self._paridade(
+            inventario(
+                domains=[
+                    dominio(VM, interfaces=[nic(source="default")]),
+                    dominio(OUTRA_VM, interfaces=[nic()]),
+                ],
+                networks=[
+                    rede_gerenciada_registro(),
+                    registro_rede("default", active_bridge=BRIDGE_TERCEIRO),
+                ],
+            )
+        )
+
+    def test_paridade_com_consumidor_ativo(self) -> None:
+        self._paridade(
+            inventario(
+                domains=[
+                    dominio(VM, interfaces=[nic()]),
+                    dominio(OUTRA_VM, active=True, interfaces=[nic(mac=OUTRO_MAC)]),
+                ]
+            )
+        )
+
+    def test_paridade_por_bridge_e_por_rede_homonima(self) -> None:
+        self._paridade(
+            inventario(
+                networks=[
+                    registro_rede(
+                        PLANO_REDE,
+                        marker="",
+                        active_bridge="virbr9",
+                        persistent_bridge="virbr9",
+                    )
+                ],
+                domains=[
+                    dominio(VM, interfaces=[nic(source="default")]),
+                    dominio(
+                        OUTRA_VM,
+                        interfaces=[
+                            nic(mac=OUTRO_MAC),
+                            nic(
+                                mac="52:54:00:aa:bb:dd",
+                                source_type="bridge",
+                                source=PLANO_BRIDGE_NAT,
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        )
+
+    def test_paridade_com_vm_sem_nic_e_sem_mac(self) -> None:
+        self._paridade(
+            inventario(
+                domains=[
+                    dominio("sem-nic", interfaces=[]),
+                    dominio(OUTRA_VM, interfaces=[nic(mac="")]),
+                ]
+            )
+        )
+
+
+class ConsumerProjectionTests(unittest.TestCase):
+    """Projeção escalar do relatório, no contrato de `network-plan`."""
+
+    def test_projecao_e_escalar(self) -> None:
+        dados = network.network_consumers(
+            inventario(
+                domains=[
+                    dominio(VM),
+                    dominio(OUTRA_VM, active=True),
+                    dominio("sem-nic", interfaces=[]),
+                ]
+            )
+        )
+        for chave, valor in dados.items():
+            self.assertRegex(chave.upper(), r"^[A-Z][A-Z0-9_]{0,63}$")
+            self.assertIsInstance(valor, (str, int))
+        self.assertEqual(dados["defined_consumer_names"], OUTRA_VM)
+        self.assertEqual(dados["active_consumer_names"], OUTRA_VM)
+        self.assertEqual(dados["consumer_count"], 1)
+        self.assertEqual(dados["consumer_0_name"], OUTRA_VM)
+        self.assertEqual(dados["mac_count"], 1)
+        self.assertEqual(dados["anomaly_0_kind"], "domain-without-interface")
+
+    def test_digest_prende_a_projecao_ao_relatorio(self) -> None:
+        pedido = inventario()
+        dados = network.network_consumers(pedido)
+        canonico = json.dumps(
+            network.consumer_report(pedido),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertEqual(
+            dados["report_sha256"],
+            hashlib.sha256(canonico.encode("utf-8")).hexdigest(),
+        )
+
+    def test_nomes_saem_em_linhas(self) -> None:
+        dados = network.network_consumers(
+            inventario(
+                domains=[
+                    dominio(OUTRA_VM, active=True),
+                    dominio("z-vm", active=True),
+                ]
+            )
+        )
+        self.assertEqual(
+            dados["active_consumer_names"].split("\n"), [OUTRA_VM, "z-vm"]
+        )
+
+
+class SnapshotForeignNetworkTests(unittest.TestCase):
+    """Redes de terceiros e evidência de link sem fio no snapshot (I7.4)."""
+
+    def test_foreign_networks_entra_no_estado_e_no_fingerprint(self) -> None:
+        normalizado = network.normalize_snapshot(snapshot())
+        self.assertIn("foreign_networks", normalizado)
+        impressoes = network.snapshot_fingerprints(snapshot())
+        self.assertIn("foreign_networks", impressoes["components"])
+
+    def test_rede_de_terceiro_nao_pode_repetir_a_gerenciada(self) -> None:
+        with self.assertRaises(DataError) as contexto:
+            network.normalize_snapshot(
+                snapshot(foreign_networks=[registro_rede(REDE)])
+            )
+        self.assertIn("repete a rede gerenciada", str(contexto.exception))
+
+    def test_consumidor_de_rede_de_terceiro_e_representavel(self) -> None:
+        interfaces = [
+            {"mac": fx.NIC_MAC, "source": REDE_TERCEIRO, "source_type": "network"}
+        ]
+        normalizado = network.normalize_snapshot(
+            snapshot(
+                consumers=[consumidor(interfaces=interfaces)],
+                foreign_networks=[
+                    registro_rede(REDE_TERCEIRO, active_bridge=BRIDGE_TERCEIRO)
+                ],
+            )
+        )
+        self.assertEqual(
+            normalizado["consumers"][0]["interfaces"][0]["source"], REDE_TERCEIRO
+        )
+
+    def test_rede_desconhecida_continua_recusada(self) -> None:
+        interfaces = [
+            {"mac": fx.NIC_MAC, "source": "rede-fantasma", "source_type": "network"}
+        ]
+        with self.assertRaises(DataError) as contexto:
+            network.normalize_snapshot(
+                snapshot(
+                    consumers=[consumidor(interfaces=interfaces)],
+                    foreign_networks=[registro_rede(REDE_TERCEIRO)],
+                )
+            )
+        self.assertIn("rede libvirt fora do snapshot", str(contexto.exception))
+
+    def test_link_sem_evidencia_de_wifi_e_recusado(self) -> None:
+        parcial = link("enp3s0", mac=UPLINK_MAC, master="br0")
+        del parcial["wireless"]
+        links = [parcial] + [
+            item for item in snapshot()["links"] if item["name"] != "enp3s0"
+        ]
+        with self.assertRaises(DataError) as contexto:
+            network.normalize_snapshot(snapshot(links=links))
+        self.assertIn("wireless", str(contexto.exception))
+
+
+class PlanNewPreconditionTests(unittest.TestCase):
+    """As duas precondições que I7.3 deixou abertas por falta de dado."""
+
+    def _snapshot_wifi(self, wireless: bool) -> dict:
+        return snapshot_plano(
+            links=[
+                link(
+                    PLANO_UPLINK,
+                    mac=UPLINK_MAC,
+                    addresses=["192.168.0.7/24"],
+                    wireless=wireless,
+                )
+            ]
+        )
+
+    def test_bridge_sobre_wifi_recusa_e_fica_fail_closed(self) -> None:
+        plano = network.build_plan(
+            pedido_bridge(
+                snapshot=self._snapshot_wifi(True),
+                intent=intencao_bridge(
+                    links=[
+                        link(
+                            PLANO_UPLINK,
+                            mac=UPLINK_MAC,
+                            master=PLANO_BRIDGE,
+                            wireless=True,
+                        ),
+                        link(
+                            PLANO_BRIDGE,
+                            kind="bridge",
+                            mac=UPLINK_MAC,
+                            addresses=["192.168.0.7/24"],
+                        ),
+                    ]
+                ),
+            )
+        )
+        self.assertEqual(
+            plano["summary"]["blocking_precondition"], "P-UPLINK-NOT-WIRELESS"
+        )
+        self.assertEqual(plano["summary"]["accepted"], 0)
+        self.assertEqual(plano["operations"], [])
+        self.assertEqual(plano["rollback"], [])
+        self.assertEqual(plano["postconditions"], [])
+        check = precondicao(plano, "P-UPLINK-NOT-WIRELESS")
+        self.assertEqual(check["detail"], "wireless")
+        self.assertEqual(check["evidence"], "snapshot.links[uplink].wireless")
+
+    def test_uplink_com_fio_satisfaz_a_precondicao(self) -> None:
+        plano = network.build_plan(pedido_bridge())
+        self.assertEqual(precondicao(plano, "P-UPLINK-NOT-WIRELESS")["satisfied"], 1)
+
+    def test_nat_nao_exige_uplink_com_fio(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=self._snapshot_wifi(True),
+                intent=intencao_nat(links=[
+                    link(
+                        PLANO_UPLINK,
+                        mac=UPLINK_MAC,
+                        addresses=["192.168.0.7/24"],
+                        wireless=True,
+                    )
+                ]),
+            )
+        )
+        self.assertEqual(plano["summary"]["accepted"], 1)
+        self.assertNotIn(
+            "P-UPLINK-NOT-WIRELESS",
+            [item["id"] for item in plano["preconditions"]],
+        )
+
+    def test_bridge_libvirt_ja_pertence_a_outra_rede(self) -> None:
+        alheia = registro_rede(
+            "outra-rede", active_bridge=PLANO_BRIDGE_NAT, persistent=False
+        )
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=snapshot_plano(foreign_networks=[alheia]),
+                intent=intencao_nat(foreign_networks=[alheia]),
+            )
+        )
+        self.assertEqual(
+            plano["summary"]["blocking_precondition"], "P-LIBVIRT-BRIDGE-UNIQUE"
+        )
+        self.assertEqual(plano["operations"], [])
+        self.assertEqual(plano["rollback"], [])
+        check = precondicao(plano, "P-LIBVIRT-BRIDGE-UNIQUE")
+        self.assertEqual(check["detail"], "outra-rede:active")
+        self.assertEqual(check["evidence"], "snapshot.foreign_networks")
+
+    def test_bridge_libvirt_de_outra_rede_apenas_persistente(self) -> None:
+        alheia = registro_rede(
+            "outra-rede", active=False, persistent_bridge=PLANO_BRIDGE_NAT
+        )
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=snapshot_plano(foreign_networks=[alheia]),
+                intent=intencao_nat(foreign_networks=[alheia]),
+            )
+        )
+        check = precondicao(plano, "P-LIBVIRT-BRIDGE-UNIQUE")
+        self.assertEqual(check["satisfied"], 0)
+        self.assertEqual(check["detail"], "outra-rede:persistent")
+
+    def test_bridge_livre_satisfaz_a_unicidade(self) -> None:
+        alheia = registro_rede(REDE_TERCEIRO, active_bridge=BRIDGE_TERCEIRO)
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=snapshot_plano(foreign_networks=[alheia]),
+                intent=intencao_nat(foreign_networks=[alheia]),
+            )
+        )
+        self.assertEqual(plano["summary"]["accepted"], 1)
+        self.assertEqual(
+            precondicao(plano, "P-LIBVIRT-BRIDGE-UNIQUE")["satisfied"], 1
+        )
+        self.assertEqual(len(plano["operations"]), 11)
+
+    def test_bridge_nao_avalia_unicidade_de_bridge_libvirt(self) -> None:
+        plano = network.build_plan(pedido_bridge())
+        self.assertNotIn(
+            "P-LIBVIRT-BRIDGE-UNIQUE",
+            [item["id"] for item in plano["preconditions"]],
+        )
+
+
+class PlanConsumerAsymmetryTests(unittest.TestCase):
+    """A detecção unificada não pode unificar as duas decisões da etapa."""
+
+    def _snapshot(self, *, active: bool) -> dict:
+        outro = consumidor(
+            name=OUTRA_VM,
+            active=active,
+            interfaces=[
+                {"mac": OUTRO_MAC, "source": PLANO_REDE, "source_type": "network"}
+            ],
+        )
+        outro["xml"] = fx.domain().replace("fixture-win11", OUTRA_VM)
+        return snapshot_plano(
+            consumers=[outro],
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(PLANO_BRIDGE_NAT, kind="bridge", addresses=["192.168.177.1/24"]),
+            ],
+        )
+
+    def test_consumidor_definido_nao_bloqueia_o_restart_nat(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=self._snapshot(active=False),
+                settings=ajustes(nat_cidr="192.168.178.0/24"),
+            )
+        )
+        check = precondicao(plano, "P-NETWORK-CONSUMERS-ABSENT")
+        self.assertEqual(check["satisfied"], 1)
+        self.assertEqual(
+            check["requires"], "no_other_running_domain_consumes_the_managed_network"
+        )
+
+    def test_consumidor_ativo_bloqueia_o_restart_nat(self) -> None:
+        plano = network.build_plan(
+            pedido_nat(
+                snapshot=self._snapshot(active=True),
+                settings=ajustes(nat_cidr="192.168.178.0/24"),
+            )
+        )
+        self.assertEqual(
+            plano["summary"]["blocking_precondition"], "P-NETWORK-CONSUMERS-ABSENT"
+        )
+        self.assertEqual(
+            precondicao(plano, "P-NETWORK-CONSUMERS-ABSENT")["detail"], OUTRA_VM
+        )
+
+    def test_consumidor_definido_bloqueia_a_conversao_para_bridge(self) -> None:
+        plano = network.build_plan(
+            pedido_bridge(snapshot=self._snapshot(active=False))
+        )
+        check = precondicao(plano, "P-NETWORK-CONSUMERS-ABSENT")
+        self.assertEqual(check["satisfied"], 0)
+        self.assertEqual(check["detail"], OUTRA_VM)
+        self.assertEqual(
+            check["requires"], "no_other_defined_domain_consumes_the_managed_network"
+        )
+
+    def test_consumidor_por_bridge_da_rede_tambem_bloqueia(self) -> None:
+        outro = consumidor(
+            name=OUTRA_VM,
+            active=False,
+            interfaces=[
+                {
+                    "mac": OUTRO_MAC,
+                    "source": PLANO_BRIDGE_NAT,
+                    "source_type": "bridge",
+                }
+            ],
+        )
+        outro["xml"] = fx.domain().replace("fixture-win11", OUTRA_VM)
+        estado = snapshot_plano(
+            bridge={"exists": False, "name": PLANO_BRIDGE, "ports": []},
+            consumers=[outro],
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(PLANO_BRIDGE_NAT, kind="bridge", addresses=["192.168.177.1/24"]),
+            ],
+        )
+        with self.assertRaises(DataError):
+            # A bridge da rede libvirt não é a bridge do host: o snapshot só
+            # aceita `source_type=bridge` apontando para a bridge gerenciada.
+            network.build_plan(pedido_bridge(snapshot=estado))
+
+    def test_consumidor_de_rede_alheia_nao_bloqueia(self) -> None:
+        alheia = registro_rede(REDE_TERCEIRO, active_bridge=BRIDGE_TERCEIRO)
+        outro = consumidor(
+            name=OUTRA_VM,
+            active=True,
+            interfaces=[
+                {"mac": OUTRO_MAC, "source": REDE_TERCEIRO, "source_type": "network"}
+            ],
+        )
+        outro["xml"] = fx.domain().replace("fixture-win11", OUTRA_VM)
+        estado = snapshot_plano(
+            consumers=[outro],
+            foreign_networks=[alheia],
+            libvirt_network=rede_gerenciada(),
+            links=[
+                link(PLANO_UPLINK, mac=UPLINK_MAC, addresses=["192.168.0.7/24"]),
+                link(PLANO_BRIDGE_NAT, kind="bridge", addresses=["192.168.177.1/24"]),
+            ],
+        )
+        plano = network.build_plan(
+            pedido_bridge(
+                snapshot=estado, intent=intencao_bridge(foreign_networks=[alheia])
+            )
+        )
+        self.assertEqual(
+            precondicao(plano, "P-NETWORK-CONSUMERS-ABSENT")["satisfied"], 1
+        )
+
+
+class PlanEffectRegressionTests(unittest.TestCase):
+    """I7.4 não pode mexer na matriz de efeitos congelada pelo oráculo I0."""
+
+    def test_efeitos_e_rollback_continuam_iguais(self) -> None:
+        plano_nat = network.build_plan(pedido_nat())
+        plano_bridge = network.build_plan(pedido_bridge())
+        self.assertEqual(efeitos(plano_nat), EFEITOS_NAT)
+        self.assertEqual(efeitos(plano_bridge), EFEITOS_BRIDGE)
+        self.assertEqual(len(plano_nat["operations"]), 11)
+        self.assertEqual(len(plano_bridge["operations"]), 10)
+        self.assertEqual(efeitos_rollback(plano_nat), ROLLBACK_NAT)
+        self.assertEqual(efeitos_rollback(plano_bridge), ROLLBACK_BRIDGE)
+
+    def test_nenhum_token_de_ferramenta_nas_novas_precondicoes(self) -> None:
+        for pedido in (pedido_nat(), pedido_bridge()):
+            plano = network.build_plan(pedido)
+            for texto in textos(plano["preconditions"]):
+                for token in TOKENS_DE_FERRAMENTA:
+                    self.assertNotIn(token, texto.lower())
 
 
 if __name__ == "__main__":

@@ -64,6 +64,7 @@ class SubcommandRegistryTests(unittest.TestCase):
             "domain-usb-hostdev",
             "domain-validate-cpu",
             "network-address-check",
+            "network-consumers",
             "network-inspect",
             "network-nat-addresses",
             "network-overlap",
@@ -656,6 +657,65 @@ class NetworkPlanCommandTests(unittest.TestCase):
             texto = saida.decode("utf-8").lower()
             for token in pf.TOKENS_DE_FERRAMENTA:
                 self.assertNotIn(token, texto)
+
+
+class NetworkConsumerCommandTests(unittest.TestCase):
+    """`network-consumers` (I7.4): inventário estruturado, saída escalar."""
+
+    def test_usage_e_registro(self) -> None:
+        self.assertIn("network-consumers", cli.USAGE)
+        self.assertIn("network-consumers", cli.SUBCOMMANDS)
+
+    def test_consumidor_definido_por_stdin_em_json(self) -> None:
+        codigo, saida, diagnostico = executar(
+            ["network-consumers", "--stdin"], envelope(pf.inventario())
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        self.assertEqual(diagnostico, b"")
+        campos = dados(saida)
+        self.assertEqual(campos["defined_consumer_count"], 1)
+        self.assertEqual(campos["defined_consumer_names"], pf.OUTRA_VM)
+        self.assertEqual(campos["active_consumer_count"], 0)
+        self.assertEqual(campos["network_owned"], 1)
+        self.assertEqual(campos["consumer_0_name"], pf.OUTRA_VM)
+        self.assertEqual(campos["parity_consumer_count"], 1)
+        self.assertRegex(campos["report_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_consumidor_ativo_por_pares_na_saida(self) -> None:
+        pedido = pf.inventario(
+            domains=[pf.dominio(pf.VM), pf.dominio(pf.OUTRA_VM, active=True)]
+        )
+        codigo, saida, _ = executar(
+            ["network-consumers", "--stdin", "--format=pairs"], envelope(pedido)
+        )
+        self.assertEqual(codigo, errors.EXIT_OK)
+        campos = saida.decode("utf-8").split(NUL)[:-1]
+        mapa = dict(zip(campos[0::2], campos[1::2]))
+        self.assertEqual(mapa["SUBCOMMAND"], "network-consumers")
+        self.assertEqual(mapa["ACTIVE_CONSUMER_NAMES"], pf.OUTRA_VM)
+        self.assertEqual(mapa["DEFINED_CONSUMER_NAMES"], pf.OUTRA_VM)
+        self.assertEqual(mapa["ACTIVE_CONSUMER_COUNT"], "1")
+
+    def test_recusa_tipada_nao_escreve_em_stdout(self) -> None:
+        casos = (
+            {},
+            {"schema_version": 1},
+            dict(pf.inventario(), schema_version=2),
+            dict(pf.inventario(), marker=""),
+        )
+        for indice, payload in enumerate(casos):
+            with self.subTest(caso=indice):
+                codigo, saida, diagnostico = executar(
+                    ["network-consumers", "--stdin"], envelope(payload)
+                )
+                self.assertEqual(codigo, errors.EXIT_DATA)
+                self.assertEqual(saida, b"")
+                self.assertTrue(diagnostico)
+
+    def test_saida_repetida_e_identica(self) -> None:
+        argv = ["network-consumers", "--stdin"]
+        entrada = envelope(pf.inventario())
+        self.assertEqual(executar(argv, entrada), executar(argv, entrada))
 
 
 
