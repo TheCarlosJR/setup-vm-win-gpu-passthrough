@@ -151,7 +151,300 @@ registrar_mutacao() {
 
 registrar_falha_rollback() {
     erro "ROLLBACK: $*"
+    ROLLBACK_FALHAS+=("$*")
     ROLLBACK_FALHOU=1
+}
+
+# ============================================================================
+# I7.6 (D-NET-RECOVERY-EVIDENCE): evidência retida e localizador aleatório
+# ============================================================================
+# Até I7.5 `tratar_saida` apagava o TMP_DIR SEMPRE, inclusive quando o rollback
+# não tinha sido comprovado: a única cópia do estado anterior (XML da VM, XML da
+# rede, perfil de rede do host e passthrough.conf) ia embora junto com a falha,
+# e o operador ficava com um diagnóstico sem material nenhum para agir.
+#
+# Agora, e SOMENTE quando a restauração diverge ou falha, a etapa promove esse
+# material a um bundle local de recuperação e emite um localizador aleatório. No
+# caminho de sucesso nada muda: nenhum diretório é criado, nada é retido e
+# nenhum `recovery_id` é impresso.
+#
+# Contrato da seção 3.9 aplicado aqui:
+#   * o bundle vive sob a MESMA raiz de estado que `LOG_ACOES_DIR` já usa
+#     (`${XDG_STATE_HOME:-$HOME/.local/state}/vm-passthrough`), nunca no
+#     diretório do projeto: o repositório pode estar em filesystem onde `chmod`
+#     é no-op, e ali `0600` seria mentira;
+#   * diretório `0700`, arquivo `0600`, metadados de criação e expiração;
+#   * `recovery_id` é `RECOVERY_LOCATOR`: 128 bits aleatórios, jamais derivados
+#     de usuário, host, caminho, nome de VM ou hardware. Ele é o único dado
+#     desta classe que pode aparecer no stderr local;
+#   * a mensagem humana imprime apenas o `recovery_id` e os comandos seguros.
+#     Caminho do bundle, conteúdo de XML, nome de rede e nome de VM ficam
+#     dentro do bundle `0600` e nunca na mensagem;
+#   * retenção até o primeiro entre recuperação reconhecida e sete dias, com
+#     limpeza idempotente.
+RECOVERY_DIR="$LOG_ACOES_DIR/recovery"
+RECOVERY_RETENCAO_DIAS=7
+RECOVERY_LIMITE_BYTES=1048576
+RECOVERY_ID=""
+RECOVERY_PURGADOS=0
+RECOVERY_TRUNCADOS=0
+declare -a RECOVERY_ARQUIVOS=()
+declare -a ROLLBACK_FALHAS=()
+
+recovery_id_valido() {
+    [[ "${1:-}" =~ ^[0-9a-f]{32}$ ]]
+}
+
+gerar_recovery_id() {
+    # `$SRANDOM` (Bash 5.1+) devolve 32 bits da fonte de entropia do sistema por
+    # leitura e não gasta processo algum. Isso importa aqui: este caminho roda
+    # dentro do trap de saída, depois de um rollback que já falhou, e não pode
+    # depender de fork nem de PATH. Quatro leituras = 128 bits, o mínimo que a
+    # seção 3.9 exige para `RECOVERY_LOCATOR`.
+    local parte indice
+    RECOVERY_ID=""
+    [ -n "${SRANDOM+definido}" ] || return 1
+    for indice in 1 2 3 4; do
+        printf -v parte '%08x' "$SRANDOM"
+        RECOVERY_ID+="$parte"
+    done
+    recovery_id_valido "$RECOVERY_ID" || { RECOVERY_ID=""; return 1; }
+    return 0
+}
+
+_recovery_agora() {
+    local destino="$1"
+    printf -v "$destino" '%(%s)T' -1
+}
+
+_recovery_utc() {
+    # Só apresentação: o campo autoritativo é o epoch inteiro ao lado.
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'desconhecido\n'
+}
+
+_recovery_copiar() {
+    # $1 = origem; $2 = bundle; $3 = nome relativo. Arquivo ausente é omitido;
+    # arquivo maior que o teto é omitido e contabilizado, para que o bundle
+    # continue limitado.
+    local origem="$1" bundle="$2" nome="$3" tamanho
+    [ -f "$origem" ] || return 0
+    tamanho="$(stat -c '%s' -- "$origem" 2>/dev/null)" || tamanho=""
+    if [ -z "$tamanho" ] || [ "$tamanho" -gt "$RECOVERY_LIMITE_BYTES" ] 2>/dev/null; then
+        RECOVERY_TRUNCADOS=$((RECOVERY_TRUNCADOS + 1))
+        return 0
+    fi
+    # `cp` e não `install`: a cópia acontece sem elevação nenhuma, dentro da
+    # raiz de estado do próprio operador. O modo final é fixado explicitamente,
+    # e o `umask 077` de quem chama já cria o arquivo restrito de saída.
+    cp -- "$origem" "$bundle/estado/$nome" >/dev/null 2>&1 \
+        || { RECOVERY_TRUNCADOS=$((RECOVERY_TRUNCADOS + 1)); return 0; }
+    chmod 0600 -- "$bundle/estado/$nome" 2>/dev/null || true
+    RECOVERY_ARQUIVOS+=("$nome $tamanho")
+    return 0
+}
+
+_recovery_purgar_expirados() {
+    # Limpeza idempotente por expiração: roda antes de reter um bundle novo e
+    # também sob `--recuperacao-limpar` sem argumento. Sem diretório de
+    # recuperação não há nada a fazer, e nada é criado.
+    local bundle id agora expira linha
+    RECOVERY_PURGADOS=0
+    [ -d "$RECOVERY_DIR" ] || return 0
+    _recovery_agora agora
+    for bundle in "$RECOVERY_DIR"/*; do
+        [ -d "$bundle" ] || continue
+        id="${bundle##*/}"
+        recovery_id_valido "$id" || continue
+        expira=""
+        if [ -f "$bundle/metadata" ]; then
+            while IFS= read -r linha; do
+                case "$linha" in
+                    expires_epoch=*) expira="${linha#expires_epoch=}" ;;
+                esac
+            done < "$bundle/metadata"
+        fi
+        # Bundle sem metadados legíveis é resíduo: não sabemos quando expira e
+        # mantê-lo para sempre contraria o teto de retenção.
+        [[ "$expira" =~ ^[0-9]+$ ]] || expira=0
+        [ "$agora" -ge "$expira" ] || continue
+        rm -rf -- "$bundle" 2>/dev/null || continue
+        RECOVERY_PURGADOS=$((RECOVERY_PURGADOS + 1))
+    done
+    return 0
+}
+
+reter_evidencia_recuperacao() {
+    local bundle agora expira item mensagem umask_anterior
+    RECOVERY_ARQUIVOS=()
+    RECOVERY_TRUNCADOS=0
+    # Diretório `0700` e arquivo `0600` por construção, não por correção
+    # posterior: nenhum instante do bundle é legível por terceiros.
+    umask_anterior="$(umask)"
+    umask 077
+    if ! gerar_recovery_id; then
+        umask "$umask_anterior"
+        erro "A restauração não foi comprovada e não foi possível gerar um localizador de recuperação com entropia suficiente; nenhuma evidência foi retida."
+        return 1
+    fi
+    _recovery_purgar_expirados
+    bundle="$RECOVERY_DIR/$RECOVERY_ID"
+    if ! mkdir -p -- "$bundle/estado" 2>/dev/null; then
+        umask "$umask_anterior"
+        erro "A restauração não foi comprovada e o diretório local de evidência não pôde ser criado; nenhuma evidência foi retida."
+        RECOVERY_ID=""
+        return 1
+    fi
+    chmod 0700 -- "$RECOVERY_DIR" "$bundle" "$bundle/estado" 2>/dev/null || true
+    if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+        _recovery_copiar "$TMP_DIR/vm-anterior.xml" "$bundle" vm-anterior.xml
+        _recovery_copiar "$TMP_DIR/passthrough.conf.anterior" "$bundle" passthrough.conf.anterior
+        # O perfil de rede do host vem da cópia LEGÍVEL feita por
+        # `_capturar_artefato`, e não de `netplan-bridge.anterior.yaml`: aquela
+        # foi criada com `sudo cp -p` e continua root:root 0600, ilegível para o
+        # operador que vai inspecionar o bundle. As duas têm o mesmo conteúdo.
+        _recovery_copiar "$TMP_DIR/artefato-$PERFIL_HOST_ESCOPO-$PERFIL_HOST_ID" \
+            "$bundle" netplan-bridge.anterior.yaml
+        _recovery_copiar "$TMP_DIR/rede-anterior-persistente.xml" "$bundle" rede-anterior-persistente.xml
+        _recovery_copiar "$TMP_DIR/rede-anterior-ativa.xml" "$bundle" rede-anterior-ativa.xml
+    fi
+    _recovery_agora agora
+    expira=$(( agora + RECOVERY_RETENCAO_DIAS * 86400 ))
+    {
+        printf 'schema_version=1\n'
+        printf 'stage=60-rede-bridge\n'
+        printf 'recovery_id=%s\n' "$RECOVERY_ID"
+        printf 'created_epoch=%s\n' "$agora"
+        printf 'created_utc=%s\n' "$(_recovery_utc "$agora")"
+        printf 'expires_epoch=%s\n' "$expira"
+        printf 'expires_utc=%s\n' "$(_recovery_utc "$expira")"
+        printf 'retention_days=%s\n' "$RECOVERY_RETENCAO_DIAS"
+        printf 'mode=%s\n' "${REDE_MODO:-desconhecido}"
+        printf 'plan_sha256=%s\n' "${PL_PLAN_SHA256:-}"
+        printf 'rollback_failures=%s\n' "${#ROLLBACK_FALHAS[@]}"
+        printf 'artifact_count=%s\n' "${#RECOVERY_ARQUIVOS[@]}"
+        printf 'artifacts_omitted=%s\n' "$RECOVERY_TRUNCADOS"
+        for item in "${RECOVERY_ARQUIVOS[@]}"; do
+            printf 'artifact=%s\n' "$item"
+        done
+    } > "$bundle/metadata" 2>/dev/null || true
+    # LOCAL_IDENTIFIER bruto é permitido AQUI e só aqui: bundle local `0600`.
+    {
+        for mensagem in "${ROLLBACK_FALHAS[@]}"; do
+            printf '%s\n' "$mensagem"
+        done
+    } > "$bundle/diagnostico" 2>/dev/null || true
+    chmod 0600 -- "$bundle/metadata" "$bundle/diagnostico" 2>/dev/null || true
+    # A partir daqui a mensagem é humana e só pode conter `RECOVERY_LOCATOR` e
+    # comando seguro. Nenhum caminho local, nenhum nome de rede/VM, nenhum XML.
+    erro "Restauração não comprovada: a evidência local foi retida por $RECOVERY_RETENCAO_DIAS dias."
+    erro "recovery_id=$RECOVERY_ID"
+    erro "Inspecione com: bash etapas/60-rede-bridge.sh --recuperacao $RECOVERY_ID"
+    erro "Depois de recuperar, libere com: bash etapas/60-rede-bridge.sh --recuperacao-limpar $RECOVERY_ID"
+    umask "$umask_anterior"
+    return 0
+}
+
+recuperacao_listar() {
+    local bundle id encontrados=0 linha criado expira
+    if [ ! -d "$RECOVERY_DIR" ]; then
+        info "Nenhuma evidência de recuperação retida."
+        return 0
+    fi
+    for bundle in "$RECOVERY_DIR"/*; do
+        [ -d "$bundle" ] || continue
+        id="${bundle##*/}"
+        recovery_id_valido "$id" || continue
+        criado="desconhecido"; expira="desconhecido"
+        if [ -f "$bundle/metadata" ]; then
+            while IFS= read -r linha; do
+                case "$linha" in
+                    created_utc=*) criado="${linha#created_utc=}" ;;
+                    expires_utc=*) expira="${linha#expires_utc=}" ;;
+                esac
+            done < "$bundle/metadata"
+        fi
+        encontrados=$((encontrados + 1))
+        printf '  recovery_id=%s criado=%s expira=%s\n' "$id" "$criado" "$expira"
+    done
+    [ "$encontrados" -ne 0 ] || info "Nenhuma evidência de recuperação retida."
+    return 0
+}
+
+recuperacao_mostrar() {
+    # Inspeção somente leitura. Imprime metadados, o inventário do bundle e o
+    # diagnóstico retido; NUNCA o caminho local do bundle.
+    local id="${1:-}" bundle linha
+    if [ -z "$id" ]; then
+        titulo "Evidências de recuperação da etapa 19"
+        recuperacao_listar
+        return 0
+    fi
+    if ! recovery_id_valido "$id"; then
+        erro "recovery_id inválido: use o identificador exato emitido pela etapa."
+        return 2
+    fi
+    bundle="$RECOVERY_DIR/$id"
+    if [ ! -d "$bundle" ]; then
+        erro "Nenhuma evidência retida para recovery_id=$id."
+        return 1
+    fi
+    titulo "Evidência de recuperação $id"
+    if [ -f "$bundle/metadata" ]; then
+        while IFS= read -r linha; do
+            printf '  %s\n' "$linha"
+        done < "$bundle/metadata"
+    fi
+    if [ -f "$bundle/diagnostico" ] && [ -s "$bundle/diagnostico" ]; then
+        echo
+        info "Falhas registradas na restauração:"
+        while IFS= read -r linha; do
+            printf '  %s\n' "$linha"
+        done < "$bundle/diagnostico"
+    fi
+    echo
+    info "Depois de recuperar, libere com: bash etapas/60-rede-bridge.sh --recuperacao-limpar $id"
+    return 0
+}
+
+# Seção 3.9, última linha: `unlink` remove a entrada de diretório, não os
+# blocos. Em filesystem copy-on-write (Btrfs, ZFS, bcachefs), com snapshot
+# montado, ou em SSD com wear leveling, o conteúdo pode permanecer legível por
+# quem tiver acesso ao dispositivo. A limpeza deste bundle é lógica, e a etapa
+# diz isso ao operador em vez de prometer apagamento físico.
+RECOVERY_AVISO_UNLINK='Remoção lógica: em filesystem copy-on-write, snapshot ou SSD, os blocos podem sobreviver ao unlink.'
+
+recuperacao_limpar() {
+    # Limpeza idempotente: com identificador remove aquele bundle (recuperação
+    # reconhecida); sem identificador remove só os expirados. Executar duas
+    # vezes é no-op exato, porque a segunda execução não acha nada para remover
+    # e não cria diretório algum.
+    local id="${1:-}" bundle
+    if [ -n "$id" ]; then
+        if ! recovery_id_valido "$id"; then
+            erro "recovery_id inválido: use o identificador exato emitido pela etapa."
+            return 2
+        fi
+        bundle="$RECOVERY_DIR/$id"
+        if [ ! -d "$bundle" ]; then
+            info "Nada a remover para recovery_id=$id."
+            return 0
+        fi
+        if ! rm -rf -- "$bundle"; then
+            erro "Não foi possível remover a evidência de recovery_id=$id."
+            return 1
+        fi
+        ok "Evidência de recuperação $id removida."
+        aviso "$RECOVERY_AVISO_UNLINK"
+        return 0
+    fi
+    _recovery_purgar_expirados
+    if [ "$RECOVERY_PURGADOS" -eq 0 ]; then
+        info "Nenhuma evidência de recuperação expirada para remover."
+    else
+        ok "Evidências de recuperação expiradas removidas: $RECOVERY_PURGADOS."
+        aviso "$RECOVERY_AVISO_UNLINK"
+    fi
+    return 0
 }
 
 capturar_lista_redes_libvirt() {
@@ -558,22 +851,23 @@ capturar_redes_libvirt() {
         registros+="${registros:+$PAIRS_NL}$ativa$PAIRS_TAB$bridge_ativa$PAIRS_TAB$marcador$PAIRS_TAB$rede$PAIRS_TAB$persistente$PAIRS_TAB$bridge_persistente"
     done
     CAP_ESTRANHAS="$registros"
-    # D-NET-UNMANAGED-BRIDGE (recusa integral é de I7.6): no modo bridge a
-    # etapa histórica AVISA e deixa a rede homônima sem marcador intocada, ou
-    # seja, declara que ela não faz parte desta transação. O modelo fechado não
-    # permite a mesma rede em `libvirt_network` e em `foreign_networks`, então
-    # "não faz parte da transação" é declarado como slot gerenciado ausente. No
-    # modo NAT nada muda: a rede alheia é declarada como é e a precondição
-    # `P-LIBVIRT-NETWORK-OWNED` recusa.
-    if [ "$CAP_REDE_ALHEIA" -eq 1 ] && [ "$REDE_MODO" = "bridge" ]; then
-        CAP_REDE_UUID=""
-        if [ "$AVISO_REDE_ALHEIA" -eq 0 ]; then
-            AVISO_REDE_ALHEIA=1
-            aviso "A rede homônima '$REDE_LIBVIRT' não tem o marcador deste projeto; ela não será alterada."
-        fi
-        CAP_REDE_EXISTE=0; CAP_REDE_ATIVA=0; CAP_REDE_PERSISTENTE=0
-        CAP_REDE_AUTOSTART=0; CAP_REDE_MARCADOR=""
-        CAP_REDE_XML_ATIVO=""; CAP_REDE_XML_PERSISTENTE=""
+    # I7.6 (D-NET-UNMANAGED-BRIDGE): a exclusão deliberada que existia aqui foi
+    # REMOVIDA. Até I7.5, no modo bridge a rede homônima sem o marcador deste
+    # projeto era declarada ao core como slot gerenciado AUSENTE
+    # (`CAP_REDE_EXISTE=0` e os demais campos zerados), com um aviso dizendo
+    # que "ela não será alterada". Isso mascarava o fato para a precondição
+    # `P-LIBVIRT-NETWORK-OWNED`, que já modela a recusa nos dois modos, e fazia
+    # o modo bridge prosseguir criando a bridge do host ao lado de uma rede
+    # alheia com o nome que esta etapa administra.
+    #
+    # Agora o fato viaja como é nos DOIS modos: a rede existe, o marcador é o
+    # do terceiro, `facts["owned"]` é falso e o plano sai com precondição
+    # bloqueante, sem nenhuma operação. `provar_precondicoes` transforma isso na
+    # recusa de propriedade antes da primeira mutação, e o estado alheio fica
+    # intocado por construção, não por exceção de captura.
+    if [ "$CAP_REDE_ALHEIA" -eq 1 ] && [ "$AVISO_REDE_ALHEIA" -eq 0 ]; then
+        AVISO_REDE_ALHEIA=1
+        aviso "A rede homônima '$REDE_LIBVIRT' não tem o marcador deste projeto; ela não será alterada por esta etapa."
     fi
     return 0
 }
@@ -979,8 +1273,9 @@ revalidar_estado() {
 # "Rollback concluído: estados anteriores restaurados". Divergência agora é erro
 # grave (ROLLBACK_FALHOU=1), nunca mensagem de sucesso.
 #
-# Fora do escopo desta subetapa: reter bundle de evidência e emitir recovery_id
-# (D-NET-RECOVERY-EVIDENCE) continuam sendo de I7.6.
+# I7.6 fechou o outro lado disso: a divergência detectada aqui agora também
+# retém o bundle local de evidência e emite o `recovery_id`
+# (`reter_evidencia_recuperacao`, chamada por `tratar_saida`).
 provar_xml_rede_restaurado() {
     # $1 = estado (persistente|ativo); $2 = arquivo com o XML capturado.
     # A comparação é por fingerprint canônico do core, não por bytes: o XML
@@ -1192,14 +1487,22 @@ executar_rollback() {
 }
 
 tratar_saida() {
-    local status="$1"
+    local status="$1" rollback_status=0
     trap - EXIT INT TERM
     set +e
     if [ "$TX_ARMADA" -eq 1 ] && [ "$TX_COMMIT" -eq 0 ] && [ "$TX_MUTOU" -eq 1 ]; then
         executar_rollback
-        if [ "$?" -ne 0 ] && [ "$status" -eq 0 ]; then
+        rollback_status=$?
+        if [ "$rollback_status" -ne 0 ] && [ "$status" -eq 0 ]; then
             status=1
         fi
+    fi
+    # I7.6 (D-NET-RECOVERY-EVIDENCE): a evidência é promovida ANTES de
+    # `limpar_temporarios`, porque é o TMP_DIR que guarda o estado capturado. E
+    # só aqui: rollback comprovado (ou transação sem mutação) continua saindo
+    # sem reter nada e sem emitir localizador algum.
+    if [ "$rollback_status" -ne 0 ]; then
+        reter_evidencia_recuperacao
     fi
     limpar_temporarios
     # Idioma documentado da ponte (seção 3.8): a janela de sinal precisa limpar
@@ -1490,7 +1793,14 @@ verificar() {
                 else
                     status=$?
                     if [ "$status" -eq 1 ]; then
-                        v_ok "Rede homônima $REDE_LIBVIRT sem marcador foi preservada sem validação/alteração."
+                        # I7.6 (D-NET-UNMANAGED-BRIDGE): este ramo emitia
+                        # `v_ok "Rede homônima $REDE_LIBVIRT sem marcador foi
+                        # preservada sem validação/alteração."`, ou seja, o
+                        # `--verificar` do modo bridge APROVAVA exatamente o
+                        # estado que a aplicação passou a recusar. Manter as
+                        # duas tolerâncias separadas deixaria a verificação
+                        # aprovando o que a etapa recusa.
+                        v_falta "A rede libvirt '$REDE_LIBVIRT' já existe sem o marcador deste projeto. Escolha outro REDE_LIBVIRT; esta etapa não altera rede alheia."
                     else
                         v_falta "$ESTADO_REDE_ERRO"
                     fi
@@ -1572,6 +1882,21 @@ verificar() {
     v_fim
 }
 [ "${1:-}" = "--verificar" ] && verificar
+# I7.6 (D-NET-RECOVERY-EVIDENCE): dois subcomandos somente leitura, ao lado de
+# `--verificar` e antes de `guard_mutation`, porque nenhum dos dois muta o host
+# gerenciado: um inspeciona o bundle local de recuperação, o outro o libera. São
+# eles que a mensagem de falha cita, e é por isso que ela não precisa imprimir
+# caminho local nenhum.
+case "${1:-}" in
+    --recuperacao)
+        recuperacao_mostrar "${2:-}"
+        exit $?
+        ;;
+    --recuperacao-limpar)
+        recuperacao_limpar "${2:-}"
+        exit $?
+        ;;
+esac
 
 guard_mutation network.configure || exit 1
 exigir_nao_root

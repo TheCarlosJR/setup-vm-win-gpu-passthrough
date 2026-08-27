@@ -492,6 +492,12 @@ mutator_harness_seed_network() {
     [[ $persistent == yes ]] && /usr/bin/cp "$source" "$MUTATOR_STATE_DIR/network-persistent.xml"
     [[ $active == yes ]] && /usr/bin/cp "$source" "$MUTATOR_STATE_DIR/network-active.xml"
     [[ $autostart == yes ]] && : > "$MUTATOR_STATE_DIR/network-autostart"
+    # I7.6: `return 0` explícito. O último `[[ ... ]] &&` devolvia 1 quando a
+    # semeadura pedia `no`, e sob `set -e` isso derrubava o chamador em vez de
+    # semear o cenário — motivo pelo qual todas as chamadas anteriores usavam
+    # `yes yes yes`. A matriz de rollback precisa da rede sem autostart para
+    # alcançar o verbo `network-autostart-disable`.
+    return 0
 }
 
 mutator_harness_seed_other_vm_consumer() {

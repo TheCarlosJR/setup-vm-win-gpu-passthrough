@@ -59,6 +59,76 @@ assert_no_text() {
     local file=$1 expression=$2 description=$3
     ! /usr/bin/grep -Eq -- "$expression" "$file" || fail "$description"
 }
+assert_no_text_literal() {
+    # `grep -F`: usado quando o que não pode aparecer é um caminho local, e não
+    # um padrão. Com -E, cada '.' viraria coringa e o teste passaria a aceitar
+    # vizinhanças que não são o caminho procurado.
+    local file=$1 needle=$2 description=$3
+    ! /usr/bin/grep -Fq -- "$needle" "$file" || fail "$description"
+}
+# --- I7.6 (D-NET-RECOVERY-EVIDENCE): bundle local de evidência ---------------
+# O bundle vive na raiz de estado do operador simulado
+# (`$MUTATOR_HOME/.local/state/vm-passthrough/recovery/<recovery_id>`), a mesma
+# que `LOG_ACOES_DIR` usa. `mutator_harness_reset` NÃO limpa `$MUTATOR_HOME`,
+# então cada grupo que exercita retenção limpa explicitamente antes de medir.
+recovery_root() {
+    printf '%s\n' "$MUTATOR_HOME/.local/state/vm-passthrough/recovery"
+}
+limpar_evidencias_recuperacao() {
+    /usr/bin/rm -rf -- "$(recovery_root)"
+}
+recovery_id_emitido() {
+    # Um processo só e sem pipe: `set -o pipefail` transformaria um SIGPIPE de
+    # `head` em falha de substituição de comando, e sob `set -e` isso mataria a
+    # campanha por um detalhe de bufferização.
+    /usr/bin/awk 'match($0, /recovery_id=[0-9a-f][0-9a-f]*/) {
+        print substr($0, RSTART + 12, RLENGTH - 12); exit
+    }' "$MUTATOR_ERROR"
+}
+assert_evidencia_retida() {
+    # Prova de retenção: identificador aleatório de 128 bits no stderr, bundle
+    # `0700` com metadados de criação/expiração e artefatos `0600`.
+    local description=$1 identifier bundle modo linha criado expira
+    identifier=$(recovery_id_emitido)
+    [[ -n $identifier ]] || fail "$description não emitiu recovery_id"
+    bundle="$(recovery_root)/$identifier"
+    [[ -d $bundle ]] || fail "$description não reteve o bundle de evidência"
+    modo=$(/usr/bin/stat -c '%a' "$bundle")
+    [[ $modo == 700 ]] || fail "$description reteve bundle com modo $modo (esperado 700)"
+    [[ -f $bundle/metadata ]] || fail "$description reteve bundle sem metadados"
+    modo=$(/usr/bin/stat -c '%a' "$bundle/metadata")
+    [[ $modo == 600 ]] || fail "$description gravou metadados com modo $modo (esperado 600)"
+    while IFS= read -r linha; do
+        modo=$(/usr/bin/stat -c '%a' "$linha")
+        [[ $modo == 600 ]] || fail "$description reteve artefato com modo $modo (esperado 600): ${linha##*/}"
+    done < <(/usr/bin/find "$bundle" -type f)
+    criado=$(/usr/bin/sed -n 's/^created_epoch=//p' "$bundle/metadata")
+    expira=$(/usr/bin/sed -n 's/^expires_epoch=//p' "$bundle/metadata")
+    [[ $criado =~ ^[0-9]+$ && $expira =~ ^[0-9]+$ ]] \
+        || fail "$description não registrou criação/expiração em epoch"
+    [[ $((expira - criado)) -eq 604800 ]] \
+        || fail "$description registrou retenção diferente de sete dias"
+}
+assert_recuperacao_redigida() {
+    # Seção 3.9: a mensagem humana emite só `recovery_id` e comando seguro.
+    # Caminho local, conteúdo do bundle e nome do diretório de retenção ficam
+    # de fora — por isso a checagem é sobre as LINHAS da mensagem, e não sobre
+    # o stderr inteiro, que ainda carrega o diagnóstico do rollback.
+    local description=$1 mensagem="$MUTATOR_HARNESS_DIR/recuperacao.msg"
+    /usr/bin/grep -E 'recovery_id=|--recuperacao|evidência local foi retida' "$MUTATOR_ERROR" \
+        > "$mensagem" || fail "$description não emitiu a mensagem de recuperação"
+    assert_no_text_literal "$mensagem" "$MUTATOR_HOME" "$description vazou o caminho local na mensagem"
+    assert_no_text_literal "$mensagem" "$MUTATOR_HARNESS_DIR" "$description vazou a raiz da sandbox na mensagem"
+    assert_no_text_literal "$mensagem" 'vm-passthrough/recovery' "$description vazou o diretório de retenção na mensagem"
+    assert_text "$mensagem" 'recovery_id=[0-9a-f]{32}' "$description não emitiu localizador de 128 bits"
+    assert_text "$mensagem" 'bash etapas/60-rede-bridge.sh --recuperacao [0-9a-f]{32}' \
+        "$description não emitiu comando seguro de inspeção"
+}
+assert_sem_evidencia() {
+    local description=$1
+    assert_no_text "$MUTATOR_ERROR" 'recovery_id=' "$description emitiu recovery_id sem falha de restauração"
+    [[ ! -d $(recovery_root) ]] || fail "$description reteve evidência sem falha de restauração"
+}
 assert_confined() {
     mutator_harness_assert_confined || fail "escape da sandbox em $1"
 }
@@ -348,6 +418,7 @@ fi
 # ---------------------------------------------------------------------------
 # Etapa 60: sucessos NAT/bridge e matrizes de falha/sinal em cada efeito.
 # ---------------------------------------------------------------------------
+limpar_evidencias_recuperacao
 prepare_network nat
 mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
 assert_eq 0 "$MUTATOR_RC" 'sucesso NAT'
@@ -356,9 +427,12 @@ assert_eq 11 "$(mutator_harness_effect_count)" 'fronteiras NAT'
    && -e $MUTATOR_STATE_DIR/network-autostart ]] || fail 'NAT não ficou persistente/ativa/autostart'
 assert_vm_source network passthrough-nat || fail 'NIC não terminou na rede NAT'
 assert_text "$MUTATOR_OUTPUT" 'Commit lógico da transação de rede concluído' 'NAT sem commit explícito'
+# I7.6 (D-NET-RECOVERY-EVIDENCE): no caminho de sucesso nada é retido.
+assert_sem_evidencia 'sucesso NAT'
 assert_confined 'sucesso NAT'
 pass
 
+limpar_evidencias_recuperacao
 prepare_network bridge
 mutator_harness_run 60-rede-bridge.sh "$BRIDGE_INPUT"
 assert_eq 0 "$MUTATOR_RC" 'sucesso bridge'
@@ -367,6 +441,7 @@ assert_eq 10 "$(mutator_harness_effect_count)" 'fronteiras bridge'
    && -e $MUTATOR_STATE_DIR/bridge-active ]] || fail 'bridge não publicou/aplicou Netplan sintético'
 assert_eq 600 "$(/usr/bin/stat -c '%a' "$MUTATOR_ROOT/etc/netplan/90-vm-passthrough-bridge.yaml")" 'modo do Netplan'
 assert_vm_source bridge br0 || fail 'NIC não terminou na bridge'
+assert_sem_evidencia 'sucesso bridge'
 assert_confined 'sucesso bridge'
 pass
 
@@ -442,29 +517,272 @@ assert_eq 'fs:rm:/etc/netplan/90-vm-passthrough-bridge.yaml;netplan:apply;virsh:
     "$(effect_tail 4)" 'ordem do rollback bridge'
 pass
 
-# Falha antes/depois de cada ação do próprio rollback.
-for network_mode in nat bridge; do
-    network_input=$NAT_INPUT
-    [[ $network_mode == nat ]] || network_input=$BRIDGE_INPUT
+# ---------------------------------------------------------------------------
+# I7.6 (REQ-NET-TX): falha antes E depois de CADA ação do próprio rollback.
+#
+# O laço anterior cobria apenas os efeitos 9-12, que é toda a extensão do
+# rollback quando nada preexiste no host: parar a rede, remover a definição,
+# redefinir a VM e restaurar o passthrough.conf. Isso deixava de fora as ações
+# que só existem quando a transação encontra estado anterior — recriar o XML
+# ATIVO, redefinir o XML PERSISTENTE, restaurar o AUTOSTART e restaurar o
+# ARQUIVO de perfil de rede do host — que são exatamente as que REQ-NET-TX
+# nomeia. A matriz virou uma tabela de cenários; cada linha declara o efeito em
+# que o sinal cai, o total de efeitos esperado (sinal + passos de rollback) e a
+# forma daquele rollback.
+#
+# O total esperado é asserção, não descoberta: um passo de rollback que deixe
+# de ser executado muda a contagem e reprova aqui, mesmo que a falha injetada
+# seja em outro índice. E a contagem NÃO muda com a injeção porque
+# `registrar_falha_rollback` acumula o erro e a sequência continua até o fim:
+# um rollback interrompido no meio seria uma regressão, não um resultado.
+#
+# É por VERBO de restauração que a matriz precisa passar, não por combinação de
+# cenários. Estes quatro cobrem dez dos onze verbos que `executar_passo_rollback`
+# mapeia: `host-profile-discard` e `host-network-activate` no bridge limpo,
+# `host-profile-restore` no bridge com perfil publicado, `network-deactivate` e
+# `network-undefine` no NAT limpo, e `network-recreate` (XML ativo),
+# `network-redefine` (XML persistente) e `network-autostart-enable` no NAT com
+# rede preexistente; `domain-restore` e `configuration-restore` aparecem nos
+# quatro. O décimo primeiro, `network-autostart-disable`, exige uma captura com
+# autostart desligado e ganha um cenário próprio logo depois desta tabela.
+#
+# O eixo "consumidores" viaja junto do cenário NAT mais rico, com outra VM
+# definida consumindo a rede gerenciada, em vez de virar um cenário de forma
+# idêntica: repetir sete injeções sobre os mesmos comandos dobraria o tempo da
+# campanha sem cobrir verbo novo.
+#
+# Cenários (nome / semeadura / efeito do sinal / total de efeitos / forma):
+#   nat-limpo               rede ausente          8  12  destroy,undefine,define,conf
+#   bridge-limpo            perfil ausente        8  12  rm-perfil,apply,define,conf
+#   nat-rede-consumidor     rede ativa+autostart  8  15  destroy,undefine,create,
+#                           + consumidor definido            define-rede,autostart,
+#                                                            define-vm,conf
+#   bridge-perfil-existente perfil publicado      9  13  restore-perfil,apply,
+#                                                        define,conf
+semear_cenario_rollback() {
+    local scenario=$1
+    case $scenario in
+        nat-limpo)
+            prepare_network nat
+            ;;
+        bridge-limpo)
+            prepare_network bridge
+            ;;
+        nat-rede-consumidor)
+            mutator_harness_reset
+            mutator_harness_seed_network managed yes yes yes
+            # Consumidor DEFINIDO e inativo: o modo NAT só recusa por
+            # consumidor ATIVO, então a transação prossegue e o rollback tem de
+            # revalidar o componente `consumers` sem sobrescrever a outra VM.
+            mutator_harness_seed_other_vm_consumer no
+            mutator_harness_set_conf REDE_NAT_CIDR 192.168.178.0/24
+            ;;
+        bridge-perfil-existente)
+            mutator_harness_reset
+            mutator_harness_set_conf REDE_MODO bridge
+            # Perfil publicado por uma execução anterior, com conteúdo
+            # DIFERENTE do pretendido: assim a etapa arquiva o backup datado,
+            # republica e o rollback tem de RESTAURAR o arquivo, em vez de
+            # apenas descartar a criação parcial.
+            /usr/bin/printf '%s\n' 'network:' '  version: 2' '  ethernets:' \
+                '    enp3s0:' '      dhcp4: yes' \
+                > "$MUTATOR_ROOT/etc/netplan/90-vm-passthrough-bridge.yaml"
+            /usr/bin/chmod 0600 "$MUTATOR_ROOT/etc/netplan/90-vm-passthrough-bridge.yaml"
+            : > "$MUTATOR_STATE_DIR/bridge-active"
+            ;;
+        *) fail "cenário de rollback desconhecido: $scenario" ;;
+    esac
+}
+entrada_cenario_rollback() {
+    # Sem `$( )`: a substituição de comando descarta a nova linha final e o
+    # `confirmar` da etapa passaria a ler EOF, virando "Cancelado.".
+    local scenario=$1
+    ENTRADA_CENARIO=$NAT_INPUT
+    [[ $scenario == nat-* ]] || ENTRADA_CENARIO=$BRIDGE_INPUT
+}
+# Projeção de conteúdo do manifesto observável, usada só pelos cenários NOVOS.
+# Duas exclusões, ambas deliberadas:
+#   * o backup datado `*.bak-*` do perfil de rede é artefato anunciado ao
+#     operador e sobrevive ao rollback de propósito;
+#   * a coluna de modo dos XML de rede é fidelidade do harness, não da etapa:
+#     `mutator_harness_seed_network` copia a fixture do checkout, enquanto o
+#     shim de `virsh net-create`/`net-define` grava com o umask do processo. O
+#     digest, que é o que a restauração precisa provar, é comparado inteiro.
+snapshot_conteudo_restaurado() {
+    local output=$1
+    snapshot_observable "$output.bruto" content
+    /usr/bin/grep -v '\.bak-[0-9]' "$output.bruto" | /usr/bin/cut -d'|' -f1,2,4 > "$output"
+}
+ROLLBACK_CENARIOS=(
+    'nat-limpo|8|12'
+    'bridge-limpo|8|12'
+    'nat-rede-consumidor|8|15'
+    'bridge-perfil-existente|9|13'
+)
+for scenario_row in "${ROLLBACK_CENARIOS[@]}"; do
+    IFS='|' read -r scenario signal_effect total_effects <<< "$scenario_row"
+    entrada_cenario_rollback "$scenario"
+    network_input=$ENTRADA_CENARIO
+    # Primeiro a prova positiva: o rollback INTEIRO daquela forma restaura o
+    # estado capturado e é anunciado como sucesso. Sem ela, a matriz de falha
+    # provaria apenas que a etapa sabe reclamar.
+    limpar_evidencias_recuperacao
+    semear_cenario_rollback "$scenario"
+    snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/rb-before"
+    MUTATOR_TEST_SIGNAL_EFFECT=$signal_effect
+    MUTATOR_TEST_SIGNAL_NAME=EXIT
+    mutator_harness_run 60-rede-bridge.sh "$network_input"
+    unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
+    assert_nonzero "$MUTATOR_RC" "sinal EXIT no cenário $scenario"
+    assert_eq "$total_effects" "$(mutator_harness_effect_count)" \
+        "o rollback de $scenario não executou todos os passos esperados"
+    snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/rb-after"
+    assert_manifest_equal "$MUTATOR_HARNESS_DIR/rb-before" "$MUTATOR_HARNESS_DIR/rb-after" \
+        "o rollback de $scenario não restaurou o conteúdo capturado"
+    assert_no_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
+        "o rollback de $scenario acusou falha sem injeção nenhuma"
+    assert_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+        "o rollback de $scenario não foi comprovado"
+    assert_no_text "$MUTATOR_OUTPUT" 'Commit lógico da transação de rede concluído' \
+        "o cenário $scenario produziu falso commit"
+    # Rollback comprovado NÃO retém evidência e NÃO emite localizador.
+    assert_sem_evidencia "o rollback comprovado de $scenario"
+    assert_confined "rollback comprovado de $scenario"
+
     for fail_mode in before after; do
-        for rollback_effect in 9 10 11 12; do
-            prepare_network "$network_mode"
-            MUTATOR_TEST_SIGNAL_EFFECT=8
+        for ((rollback_effect = signal_effect + 1; rollback_effect <= total_effects; rollback_effect++)); do
+            limpar_evidencias_recuperacao
+            semear_cenario_rollback "$scenario"
+            MUTATOR_TEST_SIGNAL_EFFECT=$signal_effect
             MUTATOR_TEST_SIGNAL_NAME=EXIT
             MUTATOR_TEST_FAIL_EFFECT=$rollback_effect
             MUTATOR_TEST_FAIL_MODE=$fail_mode
             mutator_harness_run 60-rede-bridge.sh "$network_input"
             unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
             unset MUTATOR_TEST_FAIL_EFFECT MUTATOR_TEST_FAIL_MODE
-            assert_nonzero "$MUTATOR_RC" "falha $fail_mode no rollback $network_mode/$rollback_effect"
+            assert_nonzero "$MUTATOR_RC" "falha $fail_mode no rollback $scenario/$rollback_effect"
             assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
-                "rollback $network_mode/$rollback_effect não sinalizou falha"
-            assert_confined "rollback $network_mode/$rollback_effect"
+                "rollback $scenario/$rollback_effect não sinalizou falha"
+            assert_no_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+                "rollback $scenario/$rollback_effect foi anunciado como sucesso"
+            assert_no_text "$MUTATOR_OUTPUT" 'Commit lógico da transação de rede concluído' \
+                "falha no rollback $scenario/$rollback_effect produziu falso commit"
+            assert_eq "$total_effects" "$(mutator_harness_effect_count)" \
+                "a falha $fail_mode em $rollback_effect interrompeu a sequência de rollback de $scenario"
+            # I7.6 (D-NET-RECOVERY-EVIDENCE): rollback não comprovado é erro
+            # grave COM recuperação orientada, em toda ação do rollback.
+            assert_evidencia_retida "rollback $scenario/$rollback_effect ($fail_mode)"
+            assert_recuperacao_redigida "rollback $scenario/$rollback_effect ($fail_mode)"
+            assert_confined "rollback $scenario/$rollback_effect"
         done
     done
     pass
 
 done
+limpar_evidencias_recuperacao
+
+# I7.6: `INT`, `TERM` e `EXIT` nas janelas mutantes que a matriz por efeito não
+# alcança, porque só existem quando a transação encontra estado anterior:
+# destruir uma rede libvirt que já estava ATIVA, com outra VM definida
+# consumindo-a, e arquivar o backup datado de um perfil de rede já publicado.
+# A matriz completa por efeito continua sendo a dos dois cenários limpos; aqui a
+# cobertura é dirigida à janela nova, uma por cenário, nos três sinais.
+JANELAS_NOVAS=(
+    'nat-rede-consumidor|6'
+    'bridge-perfil-existente|5'
+)
+for scenario_row in "${JANELAS_NOVAS[@]}"; do
+    IFS='|' read -r scenario signal_effect <<< "$scenario_row"
+    entrada_cenario_rollback "$scenario"
+    network_input=$ENTRADA_CENARIO
+    for signal_name in INT TERM EXIT; do
+        limpar_evidencias_recuperacao
+        semear_cenario_rollback "$scenario"
+        snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/janela-before"
+        MUTATOR_TEST_SIGNAL_EFFECT=$signal_effect
+        MUTATOR_TEST_SIGNAL_NAME=$signal_name
+        mutator_harness_run 60-rede-bridge.sh "$network_input"
+        unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
+        case $signal_name in
+            INT) assert_eq 130 "$MUTATOR_RC" "INT em $scenario/$signal_effect" ;;
+            TERM) assert_eq 143 "$MUTATOR_RC" "TERM em $scenario/$signal_effect" ;;
+            EXIT) assert_nonzero "$MUTATOR_RC" "EXIT em $scenario/$signal_effect" ;;
+        esac
+        snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/janela-after"
+        assert_manifest_equal "$MUTATOR_HARNESS_DIR/janela-before" "$MUTATOR_HARNESS_DIR/janela-after" \
+            "sinal $signal_name não restaurou $scenario/$signal_effect"
+        assert_no_text "$MUTATOR_OUTPUT" 'Commit lógico da transação de rede concluído' \
+            "sinal $signal_name produziu falso commit em $scenario/$signal_effect"
+        assert_no_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
+            "sinal $signal_name deixou rollback incompleto em $scenario/$signal_effect"
+        assert_sem_evidencia "sinal $signal_name em $scenario/$signal_effect"
+        assert_confined "sinal $signal_name $scenario/$signal_effect"
+    done
+done
+pass
+limpar_evidencias_recuperacao
+
+# I7.6: `network-autostart-disable` é o único verbo de rollback que a tabela
+# acima não alcança, porque `nat-rede-consumidor` captura a rede com
+# autostart=sim e o plano restaura sempre o valor CAPTURADO. Aqui a rede é
+# capturada persistente, ativa e SEM autostart: a etapa liga o autostart na ida
+# (efeito 8) e o rollback tem de desligá-lo de volta (efeito 14).
+#
+# A forma do rollback é ponto a ponto a mesma de `nat-rede-consumidor` — sete
+# passos, e só o argumento do verbo de autostart muda —, então a injeção fica
+# EXATAMENTE no passo de autostart, antes e depois, em vez de repetir as seis
+# outras injeções que a tabela já cobriu com os mesmos comandos.
+semear_rollback_sem_autostart() {
+    mutator_harness_reset
+    mutator_harness_seed_network managed yes yes no
+    mutator_harness_set_conf REDE_NAT_CIDR 192.168.178.0/24
+}
+limpar_evidencias_recuperacao
+semear_rollback_sem_autostart
+snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/autostart-before"
+MUTATOR_TEST_SIGNAL_EFFECT=9
+MUTATOR_TEST_SIGNAL_NAME=EXIT
+mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
+unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
+assert_nonzero "$MUTATOR_RC" 'sinal EXIT com rede capturada sem autostart'
+assert_eq 16 "$(mutator_harness_effect_count)" \
+    'o rollback da rede sem autostart não executou todos os passos esperados'
+assert_eq 'virsh:net-destroy;virsh:net-undefine;virsh:net-create;virsh:net-define;virsh:net-autostart;virsh:define;fs:cp:$H/project/passthrough.conf' \
+    "$(effect_tail 7)" 'ordem do rollback com autostart capturado em não'
+snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/autostart-after"
+assert_manifest_equal "$MUTATOR_HARNESS_DIR/autostart-before" "$MUTATOR_HARNESS_DIR/autostart-after" \
+    'o rollback da rede sem autostart não restaurou o conteúdo capturado'
+[[ ! -e $MUTATOR_STATE_DIR/network-autostart ]] \
+    || fail 'o rollback deixou ligado um autostart que o host não tinha'
+assert_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+    'o rollback da rede sem autostart não foi comprovado'
+assert_sem_evidencia 'rollback comprovado da rede sem autostart'
+assert_confined 'rollback comprovado da rede sem autostart'
+for fail_mode in before after; do
+    limpar_evidencias_recuperacao
+    semear_rollback_sem_autostart
+    MUTATOR_TEST_SIGNAL_EFFECT=9
+    MUTATOR_TEST_SIGNAL_NAME=EXIT
+    MUTATOR_TEST_FAIL_EFFECT=14
+    MUTATOR_TEST_FAIL_MODE=$fail_mode
+    mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
+    unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
+    unset MUTATOR_TEST_FAIL_EFFECT MUTATOR_TEST_FAIL_MODE
+    assert_nonzero "$MUTATOR_RC" "falha $fail_mode no autostart do rollback"
+    assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
+        "falha $fail_mode no autostart do rollback não sinalizou erro grave"
+    assert_text "$MUTATOR_ERROR" 'autostart' \
+        "falha $fail_mode no autostart do rollback não nomeou o recurso"
+    assert_no_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+        "falha $fail_mode no autostart do rollback foi anunciada como sucesso"
+    assert_eq 16 "$(mutator_harness_effect_count)" \
+        "a falha $fail_mode no autostart interrompeu a sequência de rollback"
+    assert_evidencia_retida "falha $fail_mode no autostart do rollback"
+    assert_recuperacao_redigida "falha $fail_mode no autostart do rollback"
+    assert_confined "falha $fail_mode no autostart do rollback"
+done
+pass
+limpar_evidencias_recuperacao
 
 # I7.5 (D-NET-ROLLBACK-DIVERGE): o rollback passou a reler cada recurso e a
 # compará-lo semanticamente com o capturado. O oráculo ANTERIOR media exatamente
@@ -477,6 +795,8 @@ done
 # Agora `restaurar_vm_anterior` executa o define, relê o XML com `virsh dumpxml
 # --inactive` e compara pelo core (`xml_dominio_equivalente`); um define que
 # devolve rc=0 sem aplicar vira erro grave e nunca é anunciado como sucesso.
+limpar_evidencias_recuperacao
+recovery_identifiers=()
 for network_mode in nat bridge; do
     prepare_network "$network_mode"
     original_vm_hash=$(mutator_harness_vm_hash)
@@ -497,12 +817,75 @@ for network_mode in nat bridge; do
     assert_no_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
         "rollback divergente $network_mode voltou a ser anunciado como sucesso"
     assert_text "$MUTATOR_CALL_LOG" '\|DIVERGE\|' 'injeção divergente não foi observada'
+    # I7.6 (D-NET-RECOVERY-EVIDENCE): estas duas asserções eram, literalmente,
+    #   [[ -z $(/usr/bin/find "$MUTATOR_TMP" -mindepth 1 -print -quit) ]] \
+    #       || fail 'TMP_DIR da etapa 60 não foi limpo'
+    #   assert_no_text "$MUTATOR_ERROR" 'recovery_id=' \
+    #       'oráculo atual passou a preservar recovery_id; atualize a classificação'
+    # sob o comentário "Retenção de evidência e recovery_id continuam FORA deste
+    # caso: são de I7.6 (D-NET-RECOVERY-EVIDENCE). O código atual remove o
+    # TMP_DIR e não emite recovery_id nessa falha".
+    #
+    # A segunda foi invertida: rollback não comprovado passa a emitir
+    # `recovery_id=` e o comando seguro de inspeção. A primeira MUDOU DE
+    # SIGNIFICADO e por isso continua aqui: ela media "nada é retido", e agora
+    # mede o que precisa continuar verdadeiro — o TMP_DIR, que fica sob
+    # `TMPDIR` e não tem modo garantido, continua sendo apagado. O que é retido
+    # foi promovido para o bundle `0700` na raiz de estado do operador, provado
+    # logo abaixo, e nunca fica no temporário.
+    [[ -z $(/usr/bin/find "$MUTATOR_TMP" -mindepth 1 -print -quit) ]] \
+        || fail "TMP_DIR da etapa 60 não foi limpo no rollback divergente $network_mode"
+    assert_evidencia_retida "rollback divergente $network_mode"
+    assert_recuperacao_redigida "rollback divergente $network_mode"
+    recovery_identifiers+=("$(recovery_id_emitido)")
 done
-# Retenção de evidência e recovery_id continuam FORA deste caso: são de I7.6
-# (D-NET-RECOVERY-EVIDENCE). O código atual remove o TMP_DIR e não emite
-# recovery_id nessa falha, e estas duas asserções seguem inalteradas.
-[[ -z $(/usr/bin/find "$MUTATOR_TMP" -mindepth 1 -print -quit) ]] || fail 'TMP_DIR da etapa 60 não foi limpo'
-assert_no_text "$MUTATOR_ERROR" 'recovery_id=' 'oráculo atual passou a preservar recovery_id; atualize a classificação'
+# Ciclo de vida do bundle: dois localizadores independentes, um por modo, que
+# provam os dois caminhos de liberação da seção 3.9 — recuperação reconhecida e
+# expiração — e a idempotência exata dos dois.
+[[ ${#recovery_identifiers[@]} -eq 2 ]] || fail 'os dois rollbacks divergentes não emitiram localizadores distintos'
+[[ ${recovery_identifiers[0]} != "${recovery_identifiers[1]}" ]] \
+    || fail 'dois rollbacks divergentes emitiram o mesmo recovery_id'
+recovery_identifier=${recovery_identifiers[1]}
+recovery_expirado=${recovery_identifiers[0]}
+mutator_harness_run 60-rede-bridge.sh '' --recuperacao "$recovery_identifier"
+assert_eq 0 "$MUTATOR_RC" 'inspeção do bundle de recuperação'
+assert_text "$MUTATOR_OUTPUT" "expires_epoch=[0-9]+" 'inspeção sem metadados de expiração'
+assert_text "$MUTATOR_OUTPUT" 'rollback_failures=[0-9]+' 'inspeção sem contagem de falhas retidas'
+assert_no_text_literal "$MUTATOR_OUTPUT" "$MUTATOR_HOME" 'inspeção vazou o caminho local do bundle'
+assert_confined 'inspeção do bundle de recuperação'
+mutator_harness_run 60-rede-bridge.sh '' --recuperacao-limpar "$recovery_identifier"
+assert_eq 0 "$MUTATOR_RC" 'limpeza reconhecida do bundle'
+[[ ! -d $(recovery_root)/$recovery_identifier ]] || fail 'limpeza reconhecida não removeu o bundle'
+# Seção 3.9: a limpeza é lógica e a etapa precisa dizer isso, em vez de
+# prometer apagamento físico em CoW/SSD.
+assert_text "$MUTATOR_OUTPUT" 'copy-on-write' 'limpeza não avisou que o unlink é lógico'
+/usr/bin/find "$MUTATOR_HOME" -printf '%p|%m|%s|%T@\n' | /usr/bin/sort \
+    > "$MUTATOR_HARNESS_DIR/recovery-limpo.1"
+mutator_harness_run 60-rede-bridge.sh '' --recuperacao-limpar "$recovery_identifier"
+assert_eq 0 "$MUTATOR_RC" 'segunda limpeza do bundle já removido'
+/usr/bin/find "$MUTATOR_HOME" -printf '%p|%m|%s|%T@\n' | /usr/bin/sort \
+    > "$MUTATOR_HARNESS_DIR/recovery-limpo.2"
+assert_manifest_equal "$MUTATOR_HARNESS_DIR/recovery-limpo.1" "$MUTATOR_HARNESS_DIR/recovery-limpo.2" \
+    'a limpeza reconhecida do bundle de recuperação não é idempotente'
+assert_confined 'limpeza idempotente do bundle de recuperação'
+# Expiração: o outro bundle é envelhecido nos metadados e a limpeza SEM
+# identificador tem de recolhê-lo, também de forma idempotente. Este é o teto
+# de sete dias da seção 3.9, medido pelo campo que a etapa gravou.
+[[ -d $(recovery_root)/$recovery_expirado ]] || fail 'bundle do outro modo desapareceu antes da prova de expiração'
+/usr/bin/sed -i 's/^expires_epoch=.*/expires_epoch=1/' "$(recovery_root)/$recovery_expirado/metadata"
+mutator_harness_run 60-rede-bridge.sh '' --recuperacao-limpar
+assert_eq 0 "$MUTATOR_RC" 'limpeza por expiração'
+[[ ! -d $(recovery_root)/$recovery_expirado ]] || fail 'limpeza por expiração não removeu o bundle vencido'
+/usr/bin/find "$MUTATOR_HOME" -printf '%p|%m|%s|%T@\n' | /usr/bin/sort \
+    > "$MUTATOR_HARNESS_DIR/recovery-expirado.1"
+mutator_harness_run 60-rede-bridge.sh '' --recuperacao-limpar
+assert_eq 0 "$MUTATOR_RC" 'segunda limpeza por expiração'
+/usr/bin/find "$MUTATOR_HOME" -printf '%p|%m|%s|%T@\n' | /usr/bin/sort \
+    > "$MUTATOR_HARNESS_DIR/recovery-expirado.2"
+assert_manifest_equal "$MUTATOR_HARNESS_DIR/recovery-expirado.1" "$MUTATOR_HARNESS_DIR/recovery-expirado.2" \
+    'a limpeza por expiração não é idempotente'
+assert_confined 'limpeza por expiração do bundle de recuperação'
+limpar_evidencias_recuperacao
 pass
 
 # I7.5 (D-NET-CONCURRENCY): a etapa passou a guardar os fingerprints do estado
@@ -520,6 +903,7 @@ pass
 # sobrescreveriam o recurso alterado por terceiro — por isso o XML da rede
 # continua com a metadata externa: ela é PRESERVADA de propósito, não ignorada,
 # e o define da VM continua sobrescrevendo a mudança feita no XML do domínio.
+limpar_evidencias_recuperacao
 prepare_network nat
 MUTATOR_TEST_CONCURRENT_EFFECT=8
 mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
@@ -542,6 +926,12 @@ if vm.find('./metadata/i0-external-change') is not None:
 if network.find('./metadata/i0-external-change') is None:
     raise SystemExit(1)
 PY
+# I7.6: o conflito de concorrência é uma restauração NÃO comprovada como
+# qualquer outra — o passo bloqueado nunca chegou a ser executado —, então ele
+# também retém evidência e emite localizador.
+assert_evidencia_retida 'conflito de concorrência'
+assert_recuperacao_redigida 'conflito de concorrência'
+limpar_evidencias_recuperacao
 pass
 
 # Conversões e recusas seguras/atuais.
@@ -566,7 +956,7 @@ assert_manifest_equal "$MUTATOR_HARNESS_DIR/before.content" "$MUTATOR_HARNESS_DI
 assert_text "$MUTATOR_ERROR" 'restaure o backup Netplan' 'recusa bridge -> NAT sem instrução atual'
 pass
 
-# Rede homônima não gerenciada: NAT recusa; bridge hoje preserva e prossegue.
+# Rede homônima não gerenciada: os DOIS modos recusam e preservam (I7.6).
 mutator_harness_reset
 mutator_harness_seed_network unmanaged yes yes yes
 unmanaged_persistent=$(/usr/bin/sha256sum "$MUTATOR_STATE_DIR/network-persistent.xml")
@@ -579,18 +969,47 @@ assert_manifest_equal "$MUTATOR_HARNESS_DIR/before.content" "$MUTATOR_HARNESS_DI
     'NAT alterou rede homônima não gerenciada'
 assert_text "$MUTATOR_ERROR" 'sem o marcador deste projeto' 'NAT sem diagnóstico de propriedade'
 
+# I7.6 (D-NET-UNMANAGED-BRIDGE): o oráculo ANTERIOR exigia, literalmente,
+#   assert_eq 0 "$MUTATOR_RC" 'bridge com rede homônima não gerenciada (oráculo atual)'
+#   [[ -e $MUTATOR_STATE_DIR/bridge-active ]] \
+#       || fail 'bridge não prosseguiu no oráculo atual de rede não gerenciada'
+# ou seja: no modo bridge, uma rede libvirt de OUTRO administrador com o nome
+# que esta etapa administra era apenas avisada, e a etapa seguia adiante
+# criando a bridge do host. O motivo era a exclusão deliberada da captura, que
+# declarava a rede alheia como slot gerenciado ausente para preservar este
+# oráculo — e o `--verificar` do mesmo modo ainda emitia `v_ok` dizendo que a
+# rede alheia "foi preservada sem validação/alteração".
+#
+# As duas tolerâncias caíram juntas, porque separadas deixariam a verificação
+# aprovando o que a aplicação recusa. O fato agora viaja como é, a precondição
+# `P-LIBVIRT-NETWORK-OWNED` (severidade `refuse` nos dois modos) bloqueia o
+# plano e nenhuma operação é emitida: os dois modos preservam o estado alheio e
+# devolvem o mesmo diagnóstico de propriedade.
 mutator_harness_reset
 mutator_harness_seed_network unmanaged yes yes yes
 mutator_harness_set_conf REDE_MODO bridge
 unmanaged_persistent=$(/usr/bin/sha256sum "$MUTATOR_STATE_DIR/network-persistent.xml")
 unmanaged_active=$(/usr/bin/sha256sum "$MUTATOR_STATE_DIR/network-active.xml")
+snapshot_observable "$MUTATOR_HARNESS_DIR/before.content"
 mutator_harness_run 60-rede-bridge.sh "$BRIDGE_INPUT"
-assert_eq 0 "$MUTATOR_RC" 'bridge com rede homônima não gerenciada (oráculo atual)'
+assert_nonzero "$MUTATOR_RC" 'bridge com rede homônima não gerenciada'
+assert_eq 0 "$(mutator_harness_effect_count)" 'recusa de propriedade no modo bridge produziu efeito'
+snapshot_observable "$MUTATOR_HARNESS_DIR/after.content"
+assert_manifest_equal "$MUTATOR_HARNESS_DIR/before.content" "$MUTATOR_HARNESS_DIR/after.content" \
+    'bridge alterou o estado diante de rede homônima não gerenciada'
 assert_eq "$unmanaged_persistent" "$(/usr/bin/sha256sum "$MUTATOR_STATE_DIR/network-persistent.xml")" \
     'bridge alterou XML persistente não gerenciado'
 assert_eq "$unmanaged_active" "$(/usr/bin/sha256sum "$MUTATOR_STATE_DIR/network-active.xml")" \
     'bridge alterou XML ativo não gerenciado'
-[[ -e $MUTATOR_STATE_DIR/bridge-active ]] || fail 'bridge não prosseguiu no oráculo atual de rede não gerenciada'
+[[ ! -e $MUTATOR_STATE_DIR/bridge-active ]] \
+    || fail 'bridge prosseguiu criando a bridge do host apesar da rede homônima alheia'
+assert_text "$MUTATOR_ERROR" 'sem o marcador deste projeto' 'bridge sem diagnóstico de propriedade'
+assert_confined 'recusa de propriedade no modo bridge'
+# A verificação tem de recusar o MESMO estado que a aplicação recusa.
+mutator_harness_run 60-rede-bridge.sh '' --verificar
+assert_nonzero "$MUTATOR_RC" '--verificar aprovou rede homônima não gerenciada no modo bridge'
+assert_text "$MUTATOR_OUTPUT" 'sem o marcador deste projeto' \
+    '--verificar sem diagnóstico de propriedade no modo bridge'
 pass
 
 # Consumidores definidos/ativos bloqueiam as respectivas migrações/restarts.
@@ -657,7 +1076,41 @@ pass
 # conta é a *tentativa* de publicação, registrada antes de o interpretador rodar:
 # o wrapper não pode saber de antemão se o core vai convergir, e é justamente
 # nessa janela que a injeção de falha e de sinal precisa continuar valendo.
+#
+# I7.6 (D-NET-IDEMPOTENCE): a medição acima foi CONFERIDA e o aceite do delta
+# — "conteúdo, metadados, mtime e runtime modelado invariantes na segunda
+# execução" — já estava cumprido pela comparação do manifesto `exact`. Só que
+# o manifesto compara os quatro eixos de uma vez, e o delta pede cada um. Os
+# quatro passaram a ser asserção separada, projetando as colunas do próprio
+# manifesto `exact`, cujo formato é
+# `caminho|tipo|modo|uid|gid|mtime_ns|dev|inode|nlink|digest`:
+#   * conteúdo         -> caminho, tipo e digest;
+#   * metadados        -> modo, uid, gid, dev, inode e nlink;
+#   * mtime            -> mtime_ns, o eixo que a republicação quebrava;
+#   * runtime modelado -> todas as linhas `state/`, que são o estado que o
+#                         harness modela para libvirt/netplan (XML persistente
+#                         e ativo, autostart, bridge ativa e XML da VM).
+# Assim, uma regressão em UM eixo diz qual eixo regrediu, em vez de "o
+# manifesto mudou".
+#
+# As 7 e 6 tentativas convergentes de `custom:config-publish` PERMANECEM de
+# propósito: são as janelas mutantes onde a matriz de falha e a de sinal deste
+# mesmo arquivo continuam injetando. Reduzi-las a zero apagaria os pontos de
+# injeção e enfraqueceria REQ-NET-TX; o que o contrato exige não é ausência de
+# tentativa, e sim que a tentativa convirja sem tocar byte, metadado ou mtime.
+manifesto_eixo() {
+    # $1 = manifesto `exact`; $2 = eixo; $3 = saída.
+    local origem=$1 eixo=$2 destino=$3
+    case $eixo in
+        conteudo) /usr/bin/cut -d'|' -f1,2,10 "$origem" > "$destino" ;;
+        metadados) /usr/bin/cut -d'|' -f1,3,4,5,7,8,9 "$origem" > "$destino" ;;
+        mtime) /usr/bin/cut -d'|' -f1,6 "$origem" > "$destino" ;;
+        runtime) /usr/bin/grep '^state/' "$origem" > "$destino" ;;
+        *) fail "eixo de manifesto desconhecido: $eixo" ;;
+    esac
+}
 for network_mode in nat bridge; do
+    limpar_evidencias_recuperacao
     prepare_network "$network_mode"
     network_input=$NAT_INPUT
     expected_second_effects=7
@@ -679,6 +1132,21 @@ for network_mode in nat bridge; do
         "segunda execução $network_mode mudou conteúdo"
     assert_manifest_equal "$MUTATOR_HARNESS_DIR/first.exact" "$MUTATOR_HARNESS_DIR/second.exact" \
         "segunda execução $network_mode deixou de ser no-op exato"
+    for idempotence_axis in conteudo metadados mtime runtime; do
+        manifesto_eixo "$MUTATOR_HARNESS_DIR/first.exact" "$idempotence_axis" \
+            "$MUTATOR_HARNESS_DIR/first.$idempotence_axis"
+        manifesto_eixo "$MUTATOR_HARNESS_DIR/second.exact" "$idempotence_axis" \
+            "$MUTATOR_HARNESS_DIR/second.$idempotence_axis"
+        assert_manifest_equal "$MUTATOR_HARNESS_DIR/first.$idempotence_axis" \
+            "$MUTATOR_HARNESS_DIR/second.$idempotence_axis" \
+            "segunda execução $network_mode mudou o eixo '$idempotence_axis'"
+    done
+    # A publicação da configuração é o ponto exato que o delta acusava: o
+    # arquivo é reescrito com o mesmo valor e não pode mudar mtime nem inode.
+    assert_eq "$(/usr/bin/grep '^project/passthrough.conf|' "$MUTATOR_HARNESS_DIR/first.exact")" \
+        "$(/usr/bin/grep '^project/passthrough.conf|' "$MUTATOR_HARNESS_DIR/second.exact")" \
+        "segunda execução $network_mode republicou passthrough.conf"
+    assert_sem_evidencia "segunda execução convergente $network_mode"
 done
 pass
 fi # matriz full da etapa 60

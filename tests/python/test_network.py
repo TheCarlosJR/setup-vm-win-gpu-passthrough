@@ -2014,9 +2014,9 @@ class PlanPreconditionTests(unittest.TestCase):
         self.assertEqual(self._bloqueio(plano), "P-LIBVIRT-NETWORK-OWNED")
 
     def test_rede_homonima_nao_gerenciada_recusa_tambem_no_bridge(self) -> None:
-        # D-NET-UNMANAGED-BRIDGE: hoje `etapas/60-rede-bridge.sh:949-955` só
-        # avisa e segue. O plano modela a recusa segura; a etapa continua
-        # intacta até I7.5.
+        # D-NET-UNMANAGED-BRIDGE: o plano sempre modelou a recusa segura. Até
+        # I7.5 a etapa só avisava e seguia; em I7.6 a exclusão da captura caiu
+        # e o modo bridge passa a consumir esta mesma precondição.
         snapshot = snapshot_plano(
             libvirt_network=rede_gerenciada(
                 marker="", active_xml=XML_ALHEIO, persistent_xml=XML_ALHEIO

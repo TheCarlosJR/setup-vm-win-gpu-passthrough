@@ -2516,10 +2516,11 @@ def _plan_preconditions(
                 detail=detail,
             )
         )
-    # D-NET-UNMANAGED-BRIDGE: rede homônima sem o marcador deste projeto tem de
-    # recusar nos DOIS modos. Hoje o caminho bridge só avisa
-    # (`etapas/60-rede-bridge.sh:949-955`); o plano modela a recusa segura sem
-    # alterar a etapa, que continua sendo fiada em I7.5.
+    # D-NET-UNMANAGED-BRIDGE: rede homônima sem o marcador deste projeto recusa
+    # nos DOIS modos. O plano já modelava a recusa em I7.3; em I7.6 a etapa
+    # parou de mascarar o fato na captura (declarava a rede alheia como slot
+    # gerenciado ausente no modo bridge) e passou a consumir esta precondição
+    # nos dois caminhos.
     if not network["exists"]:
         owned_detail = ""
     else:
