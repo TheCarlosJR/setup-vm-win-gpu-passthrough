@@ -50,6 +50,7 @@ UTILS=(
     "recuperar-gpu.sh|EMERGÊNCIA: devolver a GPU ao Linux (consulte troubleshooting.md)|gpu.recover"
 )
 
+WAIVER_POLITICA_AVISADA=0
 STATUS_ETAPA="erro"
 STATUS_ETAPA_DIAGNOSTICO=""
 MENU_STATUS_RC=0
@@ -126,7 +127,8 @@ imprimir_lista() {
     echo
     echo "**************************************"
     echo
-    local i=1 entrada arquivo titulo tipo pos capability st simbolo
+    local i=1 entrada arquivo titulo tipo pos capability st simbolo waiver_rc
+    WAIVER_POLITICA_AVISADA=0
     for entrada in "${ETAPAS[@]}"; do
         IFS='|' read -r arquivo titulo tipo pos capability <<< "$entrada"
         status_etapa "$arquivo"
@@ -142,7 +144,26 @@ imprimir_lista() {
                     || MENU_STATUS_RC="$STATUS_PENDENTE"
                 ;;
         esac
-        if [ "$st" = "ok" ]; then
+        # REQ-WAIVERS: a dispensa entra AQUI, depois de MENU_STATUS_RC já ter
+        # sido agregado acima, e só troca o símbolo. Ela é lida por canal
+        # separado (a flag validada de passthrough.conf, resolvida contra a
+        # matriz de política versionada), nunca por parsing do texto que a
+        # etapa imprimiu, e nunca entra no sentinel V1. O motivo de não dizer
+        # "concluída": com a escolha de modo registrada, a etapa não foi
+        # executada; o recurso é que não se aplica a este fluxo.
+        waiver_rc=0
+        waiver_estado "$arquivo" || waiver_rc=$?
+        # Matriz ilegível não pode degradar em silêncio: sem ela o menu voltaria
+        # a pintar [ok] numa etapa dispensada, que é exatamente o "concluída"
+        # que o requisito proíbe. O aviso sai uma vez por listagem.
+        if [ "$waiver_rc" -eq 2 ] && [ "$WAIVER_POLITICA_AVISADA" -eq 0 ]; then
+            WAIVER_POLITICA_AVISADA=1
+            aviso "Política de dispensas não pôde ser lida: ${WAIVER_ERRO:-motivo ausente}. O menu não distingue etapa dispensada nesta listagem."
+        fi
+        if [ "$st" = "ok" ] && [ "$waiver_rc" -eq 0 ] \
+            && [ "$WAIVER_SIMBOLO" = "disp" ]; then
+            simbolo="${C_AZUL}[disp]${C_RESET}"
+        elif [ "$st" = "ok" ]; then
             simbolo="${C_VERDE}[ok]${C_RESET}"
         elif [ "$st" = "erro" ]; then
             simbolo="${C_VERMELHO}[!!]${C_RESET}"
@@ -173,7 +194,7 @@ imprimir_lista() {
         u=$((u+1))
     done
     echo
-    echo " Legenda: [ok] concluída  [  ] pendente  [--] opcional pendente  [??] indeterminada  [!!] erro (diagnóstico abaixo)  <reboot>/<logout> exigidos ao final"
+    echo " Legenda: [ok] concluída  [disp] dispensada por escolha de modo (não executada)  [  ] pendente  [--] opcional pendente  [??] indeterminada  [!!] erro (diagnóstico abaixo)  <reboot>/<logout> exigidos ao final"
 }
 
 if [ "${1:-}" = "--status" ]; then
@@ -193,7 +214,16 @@ limpar_terminal_menu() {
 
 executar_no_menu() {
     local caminho="$1" capability="${2:-}" rc resposta
+    local etapa_arquivo dispensa_ativa=0
+    etapa_arquivo="$(basename -- "$caminho")"
     echo
+    # REQ-WAIVERS: execução direta NUNCA infere conclusão pela dispensa. Antes
+    # de rodar, o menu informa qual pré-requisito a escolha de modo exclui, e
+    # depois evita chamar de "concluída" uma execução que não fez nada.
+    if waiver_estado "$etapa_arquivo"; then
+        dispensa_ativa=1
+        aviso "$(waiver_politica_texto "$etapa_arquivo")"
+    fi
     log_ativar
     log_acao menu "executando $(basename -- "$caminho") v$(versao_de_script "$caminho")"
     if [ -n "$capability" ]; then
@@ -209,7 +239,13 @@ executar_no_menu() {
     fi
     log_acao menu "$(basename -- "$caminho") terminou com status $rc"
     case "$rc" in
-        0) ok "Execução concluída." ;;
+        0)
+            if [ "$dispensa_ativa" -eq 1 ]; then
+                ok "Nada a executar: a escolha de modo registrada em $WAIVER_CHAVE dispensa o pré-requisito \"$WAIVER_PREREQ\". A etapa não foi executada."
+            else
+                ok "Execução concluída."
+            fi
+            ;;
         "$CODIGO_VOLTAR_MENU"|130)
             info "Execução cancelada; voltando ao menu principal."
             return 0

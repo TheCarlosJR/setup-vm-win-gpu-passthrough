@@ -2,5 +2,7 @@ lib/policy/waivers.tsv
 lib/shell/waivers.sh
 tests/check-waivers-matrix.py
 tests/manifests/i9-files.txt
+tests/test-i9-airlock-verify.sh
 tests/test-i9-verify-helpers.sh
 tests/test-i9-waivers.sh
+tests/test-i9-windows-state.sh

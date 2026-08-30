@@ -195,4 +195,87 @@ checker_recusa so-comentario "$(printf '# schema_version=1\n# nada aqui\n')"
 # Espaço nas bordas de um campo: TAB é o separador, espaço não é aparado.
 checker_recusa campo-com-espaco "$(printf '# schema_version=1\n14-working-disk.sh\t WORKING_DISK_DISPENSADO\tescolha-de-modo\tx\tdisp\tfatal\n50-hooks-gpu-hd1.sh\tHD1_DISPENSADO\tescolha-de-modo\ty\tdisp\tfatal\n')"
 
+# --- menu: [disp] é só UI, nunca status público ------------------------------
+# Projeto encenado: as 21 etapas viram stubs que emitem o sentinel V1 com rc 0.
+# Assim o menu é exercitado em segundos e a única variável entre as duas
+# execuções é a flag de dispensa, que é exatamente o que se quer medir.
+MENU_PROJ="$TMP/projeto"
+mkdir -p "$MENU_PROJ/etapas" "$MENU_PROJ/util"
+cp -a -- "$ROOT/lib" "$MENU_PROJ/lib"
+cp -a -- "$ROOT/libexec" "$MENU_PROJ/libexec"
+cp -- "$ROOT/menu.sh" "$MENU_PROJ/menu.sh"
+for origem in "$ROOT"/etapas/*.sh; do
+    cat > "$MENU_PROJ/etapas/$(basename -- "$origem")" <<'STUB'
+#!/bin/bash
+SCRIPT_VERSION="1.0.0"
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
+[ "${1:-}" = "--verificar" ] && { v_ok "stub"; v_fim; }
+exit 0
+STUB
+done
+for origem in "$ROOT"/util/*.sh; do
+    printf '#!/bin/bash\nSCRIPT_VERSION="1.0.0"\nexit 0\n' \
+        > "$MENU_PROJ/util/$(basename -- "$origem")"
+done
+
+menu_status() {
+    local conf="$1" saida="" rc=0
+    printf '%s' "$conf" > "$MENU_PROJ/passthrough.conf"
+    chmod 600 "$MENU_PROJ/passthrough.conf"
+    saida="$( { cd "$MENU_PROJ" && "$BASH_BIN" menu.sh --status; } 2>&1 )" || rc=$?
+    printf '%s\nMENU_RC=%s\n' "$saida" "$rc" | sed 's/\x1b\[[0-9;]*m//g'
+}
+
+CONF_BASE='USUARIO_LINUX="alice"
+VM_NAME="fixture"
+'
+SEM_DISPENSA="$(menu_status "$CONF_BASE")"
+COM_DISPENSA="$(menu_status "${CONF_BASE}WORKING_DISK_DISPENSADO=\"sim\"
+")"
+
+printf '%s\n' "$SEM_DISPENSA" | grep -Eq '^ \[ok\] +8\)' \
+    || fail "sem dispensa a etapa 8 deveria aparecer como [ok]"
+CASOS=$((CASOS + 1))
+
+# O símbolo muda...
+printf '%s\n' "$COM_DISPENSA" | grep -Eq '^ \[disp\] +8\)' \
+    || fail "com dispensa a etapa 8 não foi renderizada como [disp]"
+CASOS=$((CASOS + 1))
+printf '%s\n' "$COM_DISPENSA" | grep -Eq '^ \[ok\] +8\)' \
+    && fail "com dispensa a etapa 8 continuou marcada como concluída"
+CASOS=$((CASOS + 1))
+
+# ...e SÓ o símbolo: o código de saída agregado do menu é idêntico.
+rc_sem="$(printf '%s\n' "$SEM_DISPENSA" | grep -c '^MENU_RC=0$')"
+rc_com="$(printf '%s\n' "$COM_DISPENSA" | grep -c '^MENU_RC=0$')"
+[ "$rc_sem" = 1 ] && [ "$rc_com" = 1 ] \
+    || fail "MENU_STATUS_RC mudou por causa da dispensa (sem=$rc_sem com=$rc_com)"
+CASOS=$((CASOS + 1))
+
+# A etapa 21 tem política com simbolo_ui=nenhum: a mesma flag ativa NÃO pode
+# trocar o símbolo dela. Sem esta asserção, o menu poderia passar a marcar
+# qualquer etapa que cite a flag, ignorando a coluna da matriz.
+printf '%s\n' "$COM_DISPENSA" | grep -Eq '^ \[ok\] +21\)' \
+    || fail "a etapa 21 não deveria trocar de símbolo (simbolo_ui=nenhum)"
+CASOS=$((CASOS + 1))
+
+# `[disp]` nunca pode vazar para o canal de máquina.
+printf '%s\n' "$COM_DISPENSA" | grep -q '__PASSTHROUGH_STATUS_V1__' \
+    && fail "o sentinel V1 vazou para a saída do menu"
+CASOS=$((CASOS + 1))
+
+# Matriz ilegível não degrada em silêncio.
+MATRIZ_QUEBRADA="$MENU_PROJ/lib/policy/waivers.tsv"
+cp -- "$MATRIZ_QUEBRADA" "$TMP/waivers.bak"
+printf 'sem versao\tnem colunas\n' > "$MATRIZ_QUEBRADA"
+QUEBRADA="$(menu_status "${CONF_BASE}WORKING_DISK_DISPENSADO=\"sim\"
+")"
+printf '%s\n' "$QUEBRADA" | grep -Fq 'Política de dispensas não pôde ser lida' \
+    || fail "matriz ilegível não gerou aviso no menu"
+printf '%s\n' "$QUEBRADA" | grep -q '^MENU_RC=0$' \
+    || fail "matriz ilegível alterou o código de saída do menu"
+cp -- "$TMP/waivers.bak" "$MATRIZ_QUEBRADA"
+CASOS=$((CASOS + 2))
+
 printf 'OK: matriz e leitor de dispensas I9.10 aprovados em %d casos\n' "$CASOS"

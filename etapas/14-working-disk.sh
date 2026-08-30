@@ -39,8 +39,23 @@ if [ -n "$WORKING_DISK" ] && [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
 fi
 if [ "${WORKING_DISK_DISPENSADO:-}" = "sim" ]; then
     titulo "Etapa 8: workingDisk externo"
-    ok "Dispensa explícita registrada; nada foi alterado."
-    exit 0
+    # REQ-WAIVERS: a execução direta não pode inferir conclusão pela dispensa
+    # nem sair calada com 0, que o menu renderizava como "Execução concluída.".
+    # Ela informa a política e recusa sem efeito.
+    if waiver_estado 14-working-disk.sh; then
+        info "$(waiver_politica_texto 14-working-disk.sh)"
+    else
+        info "Escolha de modo registrada em WORKING_DISK_DISPENSADO=sim."
+    fi
+    info "Enquanto essa escolha estiver registrada, esta etapa não tem o que verificar: o fluxo não usa workingDisk externo."
+    # Recusa SEM EFEITO, que é a segunda alternativa autorizada pelo requisito.
+    # A outra (confirmar aqui e limpar a flag) foi considerada e recusada: esta
+    # etapa é somente leitura, não declara capability em menu.sh e não aparece
+    # como mutadora no envelope I1. Escrever passthrough.conf a partir daqui
+    # ampliaria a superfície de mutação para fazer o que a etapa 3 já faz de
+    # forma atômica, publicando caminho, fingerprint e dispensa dos dois papéis
+    # em um único rename. A transição nas duas direções pertence a ela.
+    cancelar_etapa "Para passar a usar um workingDisk externo, execute a etapa 3 e informe o mountpoint; ela troca a escolha e o caminho na mesma transação. Nada foi alterado aqui."
 fi
 [ -n "$WORKING_DISK" ] \
     || falhar "workingDisk não configurado. Execute a etapa 3 e informe um mountpoint já ativo ou escolha 0."
