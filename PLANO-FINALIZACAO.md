@@ -1121,6 +1121,57 @@ Mesmas operações para Ubuntu/Pop; fixtures não promovem suporte; malícia ine
 
 **Objetivo:** reduzir `common.sh` a fachada/agregador e fechar estado Windows, Airlock, verificadores e dispensas.
 
+### Decisões de entrada da fase (registradas em 2026-08-30, antes da primeira linha de código)
+
+Cinco auditorias somente-leitura precederam a implementação e dimensionaram a
+fase: mapa de extração de `lib/common.sh` (169 funções, 3677 linhas), estado do
+Windows, Airlock, verificadores e dispensas. Elas produziram sete decisões que
+não podem ser re-derivadas depois, porque mudam o desenho e não só o código.
+
+- **I9-D1 (árvore 2.3, módulo novo):** criar `lib/shell/config.sh`, que não
+  consta da árvore da seção 2.3. As 17 funções de configuração (~470 linhas,
+  `lib/common.sh:1104-2085`) não têm casa entre os dez módulos previstos; jogá-las
+  em `storage.sh` misturaria schema de configuração com ciclo de vida de arquivo,
+  que são responsabilidades diferentes. A seção 2.3 autoriza o ajuste com
+  justificativa registrada, e esta é a justificativa.
+- **I9-D2 (inventário sem módulo próprio):** as 16 funções de inventário
+  (`lib/common.sh:353-1098`) NÃO ganham `lib/shell/inventory.sh`. A captura vai
+  para `probes.sh` e o ciclo de vida do arquivo vai para `storage.sh`. Motivo
+  técnico, não estético: manter as duas juntas cria o ciclo `probes <-> storage`,
+  porque a enumeração de disco e a captura de topologia se chamam nos dois
+  sentidos. Separar por natureza (observar o host x administrar o arquivo) deixa
+  a direção única.
+- **I9-D3 (`_core_diagnostico` e `CORE_PARES_ENVELOPE`):** ficam em `base.sh`,
+  não em `lib/python-core.sh`. As duas opções são consistentes com a seção 2.4,
+  mas `python-core.sh` teve manifesto aprovado em I2 e mover coisa para lá
+  reabriria uma fronteira já fechada sem ganho.
+- **I9-D4 (`inicializar_raiz_teste`):** vai para `privilege.sh`, não para
+  `base.sh`. Ela chama `falhar`, e `falhar` mora em `ui.sh`; deixá-la em
+  `base.sh` criaria o ciclo `base <-> ui`. O lugar é coerente com o que ela faz:
+  validar que o `sudo` visível é o mock confinado.
+- **I9-D5 (`v_kernel_persistencia_falhou`):** vai para `boot.sh`, não para
+  `status.sh`. É a única função de status que lê estado de boot
+  (`KERNEL_PERSISTENCIA_TIPO`, `lib/shell/boot.sh:426`); mantê-la em `status.sh`
+  faria o módulo de status depender do de boot sem necessidade.
+- **I9-D6 (carregamento sem efeito):** `lib/shell/boot.sh:26-33` passa a resolver
+  caminhos preguiçosamente. Hoje ele executa quatro subshells `caminho_sistema`
+  em tempo de `source` e por isso exige que `inicializar_raiz_teste` tenha rodado
+  antes. Com a resolução preguiçosa, a única exigência de ordem que sobra é
+  `platform.sh`/`python-core.sh` antes do resto, e I9.1 fica cumprido
+  literalmente em vez de por aproximação.
+- **I9-D7 (código de saída da dispensa):** as duas dispensas que sobraram
+  continuam devolvendo `0` no `--verificar`. O bullet do REQ-WAIVERS que manda
+  devolver `1` vale para **dispensa de etapa**, categoria que deixou de existir
+  quando I4.8 removeu `AIRLOCK_DISPENSADO` e `BACKUP_DISPENSADO`. As duas
+  remanescentes são `escolha-de-modo` (D-WAIVERS): com a escolha registrada, o
+  estado real do host é "este fluxo não usa esse recurso", e é isso que o
+  verificador relata. O bullet que continua valendo é o de **não chamar isso de
+  concluída**, e ele é atendido na UI: o menu passa a renderizar `[disp]` no
+  lugar de `[ok]`, lendo a flag por canal separado, sem tocar `MENU_STATUS_RC`
+  nem o sentinel V1. Trocar para `1` foi considerado e recusado: mudaria status
+  público hoje verde para amarelo e quebraria os oráculos de `tests/i0` sem
+  descrever melhor o host.
+
 ### Tarefas
 
 - [ ] **I9.1:** mapear grafo de `source`; criar guards; impedir ciclos e efeitos em carregamento.
