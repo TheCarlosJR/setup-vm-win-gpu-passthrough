@@ -266,10 +266,19 @@ esperar_falha "argumento desconhecido" modo_execucao_etapa02 --desconhecido
 ESTADO_CONF_ANTES="$(sha256sum "$CONF_ARQUIVO" | awk '{print $1}')|$(stat -c '%y' "$CONF_ARQUIVO")"
 QTD_BACKUPS_ANTES="$(find "$BACKUPS_DIR" -maxdepth 1 -type f | wc -l)"
 HOME="$TMPDIR_TESTE/home"; export HOME
-mkdir -p "$HOME/inventario-hardware"
-cp "$VALIDO" "$HOME/inventario-hardware/inventario-20260805-010000-000000001.txt"
-ln -s inventario-20260805-010000-000000001.txt "$HOME/inventario-hardware/ultimo-inventario.txt"
-bash "$RAIZ/etapas/00-inventario.sh" --verificar >/dev/null
+# A raiz de estado precisa cair dentro do temporário mesmo quando o ambiente
+# real define XDG_STATE_HOME, e o fixture mora onde o acessor aponta: se a etapa
+# voltar a montar o caminho legado por conta própria, --verificar não acha nada.
+XDG_STATE_HOME="$HOME/.local/state"; export XDG_STATE_HOME
+LOG_ACOES_DIR="$XDG_STATE_HOME/vm-passthrough"
+LOG_ACOES_ARQUIVO="$LOG_ACOES_DIR/acoes.log"
+INVENTARIO_LEGADO_DIR="$HOME/inventario-hardware"
+DIR_ESTADO_INV="$(diretorio_inventario)"
+mkdir -p "$DIR_ESTADO_INV"
+cp "$VALIDO" "$DIR_ESTADO_INV/inventario-20260805-010000-000000001.txt"
+ln -s inventario-20260805-010000-000000001.txt "$DIR_ESTADO_INV/ultimo-inventario.txt"
+bash "$RAIZ/etapas/00-inventario.sh" --verificar >/dev/null \
+    || falha "a etapa 1 não achou o inventário do fixture na raiz única de estado"
 # A etapa 02 aponta para o conf do projeto, que pode estar ausente; qualquer
 # status é aceitável, mas o modo precisa terminar sem criar/alterar o arquivo.
 CONF_PROJETO="$RAIZ/passthrough.conf"
@@ -289,5 +298,239 @@ fi
     || falha "verificadores alteraram o conf de teste"
 [ "$QTD_BACKUPS_ANTES" = "$(find "$BACKUPS_DIR" -maxdepth 1 -type f | wc -l)" ] \
     || falha "--verificar criou backup"
+
+# --- Migração da pasta legada de relatórios para a raiz única de estado -------
+# Cada cenário roda em uma HOME temporária própria: a origem é sempre
+# "$HOME/inventario-hardware" por contrato da transação e o destino sai do
+# acessor, então nada aqui toca a home real nem a raiz de estado do usuário.
+MIG_RAIZ="$TMPDIR_TESTE/migracao"
+CP_REAL="$(command -v cp)"
+DESTINO_MIGRACAO=""
+
+usar_home_migracao() {
+    # usar_home_migracao NOME: isola HOME, raiz de estado e pasta legada em um
+    # cenário próprio e publica o destino do acessor em DESTINO_MIGRACAO. Nada de
+    # substituição de comando aqui: as variáveis precisam valer no shell do teste.
+    HOME="$MIG_RAIZ/$1"; export HOME
+    XDG_STATE_HOME="$HOME/.local/state"; export XDG_STATE_HOME
+    LOG_ACOES_DIR="$XDG_STATE_HOME/vm-passthrough"
+    LOG_ACOES_ARQUIVO="$LOG_ACOES_DIR/acoes.log"
+    INVENTARIO_LEGADO_DIR="$HOME/inventario-hardware"
+    mkdir -p "$HOME"
+    DESTINO_MIGRACAO="$(diretorio_inventario)"
+}
+
+assinatura_migracao() {
+    # Metadados e bytes de uma árvore: tipo, modo, mtime com nanossegundos, alvo
+    # de link e digest do conteúdo, em ordem estável. O tamanho de diretório fica
+    # de fora de propósito, porque depende do histórico do sistema de arquivos.
+    local base="$1"
+    ( cd -- "$base" && LC_ALL=C find . -mindepth 1 -printf '%p|%y|%m|%T@|%l\n' | LC_ALL=C sort )
+    ( cd -- "$base" && LC_ALL=C find . -type f -exec sha256sum -- {} + 2>/dev/null | LC_ALL=C sort )
+}
+
+assinatura_no_op() {
+    # Regra 17: a segunda execução precisa ser no-op exato em caminho, modo,
+    # tamanho e mtime, inclusive na raiz observada.
+    local base="$1"
+    ( cd -- "$base" && LC_ALL=C find . -printf '%p|%m|%s|%T@\n' | LC_ALL=C sort )
+}
+
+arvore_vazia() {
+    # 0 quando o diretório não existe ou não tem nenhuma entrada.
+    local base="$1"
+    [ -d "$base" ] || return 0
+    [ -z "$(cd -- "$base" && LC_ALL=C find . -mindepth 1 -printf 'x\n')" ]
+}
+
+contar_entradas() {
+    ( cd -- "$1" && LC_ALL=C find . -mindepth 1 -printf 'x\n' | wc -l )
+}
+
+povoar_legado() {
+    # Pasta legada realista: inventário válido publicável, ponteiro relativo,
+    # subdiretório com modo restrito e arquivo com modo/mtime fora do padrão.
+    local origem="$1"
+    mkdir -p "$origem/historico"
+    criar_inventario "$origem/inventario-20260807-010000-000000001.txt"
+    criar_inventario "$origem/historico/inventario-20260701-010000-000000001.txt"
+    printf '%s\n' 'diagnóstico antigo' > "$origem/diagnostico-20260701-0900.txt"
+    ln -s inventario-20260807-010000-000000001.txt "$origem/ultimo-inventario.txt"
+    chmod 640 "$origem/diagnostico-20260701-0900.txt"
+    chmod 700 "$origem/historico"
+    touch -d '2026-07-01 09:00:00.123456789' "$origem/diagnostico-20260701-0900.txt"
+}
+
+# (a) Migração aceita: move tudo, preserva metadados e remove a origem só depois
+# de conferir a cópia inteira.
+usar_home_migracao sucesso
+DEST_SUCESSO="$DESTINO_MIGRACAO"
+povoar_legado "$INVENTARIO_LEGADO_DIR"
+ASSINATURA_ORIGEM="$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")"
+ITENS_ORIGEM="$(contar_entradas "$INVENTARIO_LEGADO_DIR")"
+inventario_legado_pendente || falha "pasta legada com conteúdo não foi reconhecida como pendente"
+[ "$INVENTARIO_LEGADO_ITENS" -eq "$ITENS_ORIGEM" ] \
+    || falha "contagem de itens legados divergiu: $INVENTARIO_LEGADO_ITENS != $ITENS_ORIGEM"
+SAIDA_MIG="$TMPDIR_TESTE/saida-migracao-sucesso.txt"
+inventario_migracao_interativa <<< 's' > "$SAIDA_MIG" \
+    || falha "migração aceita retornou erro: $(cat "$SAIDA_MIG")"
+[ ! -e "$INVENTARIO_LEGADO_DIR" ] && [ ! -L "$INVENTARIO_LEGADO_DIR" ] \
+    || falha "migração concluída não removeu a pasta legada"
+[ "$INVENTARIO_MIGRACAO_ITENS" -eq "$ITENS_ORIGEM" ] \
+    || falha "migração relatou $INVENTARIO_MIGRACAO_ITENS itens para $ITENS_ORIGEM na origem"
+[ "$(assinatura_migracao "$DEST_SUCESSO")" = "$ASSINATURA_ORIGEM" ] \
+    || falha "migração não preservou conteúdo, modo, mtime ou alvo de symlink no destino"
+[ "$(grep -c 'Relatórios antigos encontrados' "$SAIDA_MIG")" = 1 ] \
+    || falha "a pergunta da migração não apareceu exatamente uma vez"
+grep -q "Migração concluída: $ITENS_ORIGEM itens conferidos em $DEST_SUCESSO" "$SAIDA_MIG" \
+    || falha "migração não confirmou a conferência no destino unificado"
+ALVO_PONTEIRO_MIGRADO="$(readlink "$DEST_SUCESSO/ultimo-inventario.txt")"
+[[ "$ALVO_PONTEIRO_MIGRADO" != /* ]] && [ -e "$DEST_SUCESSO/$ALVO_PONTEIRO_MIGRADO" ] \
+    || falha "ponteiro migrado não resolve dentro do destino unificado"
+
+# (g) O resolvedor sem argumento passa a achar o inventário na raiz unificada.
+resolver_ultimo_inventario >/dev/null || falha "$INVENTARIO_ERRO"
+[ "$INVENTARIO_RESOLVIDO" = "$DEST_SUCESSO/inventario-20260807-010000-000000001.txt" ] \
+    || falha "resolvedor não achou o inventário migrado: ${INVENTARIO_RESOLVIDO:-vazio}"
+
+# (e) Segunda execução: no-op exato, sem pergunta e sem qualquer escrita.
+ANTES_NO_OP="$(assinatura_no_op "$HOME")"
+SAIDA_NO_OP="$TMPDIR_TESTE/saida-migracao-noop.txt"
+inventario_migracao_interativa </dev/null > "$SAIDA_NO_OP" \
+    || falha "segunda execução da migração retornou erro"
+[ ! -s "$SAIDA_NO_OP" ] \
+    || falha "segunda execução não foi silenciosa: $(cat "$SAIDA_NO_OP")"
+[ "$(assinatura_no_op "$HOME")" = "$ANTES_NO_OP" ] \
+    || falha "segunda execução da migração não foi no-op exato"
+
+# (b) Colisão de nome no destino: recusa sem copiar nem remover nada.
+usar_home_migracao colisao
+DEST_COLISAO="$DESTINO_MIGRACAO"
+povoar_legado "$INVENTARIO_LEGADO_DIR"
+mkdir -p "$DEST_COLISAO/historico"
+printf '%s\n' 'relatório que já morava no destino' > "$DEST_COLISAO/historico/nao-mexer.txt"
+ASSINATURA_ORIGEM_COLISAO="$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")"
+ASSINATURA_DESTINO_COLISAO="$(assinatura_migracao "$DEST_COLISAO")"
+esperar_falha "colisão de nome no destino" migrar_inventario_legado
+[[ "$INVENTARIO_MIGRACAO_ERRO" == *"'historico' já existe"* ]] \
+    || falha "colisão não produziu diagnóstico acionável: $INVENTARIO_MIGRACAO_ERRO"
+[ "$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")" = "$ASSINATURA_ORIGEM_COLISAO" ] \
+    || falha "colisão de nome alterou a pasta legada"
+[ "$(assinatura_migracao "$DEST_COLISAO")" = "$ASSINATURA_DESTINO_COLISAO" ] \
+    || falha "colisão de nome copiou algo para o destino"
+
+# (c) Divergência de conteúdo durante a prova: desfaz a cópia e mantém a origem.
+# O cp de teste copia de verdade e corrompe um arquivo já copiado; nenhuma
+# divergência pode virar remoção da origem.
+usar_home_migracao divergencia
+DEST_DIVERGENCIA="$DESTINO_MIGRACAO"
+povoar_legado "$INVENTARIO_LEGADO_DIR"
+ASSINATURA_ORIGEM_DIVERGENCIA="$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")"
+BIN_CP_DIVERGENTE="$TMPDIR_TESTE/bin-cp-divergente"
+mkdir -p "$BIN_CP_DIVERGENTE"
+cat > "$BIN_CP_DIVERGENTE/cp" <<EOF
+#!/bin/sh
+"$CP_REAL" "\$@" || exit \$?
+if [ -f "$DEST_DIVERGENCIA/diagnostico-20260701-0900.txt" ]; then
+    printf 'divergencia\n' >> "$DEST_DIVERGENCIA/diagnostico-20260701-0900.txt"
+fi
+exit 0
+EOF
+chmod +x "$BIN_CP_DIVERGENTE/cp"
+if SAIDA_DIVERGENCIA="$(env PATH="$BIN_CP_DIVERGENTE:$PATH" bash -c \
+        'source "$1"; migrar_inventario_legado && exit 0; printf "%s\n" "$INVENTARIO_MIGRACAO_ERRO"; exit 1' \
+        _ "$RAIZ/lib/common.sh" 2>&1)"; then
+    falha "cópia divergente foi aceita como migração válida"
+fi
+[[ "$SAIDA_DIVERGENCIA" == *divergiram* ]] \
+    || falha "divergência de conteúdo não foi diagnosticada: $SAIDA_DIVERGENCIA"
+[ "$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")" = "$ASSINATURA_ORIGEM_DIVERGENCIA" ] \
+    || falha "divergência durante a prova alterou a pasta legada"
+arvore_vazia "$DEST_DIVERGENCIA" \
+    || falha "divergência durante a prova não desfez a cópia no destino"
+
+# (d) Pasta legada ausente, vazia ou simbólica: no-op silencioso nos três casos.
+usar_home_migracao noop
+DEST_NOOP="$DESTINO_MIGRACAO"
+SAIDA_NOOP_AUSENTE="$TMPDIR_TESTE/saida-migracao-ausente.txt"
+ANTES_NOOP_AUSENTE="$(assinatura_no_op "$HOME")"
+esperar_falha "pasta legada ausente" inventario_legado_pendente
+inventario_migracao_interativa </dev/null > "$SAIDA_NOOP_AUSENTE" \
+    || falha "pasta legada ausente retornou erro"
+[ ! -s "$SAIDA_NOOP_AUSENTE" ] \
+    || falha "pasta legada ausente não foi silenciosa: $(cat "$SAIDA_NOOP_AUSENTE")"
+[ "$(assinatura_no_op "$HOME")" = "$ANTES_NOOP_AUSENTE" ] \
+    || falha "pasta legada ausente produziu escrita"
+esperar_falha "migração sem pasta legada" migrar_inventario_legado
+[[ "$INVENTARIO_MIGRACAO_ERRO" == *'Nada a migrar'* ]] \
+    || falha "migração sem origem não diagnosticou: $INVENTARIO_MIGRACAO_ERRO"
+
+mkdir -p "$INVENTARIO_LEGADO_DIR"
+SAIDA_NOOP_VAZIA="$TMPDIR_TESTE/saida-migracao-vazia.txt"
+ANTES_NOOP_VAZIA="$(assinatura_no_op "$HOME")"
+esperar_falha "pasta legada vazia" inventario_legado_pendente
+inventario_migracao_interativa </dev/null > "$SAIDA_NOOP_VAZIA" \
+    || falha "pasta legada vazia retornou erro"
+[ ! -s "$SAIDA_NOOP_VAZIA" ] \
+    || falha "pasta legada vazia não foi silenciosa: $(cat "$SAIDA_NOOP_VAZIA")"
+[ -d "$INVENTARIO_LEGADO_DIR" ] || falha "no-op removeu a pasta legada vazia"
+[ "$(assinatura_no_op "$HOME")" = "$ANTES_NOOP_VAZIA" ] \
+    || falha "pasta legada vazia produziu escrita"
+
+rmdir "$INVENTARIO_LEGADO_DIR"
+LEGADO_ALVO="$HOME/relatorios-fora-da-home-legada"
+mkdir -p "$LEGADO_ALVO"
+printf '%s\n' 'conteúdo apontado pelo link legado' > "$LEGADO_ALVO/inventario-20260601-010000-000000001.txt"
+ln -s "$LEGADO_ALVO" "$INVENTARIO_LEGADO_DIR"
+SAIDA_NOOP_LINK="$TMPDIR_TESTE/saida-migracao-link.txt"
+ANTES_NOOP_LINK="$(assinatura_no_op "$HOME")"
+esperar_falha "pasta legada simbólica" inventario_legado_pendente
+inventario_migracao_interativa </dev/null > "$SAIDA_NOOP_LINK" \
+    || falha "pasta legada simbólica retornou erro"
+[ ! -s "$SAIDA_NOOP_LINK" ] \
+    || falha "pasta legada simbólica não foi silenciosa: $(cat "$SAIDA_NOOP_LINK")"
+[ -L "$INVENTARIO_LEGADO_DIR" ] || falha "no-op alterou o link legado"
+esperar_falha "migração de pasta legada simbólica" migrar_inventario_legado
+[ "$(assinatura_no_op "$HOME")" = "$ANTES_NOOP_LINK" ] \
+    || falha "pasta legada simbólica produziu escrita"
+arvore_vazia "$DEST_NOOP" || falha "no-op copiou algo para o destino unificado"
+
+# (f) Recusar a migração não copia, não remove e não impede a etapa 1 de publicar
+# no destino unificado.
+usar_home_migracao recusa
+DEST_RECUSA="$DESTINO_MIGRACAO"
+povoar_legado "$INVENTARIO_LEGADO_DIR"
+ASSINATURA_ORIGEM_RECUSA="$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")"
+SAIDA_RECUSA="$TMPDIR_TESTE/saida-migracao-recusa.txt"
+inventario_migracao_interativa <<< 'n' > "$SAIDA_RECUSA" \
+    || falha "recusar a migração terminou com erro"
+grep -q 'Migração recusada' "$SAIDA_RECUSA" || falha "a recusa não foi registrada na saída"
+[ "$(assinatura_migracao "$INVENTARIO_LEGADO_DIR")" = "$ASSINATURA_ORIGEM_RECUSA" ] \
+    || falha "recusar a migração alterou a pasta legada"
+arvore_vazia "$DEST_RECUSA" || falha "recusar a migração copiou algo para o destino"
+mkdir -p "$DEST_RECUSA"
+TMP_RECUSA="$(umask 077; mktemp "$DEST_RECUSA/.inventario.tmp.XXXXXXXXX")"
+criar_inventario "$TMP_RECUSA"
+publicar_inventario_completo "$TMP_RECUSA" "$DEST_RECUSA" 20260808-010000-000000001 >/dev/null \
+    || falha "$INVENTARIO_ERRO"
+resolver_ultimo_inventario >/dev/null || falha "$INVENTARIO_ERRO"
+[ "$INVENTARIO_RESOLVIDO" = "$DEST_RECUSA/inventario-20260808-010000-000000001.txt" ] \
+    || falha "publicação após a recusa não ficou visível no destino unificado"
+bash "$RAIZ/etapas/00-inventario.sh" --verificar >/dev/null \
+    || falha "a etapa 1 não reconheceu o inventário publicado no destino unificado após a recusa"
+[ -d "$INVENTARIO_LEGADO_DIR" ] && [ ! -L "$INVENTARIO_LEGADO_DIR" ] \
+    || falha "recusar a migração removeu a pasta legada"
+
+# Nenhum consumidor pode voltar a montar o caminho legado por conta própria: o
+# literal vive só em lib/common.sh, para a migração poder nomeá-lo.
+for CONSUMIDOR in etapas/00-inventario.sh util/diagnostico.sh; do
+    if grep -q 'inventario-hardware' "$RAIZ/$CONSUMIDOR"; then
+        falha "$CONSUMIDOR voltou a citar o caminho legado em vez do acessor"
+    fi
+    grep -q 'diretorio_inventario' "$RAIZ/$CONSUMIDOR" \
+        || falha "$CONSUMIDOR não resolve o diretório pelo acessor"
+done
+grep -q 'inventario_migracao_interativa' "$RAIZ/etapas/00-inventario.sh" \
+    || falha "a etapa 1 não oferece a migração da pasta legada"
 
 printf '%s\n' INVENTARIO_REDETECTAR_TESTS_OK

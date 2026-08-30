@@ -12,6 +12,14 @@ if [ -n "${_PLATAFORMA_LIB_CARREGADA:-}" ]; then
 fi
 _PLATAFORMA_LIB_CARREGADA=1
 
+# I8.4: o resolver de plataforma passou a ser o core Python, então a ponte
+# precisa estar carregada aqui. `lib/common.sh` sourceia esta biblioteca ANTES
+# de `lib/python-core.sh`, e `tests/test-ubuntu-audit-regressions.sh` sourceia
+# só esta; a ponte não depende de nada de `common.sh` e tem guarda de duplo
+# source, então carregá-la aqui é seguro e não muda ordem de ninguém.
+# shellcheck source=lib/python-core.sh
+source "${BASH_SOURCE[0]%/*}/python-core.sh"
+
 PLATAFORMA_CARREGADA=0
 PLATAFORMA_DETECTADA=0
 PLATAFORMA_ERRO=""
@@ -43,9 +51,20 @@ PLATAFORMA_QEMU_USUARIO_PADRAO=""
 PLATAFORMA_USUARIO_QEMU=""
 PLATAFORMA_QEMU_ORIGEM=""
 PLATAFORMA_CPU_VENDOR=""
+# I8.7/I8.8: os eixos de fabricante viram FATO exposto, com motivo próprio. Esta
+# fase modela; nenhuma delas entra em `guard_mutation` (isso é I14B/I14C) e
+# nenhum fabricante é habilitado: Intel segue bloqueada e NVIDIA segue a única
+# GPU suportada, byte a byte como antes.
+PLATAFORMA_CPU_VENDOR_SUPORTADO=0
+PLATAFORMA_CPU_VENDOR_MOTIVO=""
+PLATAFORMA_GPU_VENDOR=""
+PLATAFORMA_GPU_VENDOR_FAMILIA=""
+PLATAFORMA_GPU_VENDOR_SUPORTADO=0
+PLATAFORMA_GPU_VENDOR_MOTIVO=""
+PLATAFORMA_GPU_IOMMU_GRUPO=""
 PLATAFORMA_PACOTES_VIRTUALIZACAO=()
 declare -ag PLATAFORMA_CAPABILITIES_CONHECIDAS=(
-    inventory.write config.manage host.update nvidia.driver packages.base
+    inventory.write config.manage host.update gpu.driver packages.base
     storage.prepare virtualization.manage iommu.configure domain.create
     domain.console hooks.configure guest.driver usb.configure cpu.tune
     network.configure airlock.configure trim.configure backup.create
@@ -59,69 +78,6 @@ _plataforma_trim() {
     valor="${valor#"${valor%%[![:space:]]*}"}"
     valor="${valor%"${valor##*[![:space:]]}"}"
     printf '%s\n' "$valor"
-}
-
-_plataforma_decodificar_valor() {
-    local valor
-    valor="$(_plataforma_trim "${1:-}")"
-    if [[ "$valor" == \"*\" ]] && [ "${#valor}" -ge 2 ]; then
-        valor="${valor:1:${#valor}-2}"
-        valor="${valor//\\\"/\"}"
-        valor="${valor//\\\\/\\}"
-    elif [[ "$valor" == \'*\' ]] && [ "${#valor}" -ge 2 ]; then
-        valor="${valor:1:${#valor}-2}"
-    fi
-    [[ "$valor" != *$'\n'* && "$valor" != *$'\r'* ]] || return 1
-    printf '%s\n' "$valor"
-}
-
-_plataforma_ler_os_release() {
-    local arquivo="$1" linha chave bruto valor
-    local id="" id_like="" variant_id="" version_id="" codename=""
-    local -A vistas=()
-    PLATAFORMA_ERRO=""
-    [ -r "$arquivo" ] && [ -f "$arquivo" ] \
-        || { PLATAFORMA_ERRO="os-release ausente ou ilegível: $arquivo"; return 1; }
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        linha="${linha%$'\r'}"
-        [ -n "$linha" ] && [[ "$linha" != \#* ]] || continue
-        [[ "$linha" == *=* ]] || continue
-        chave="$(_plataforma_trim "${linha%%=*}")"
-        case "$chave" in
-            ID|ID_LIKE|VARIANT_ID|VERSION_ID|VERSION_CODENAME) ;;
-            *) continue ;;
-        esac
-        [ -z "${vistas[$chave]+definida}" ] \
-            || { PLATAFORMA_ERRO="Chave $chave repetida em $arquivo."; return 1; }
-        vistas[$chave]=1
-        bruto="${linha#*=}"
-        valor="$(_plataforma_decodificar_valor "$bruto")" \
-            || { PLATAFORMA_ERRO="Valor inválido para $chave em $arquivo."; return 1; }
-        case "$chave" in
-            ID) id="$valor" ;;
-            ID_LIKE) id_like="$valor" ;;
-            VARIANT_ID) variant_id="$valor" ;;
-            VERSION_ID) version_id="$valor" ;;
-            VERSION_CODENAME) codename="$valor" ;;
-        esac
-    done < "$arquivo"
-
-    [[ "$id" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
-        || { PLATAFORMA_ERRO="ID ausente ou inválido em $arquivo."; return 1; }
-    [ -z "$id_like" ] || [[ "$id_like" =~ ^[a-z0-9._-]+([[:space:]]+[a-z0-9._-]+)*$ ]] \
-        || { PLATAFORMA_ERRO="ID_LIKE inválido em $arquivo."; return 1; }
-    [ -z "$variant_id" ] || [[ "$variant_id" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
-        || { PLATAFORMA_ERRO="VARIANT_ID inválido em $arquivo."; return 1; }
-    [ -z "$version_id" ] || [[ "$version_id" =~ ^[[:alnum:]._-]+$ ]] \
-        || { PLATAFORMA_ERRO="VERSION_ID inválido em $arquivo."; return 1; }
-    [ -z "$codename" ] || [[ "$codename" =~ ^[[:alnum:]._-]+$ ]] \
-        || { PLATAFORMA_ERRO="VERSION_CODENAME inválido em $arquivo."; return 1; }
-
-    PLATAFORMA_ID="$id"
-    PLATAFORMA_ID_LIKE="$id_like"
-    PLATAFORMA_VARIANT_ID="$variant_id"
-    PLATAFORMA_VERSION_ID="$version_id"
-    PLATAFORMA_VERSION_CODENAME="$codename"
 }
 
 _plataforma_resetar_estado() {
@@ -161,72 +117,102 @@ _plataforma_resetar_estado() {
     PLATAFORMA_CAPABILITY_REASONS=()
 }
 
-_plataforma_id_like_contem() {
-    local procurado="$1" item
-    for item in $PLATAFORMA_ID_LIKE; do
-        [ "$item" = "$procurado" ] && return 0
-    done
-    return 1
-}
+_plataforma_resolver_estado() {
+    # I8.4: um resolver só, no core, para leitura do os-release, imutabilidade e
+    # nível de suporte. O Bash continua dono de tudo que toca o host: abre o
+    # arquivo, captura a arquitetura e a evidência de ostree, e é o único que
+    # conhece o caminho local. Esse caminho é LOCAL_IDENTIFIER (seção 3.9) e por
+    # isso NÃO atravessa a ponte: o core devolve código e campo, e a frase é
+    # rerenderizada aqui, byte a byte igual à que a etapa publicava antes.
+    local arquivo="$1" fonte_explicita="${2:-0}"
+    local conteudo="" estado=present arquitetura="" ostree=not-captured marcador=""
+    local -a payload=()
+    local -a PLAT_PERMITIDAS=(
+        CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+        ARCH ARCH_EVIDENCE ARCH_EXPECTED ARCH_STATE BLOCK_REASON
+        CAPABILITIES_KNOWN CAPABILITY_REASON ERROR ERROR_CODE ERROR_FIELD
+        FIELDS_SEEN ID ID_EVIDENCE ID_LIKE ID_LIKE_COUNT ID_LIKE_EVIDENCE
+        ID_LIKE_NORMALIZED ID_LIKE_STATE ID_STATE IMMUTABLE IMMUTABLE_SOURCE
+        IMMUTABLE_SOURCE_EVIDENCE IMMUTABLE_SOURCE_STATE MUTABLE PROFILE
+        SUPPORT_LEVEL SUPPORT_SOURCE SUPPORT_SOURCE_EVIDENCE
+        SUPPORT_SOURCE_STATE VALID VARIANT_ID VARIANT_ID_EVIDENCE
+        VARIANT_ID_STATE VERSION_CODENAME VERSION_CODENAME_EVIDENCE
+        VERSION_CODENAME_STATE VERSION_ID VERSION_ID_EVIDENCE VERSION_ID_STATE
+    )
 
-_plataforma_detectar_imutabilidade() {
-    # Em testes com os-release explicitamente injetado, apenas VARIANT_ID é
-    # autoritativo. Em produção, /run/ostree-booted é uma segunda evidência.
-    local fonte_explicita="${1:-0}" marcador=""
-    case "$PLATAFORMA_VARIANT_ID" in
-        silverblue|kinoite|sericea|onyx|coreos)
-            PLATAFORMA_IMUTAVEL=1
-            PLATAFORMA_BLOQUEIO_MOTIVO="VARIANT_ID=$PLATAFORMA_VARIANT_ID identifica uma implantação imutável."
-            return 0
-            ;;
-    esac
-    [ "$fonte_explicita" -eq 0 ] || return 0
-    if declare -F caminho_sistema >/dev/null 2>&1; then
-        marcador="$(caminho_sistema /run/ostree-booted)" || {
-            PLATAFORMA_ERRO="Não foi possível resolver a evidência de implantação ostree."
-            return 1
-        }
+    if [ -f "$arquivo" ] && [ -r "$arquivo" ]; then
+        # `read -d ''` preserva os bytes do arquivo, inclusive a nova linha
+        # final que a substituição de comando podaria.
+        IFS= read -r -d '' conteudo < "$arquivo" || true
+    elif [ -e "$arquivo" ] || [ -L "$arquivo" ]; then
+        estado=unreadable
     else
-        marcador=/run/ostree-booted
+        estado=absent
     fi
-    if [ -e "$marcador" ] || [ -L "$marcador" ]; then
-        PLATAFORMA_IMUTAVEL=1
-        PLATAFORMA_BLOQUEIO_MOTIVO="Uma implantação ostree foi detectada; o host é tratado como imutável."
-    fi
-}
 
-_plataforma_classificar_suporte() {
-    local familia
-    if [ "$PLATAFORMA_IMUTAVEL" -eq 1 ]; then
-        PLATAFORMA_SUPPORT_LEVEL=diagnostic-only
-        PLATAFORMA_MUTAVEL=0
-        return 0
+    # Arquitetura é snapshot do Bash, nunca suposição do arquivo. Ausente vira
+    # fato tipado `ausente` no core, e não default silencioso.
+    if command -v uname >/dev/null 2>&1; then
+        arquitetura="$(uname -m 2>/dev/null || true)"
     fi
-    case "$PLATAFORMA_ID" in
-        ubuntu|pop)
-            PLATAFORMA_SUPPORT_LEVEL=supported
-            PLATAFORMA_MUTAVEL=1
-            PLATAFORMA_BLOQUEIO_MOTIVO=""
-            return 0
-            ;;
-        debian|arch|cachyos|fedora|opensuse-tumbleweed)
-            PLATAFORMA_SUPPORT_LEVEL=diagnostic-only
-            PLATAFORMA_MUTAVEL=0
-            PLATAFORMA_BLOQUEIO_MOTIVO="ID=$PLATAFORMA_ID possui provider planejado, ainda restrito a diagnóstico."
-            return 0
-            ;;
-    esac
-    for familia in ubuntu debian arch fedora rhel opensuse suse; do
-        if _plataforma_id_like_contem "$familia"; then
-            PLATAFORMA_SUPPORT_LEVEL=family-unverified
-            PLATAFORMA_MUTAVEL=0
-            PLATAFORMA_BLOQUEIO_MOTIVO="ID=$PLATAFORMA_ID declara ID_LIKE=$PLATAFORMA_ID_LIKE, mas a derivação não foi verificada."
-            return 0
+
+    # Mesma regra de antes: com os-release injetado, só VARIANT_ID é
+    # autoritativo; em produção, /run/ostree-booted é a segunda evidência.
+    if [ "$fonte_explicita" -eq 0 ]; then
+        if declare -F caminho_sistema >/dev/null 2>&1; then
+            marcador="$(caminho_sistema /run/ostree-booted)" || {
+                PLATAFORMA_ERRO="Não foi possível resolver a evidência de implantação ostree."
+                return 1
+            }
+        else
+            marcador=/run/ostree-booted
         fi
-    done
-    PLATAFORMA_SUPPORT_LEVEL=blocked
-    PLATAFORMA_MUTAVEL=0
-    PLATAFORMA_BLOQUEIO_MOTIVO="ID=$PLATAFORMA_ID não possui provider reconhecido."
+        if [ -e "$marcador" ] || [ -L "$marcador" ]; then
+            ostree=present
+        else
+            ostree=absent
+        fi
+    fi
+
+    payload=(
+        text "$conteudo"
+        text_state "$estado"
+        arch "$arquitetura"
+        ostree_evidence "$ostree"
+    )
+    if ! python_core_pares_payload PLAT_PERMITIDAS PLAT_ platform-detect payload; then
+        PLATAFORMA_ERRO="${PYTHON_CORE_ERRO:-Não foi possível resolver a plataforma pelo core.}"
+        return 1
+    fi
+
+    if [ "${PLAT_VALID:-0}" != 1 ]; then
+        # O ramo `*` é fail-closed de propósito: código novo do core sem
+        # tradução aqui reprova, em vez de virar mensagem vazia.
+        case "${PLAT_ERROR_CODE:-}" in
+            os_release_missing) PLATAFORMA_ERRO="os-release ausente ou ilegível: $arquivo" ;;
+            duplicate_key)      PLATAFORMA_ERRO="Chave $PLAT_ERROR_FIELD repetida em $arquivo." ;;
+            invalid_value)      PLATAFORMA_ERRO="Valor inválido para $PLAT_ERROR_FIELD em $arquivo." ;;
+            invalid_id)         PLATAFORMA_ERRO="ID ausente ou inválido em $arquivo." ;;
+            invalid_field)      PLATAFORMA_ERRO="$PLAT_ERROR_FIELD inválido em $arquivo." ;;
+            *)                  PLATAFORMA_ERRO="Falha ao interpretar $arquivo (código ${PLAT_ERROR_CODE:-desconhecido})." ;;
+        esac
+        return 1
+    fi
+
+    # Publicação um para um, e SÓ com leitura válida: era isso que o parser
+    # antigo fazia ao atribuir as globais depois de todas as validações.
+    PLATAFORMA_DETECTADA=1
+    PLATAFORMA_ID="$PLAT_ID"
+    PLATAFORMA_ID_LIKE="$PLAT_ID_LIKE"
+    PLATAFORMA_VARIANT_ID="$PLAT_VARIANT_ID"
+    PLATAFORMA_VERSION_ID="$PLAT_VERSION_ID"
+    PLATAFORMA_VERSION_CODENAME="$PLAT_VERSION_CODENAME"
+    PLATAFORMA_IMUTAVEL="$PLAT_IMMUTABLE"
+    PLATAFORMA_SUPPORT_LEVEL="$PLAT_SUPPORT_LEVEL"
+    PLATAFORMA_MUTAVEL="$PLAT_MUTABLE"
+    PLATAFORMA_BLOQUEIO_MOTIVO="$PLAT_BLOCK_REASON"
+    PLATAFORMA_PERFIL="$PLAT_PROFILE"
+    return 0
 }
 
 _plataforma_inicializar_capabilities() {
@@ -257,10 +243,7 @@ plataforma_carregar() {
         arquivo=/etc/os-release
     fi
     _plataforma_resetar_estado
-    _plataforma_ler_os_release "$arquivo" || return 1
-    PLATAFORMA_DETECTADA=1
-    _plataforma_detectar_imutabilidade "$fonte_explicita" || return 1
-    _plataforma_classificar_suporte
+    _plataforma_resolver_estado "$arquivo" "$fonte_explicita" || return 1
     _plataforma_inicializar_capabilities
 
     if [ "$PLATAFORMA_SUPPORT_LEVEL" != supported ]; then
@@ -278,16 +261,17 @@ plataforma_carregar() {
     PLATAFORMA_QEMU_USUARIOS="libvirt-qemu qemu"
     PLATAFORMA_LIBVIRT_GRUPO=libvirt
     PLATAFORMA_KVM_GRUPO=kvm
-    case "$PLATAFORMA_ID" in
+    # I8.4: o NOME do perfil é resolução (vem do core); os atributos abaixo são
+    # provider, e provider é Bash. Antes as duas coisas eram decididas no mesmo
+    # `case`, o que duplicaria a classificação depois do cutover.
+    case "$PLATAFORMA_PERFIL" in
         ubuntu)
-            PLATAFORMA_PERFIL=ubuntu
             PLATAFORMA_QEMU_PACOTE=qemu-system-x86
             PLATAFORMA_QEMU_USUARIO_PADRAO=libvirt-qemu
             PLATAFORMA_NVIDIA_ESTRATEGIA=ubuntu-drivers
             PLATAFORMA_BOOT_BACKENDS=grub
             ;;
-        pop)
-            PLATAFORMA_PERFIL=pop-os
+        pop-os)
             PLATAFORMA_QEMU_PACOTE=qemu-kvm
             PLATAFORMA_QEMU_USUARIO_PADRAO=libvirt-qemu
             PLATAFORMA_NVIDIA_ESTRATEGIA=system76
@@ -311,9 +295,18 @@ plataforma_carregar() {
     return 0
 }
 
+# I8.8: `nvidia.driver` virou ALIAS de `gpu.driver`. O array de conhecidas
+# continua com 21 entradas (o alias não infla a contagem que os testes de I1
+# conferem) e todo consumidor antigo continua aceito durante o cutover; a
+# remoção do alias é I10.
+declare -Ag PLATAFORMA_CAPABILITY_ALIASES=(
+    [nvidia.driver]=gpu.driver
+)
+
 platform_capability_known() {
     local procurada="${1:-}" capability
     [ -n "$procurada" ] || return 1
+    procurada="${PLATAFORMA_CAPABILITY_ALIASES[$procurada]:-$procurada}"
     for capability in "${PLATAFORMA_CAPABILITIES_CONHECIDAS[@]}"; do
         [ "$capability" = "$procurada" ] && return 0
     done
@@ -322,6 +315,7 @@ platform_capability_known() {
 
 platform_has_capability() {
     local capability="${1:-}"
+    capability="${PLATAFORMA_CAPABILITY_ALIASES[$capability]:-$capability}"
     platform_capability_known "$capability" || return 1
     if [ "$PLATAFORMA_DETECTADA" -ne 1 ]; then
         plataforma_carregar || [ "$PLATAFORMA_DETECTADA" -eq 1 ] || return 1
@@ -331,6 +325,7 @@ platform_has_capability() {
 
 platform_capability_reason() {
     local capability="${1:-}"
+    capability="${PLATAFORMA_CAPABILITY_ALIASES[$capability]:-$capability}"
     if ! platform_capability_known "$capability"; then
         printf 'Capability desconhecida: %s.\n' "${capability:-vazia}"
         return 1
@@ -346,6 +341,7 @@ platform_capability_reason() {
 
 platform_require_capability() {
     local capability="${1:-}"
+    capability="${PLATAFORMA_CAPABILITY_ALIASES[$capability]:-$capability}"
     if ! platform_capability_known "$capability"; then
         PLATAFORMA_ERRO="Capability desconhecida: ${capability:-vazia}."
         return 1
@@ -394,39 +390,20 @@ _PLATAFORMA_UNIDADE_ATIVA=""
 _PLATAFORMA_UNIDADE_SUB=""
 _PLATAFORMA_UNIDADE_ARQUIVO=""
 
-_plataforma_sondar_unidade_fixture() {
-    local unidade="$1" arquivo="$2" linha nome carga ativo sub unitfile extra encontrados=0
-    _PLATAFORMA_UNIDADE_CARGA=not-found
-    _PLATAFORMA_UNIDADE_ATIVA=inactive
-    _PLATAFORMA_UNIDADE_SUB=dead
-    _PLATAFORMA_UNIDADE_ARQUIVO=""
-    while IFS= read -r linha || [ -n "$linha" ]; do
-        [[ "$linha" != \#* && -n "$linha" ]] || continue
-        IFS='|' read -r nome carga ativo sub unitfile extra <<< "$linha"
-        [ -z "$extra" ] \
-            || { PLATAFORMA_ERRO="Fixture systemd malformada: $linha"; return 2; }
-        [ "$nome" = "$unidade" ] || continue
-        encontrados=$((encontrados + 1))
-        [ "$encontrados" -eq 1 ] \
-            || { PLATAFORMA_ERRO="Unidade $unidade repetida na fixture."; return 2; }
-        _PLATAFORMA_UNIDADE_CARGA="$carga"
-        _PLATAFORMA_UNIDADE_ATIVA="$ativo"
-        _PLATAFORMA_UNIDADE_SUB="$sub"
-        _PLATAFORMA_UNIDADE_ARQUIVO="${unitfile:-disabled}"
-    done < "$arquivo"
-}
-
 _plataforma_sondar_unidade() {
-    local unidade="$1" fixture="${2:-}" saida linha chave valor
+    # SONDA, e só sonda: é ela que toca o host, então continua no Bash. A
+    # interpretação dos quatro valores foi para o core em I8.6.
+    #
+    # A consulta pede exatamente LoadState, ActiveState, SubState e
+    # UnitFileState. O shim de `systemctl show` do harness I0 recusa qualquer
+    # outra propriedade como comando proibido: acrescentar uma aqui reprova a
+    # campanha inteira, mesmo que o systemd real respondesse.
+    local unidade="$1" saida linha chave valor
     local viu_carga=0 viu_ativa=0
     _PLATAFORMA_UNIDADE_CARGA=""
     _PLATAFORMA_UNIDADE_ATIVA=""
     _PLATAFORMA_UNIDADE_SUB=""
     _PLATAFORMA_UNIDADE_ARQUIVO=""
-    if [ -n "$fixture" ]; then
-        _plataforma_sondar_unidade_fixture "$unidade" "$fixture"
-        return $?
-    fi
     command -v systemctl >/dev/null 2>&1 \
         || { PLATAFORMA_ERRO="systemctl indisponível para sondar $unidade."; return 2; }
     saida="$(systemctl show "$unidade" --property=LoadState --property=ActiveState \
@@ -447,30 +424,28 @@ _plataforma_sondar_unidade() {
         || { PLATAFORMA_ERRO="Resposta systemd incompleta para $unidade."; return 2; }
 }
 
-_plataforma_classificar_unidade() {
-    # Imprime SCORE|AÇÃO. Unidades ativas sempre vencem unidades apenas
-    # carregadas; sockets vencem services quando o nível operacional empata.
-    local unidade="$1" bonus=0
-    [ "$_PLATAFORMA_UNIDADE_CARGA" = loaded ] || return 1
-    [[ "$unidade" == *.socket ]] && bonus=1
-    case "$_PLATAFORMA_UNIDADE_ATIVA" in
-        active|activating) printf '%s|nenhuma\n' "$((100 + bonus))"; return 0 ;;
-    esac
-    case "$_PLATAFORMA_UNIDADE_ARQUIVO" in
-        enabled|enabled-runtime|disabled)
-            printf '%s|enable-now\n' "$((50 + bonus))" ;;
-        static|indirect|generated|linked|linked-runtime|alias)
-            printf '%s|start\n' "$((25 + bonus))" ;;
-        *) return 1 ;;
-    esac
-}
-
 plataforma_resolver_servico() {
     # Contrato público: 0 resolve; 1 indica unidade ainda ausente; 2 indica
     # configuração inválida ou falha operacional da sondagem. A fixture
     # opcional é autoritativa e nunca cai no systemd do host.
-    local tipo="${1:-libvirt}" fixture="${2:-}" candidatos base unidade classificado rc
-    local score acao melhor_score=-1 melhor_unidade="" melhor_acao=""
+    #
+    # I8.6 (REQ-LIBVIRT-BACKEND): a CLASSIFICAÇÃO das unidades e o DESEMPATE
+    # entre elas são do core (`platform-service-resolve`), num lugar só, para
+    # que `libvirt_backend_resolver` (etapa 50) e as etapas 20 e 21 consumam a
+    # MESMA decisão e nenhuma possa reimplementá-la. Aqui ficam só as coisas
+    # que tocam o host ou pertencem à fachada: a lista de candidatos do perfil,
+    # a leitura da fixture, a sonda `systemctl show` e a renderização das
+    # frases, que carregam o caminho da fixture e o nome do tipo
+    # (LOCAL_IDENTIFIER e prosa, seção 3.9).
+    local tipo="${1:-libvirt}" fixture="${2:-}" candidatos base unidade
+    local conteudo="" ordem="" registros="" origem=probe
+    local -a payload=()
+    local -a PLAT_SVC_PERMITIDAS=(
+        CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+        ERROR ERROR_CODE ERROR_FIELD RESOLVED_ACTION RESOLVED_SCORE
+        RESOLVED_SERVICE RESOLVED_UNIT RESOLVED_UNIT_EVIDENCE
+        RESOLVED_UNIT_STATE SERVICE_SOURCE UNIT_COUNT VALID
+    )
     if [ "$PLATAFORMA_CARREGADA" -ne 1 ]; then
         plataforma_carregar || return 2
     fi
@@ -483,34 +458,62 @@ plataforma_resolver_servico() {
         virtlogd) candidatos="$PLATAFORMA_VIRTLOGD_SERVICOS" ;;
         *) PLATAFORMA_ERRO="Tipo de serviço desconhecido: $tipo"; return 2 ;;
     esac
-    if [ -n "$fixture" ] && { [ ! -r "$fixture" ] || [ ! -f "$fixture" ]; }; then
-        PLATAFORMA_ERRO="Fixture de serviços ausente ou ilegível: $fixture."
-        return 2
+    if [ -n "$fixture" ]; then
+        if [ ! -r "$fixture" ] || [ ! -f "$fixture" ]; then
+            PLATAFORMA_ERRO="Fixture de serviços ausente ou ilegível: $fixture."
+            return 2
+        fi
+        origem=fixture
+        # `read -d ''` preserva os bytes do arquivo, inclusive a nova linha
+        # final que a substituição de comando podaria.
+        IFS= read -r -d '' conteudo < "$fixture" || true
     fi
+    # A expansão em .socket e .service decide O QUE perguntar ao host, então é
+    # do Bash. A ordem produzida aqui é a ordem de desempate do core.
     for base in $candidatos; do
         for unidade in "${base}.socket" "${base}.service"; do
-            if _plataforma_sondar_unidade "$unidade" "$fixture"; then
-                :
-            else
-                rc=$?
-                return "$rc"
-            fi
-            classificado="$(_plataforma_classificar_unidade "$unidade" || true)"
-            [ -n "$classificado" ] || continue
-            score="${classificado%%|*}"
-            acao="${classificado#*|}"
-            if [ "$score" -gt "$melhor_score" ]; then
-                melhor_score="$score"
-                melhor_unidade="$unidade"
-                melhor_acao="$acao"
-            fi
+            ordem+="${ordem:+$'\n'}$unidade"
+            [ "$origem" = probe ] || continue
+            _plataforma_sondar_unidade "$unidade" || return $?
+            registros+="${registros:+$'\n'}${unidade}"$'\t'
+            registros+="${_PLATAFORMA_UNIDADE_CARGA}"$'\t'
+            registros+="${_PLATAFORMA_UNIDADE_ATIVA}"$'\t'
+            registros+="${_PLATAFORMA_UNIDADE_SUB}"$'\t'
+            registros+="${_PLATAFORMA_UNIDADE_ARQUIVO}"
         done
     done
-    [ -n "$melhor_unidade" ] \
-        || { PLATAFORMA_ERRO="Nenhuma unidade $tipo ativa ou iniciável entre os backends do perfil: $candidatos."; return 1; }
-    PLATAFORMA_UNIDADE_RESOLVIDA="$melhor_unidade"
-    PLATAFORMA_SERVICO_RESOLVIDO="${melhor_unidade%%.*}"
-    PLATAFORMA_UNIDADE_ACAO="$melhor_acao"
+    payload=(
+        service_source "$origem"
+        unit_order "$ordem"
+        fixture_text "$conteudo"
+        unit_states "$registros"
+    )
+    if ! python_core_pares_payload PLAT_SVC_PERMITIDAS PLAT_SVC_ platform-service-resolve payload; then
+        PLATAFORMA_ERRO="${PYTHON_CORE_ERRO:-Não foi possível resolver a unidade systemd pelo core.}"
+        return 2
+    fi
+    if [ "${PLAT_SVC_VALID:-0}" != 1 ]; then
+        # O ramo `*` é fail-closed de propósito: código novo do core sem
+        # tradução aqui reprova, em vez de virar mensagem vazia.
+        case "${PLAT_SVC_ERROR_CODE:-}" in
+            fixture_malformed)
+                PLATAFORMA_ERRO="Fixture systemd malformada: $PLAT_SVC_ERROR_FIELD"
+                return 2 ;;
+            fixture_duplicate)
+                PLATAFORMA_ERRO="Unidade $PLAT_SVC_ERROR_FIELD repetida na fixture."
+                return 2 ;;
+            no_unit)
+                PLATAFORMA_ERRO="Nenhuma unidade $tipo ativa ou iniciável entre os backends do perfil: $candidatos."
+                return 1 ;;
+            *)
+                PLATAFORMA_ERRO="Falha ao resolver a unidade $tipo (código ${PLAT_SVC_ERROR_CODE:-desconhecido})."
+                return 2 ;;
+        esac
+    fi
+    # Publicação um para um, e SÓ com decisão válida.
+    PLATAFORMA_UNIDADE_RESOLVIDA="$PLAT_SVC_RESOLVED_UNIT"
+    PLATAFORMA_SERVICO_RESOLVIDO="$PLAT_SVC_RESOLVED_SERVICE"
+    PLATAFORMA_UNIDADE_ACAO="$PLAT_SVC_RESOLVED_ACTION"
 }
 
 _plataforma_usuario_nss_unico() {
@@ -686,42 +689,135 @@ plataforma_resolver_usuario_qemu() {
 }
 
 plataforma_detectar_cpu_vendor() {
+    # I8.7: a SONDA continua aqui (é ela que toca o host); a interpretação foi
+    # para o core, que modela o vendor como fato tipado com origem da evidência.
     # O argumento opcional injeta somente o resultado da sonda em testes que
     # chamam esta função diretamente; entrypoints operacionais não o repassam.
-    local vendor="${1:-}" saida linha chave valor
+    #
+    # A segunda fonte do eixo (`/proc/cpuinfo`) é aceita pelo core e coberta
+    # pelas fixtures dele, mas a fachada ainda captura só `lscpu`, que é o que a
+    # implementação atual sonda. Capturar as duas aqui mudaria comportamento
+    # nesta fase: os harnesses de teste substituem o COMANDO por PATH e não têm
+    # como redirecionar o ARQUIVO, então um host com `lscpu` encenado e
+    # `/proc/cpuinfo` real viraria "evidência conflitante" onde hoje há decisão
+    # limpa. Ligar a segunda fonte é I14B, junto com o host Intel real.
+    local vendor="${1:-}" texto="" estado=absent
+    local -a payload=()
+    local -a PLAT_CPU_PERMITIDAS=(
+        CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+        CPUINFO_CAPTURE CPUINFO_DISTINCT CPUINFO_VENDOR CPU_VENDOR
+        CPU_VENDOR_EVIDENCE CPU_VENDOR_FAMILY CPU_VENDOR_STATE
+        CPU_VENDOR_SUPPORTED ERROR ERROR_CODE LSCPU_CAPTURE LSCPU_DISTINCT
+        LSCPU_VENDOR VALID
+    )
     PLATAFORMA_CPU_VENDOR=""
+    PLATAFORMA_CPU_VENDOR_SUPORTADO=0
+    PLATAFORMA_CPU_VENDOR_MOTIVO=""
     PLATAFORMA_ERRO=""
-    if [ -z "$vendor" ]; then
-        command -v lscpu >/dev/null 2>&1 \
-            || { PLATAFORMA_ERRO="lscpu indisponível para identificar o fabricante da CPU."; return 1; }
-        saida="$(LC_ALL=C lscpu 2>/dev/null)" \
-            || { PLATAFORMA_ERRO="lscpu falhou ao identificar o fabricante da CPU."; return 1; }
-        while IFS=: read -r chave valor; do
-            chave="$(_plataforma_trim "$chave")"
-            [ "$chave" = "Vendor ID" ] || continue
-            valor="$(_plataforma_trim "$valor")"
-            [ -n "$valor" ] || continue
-            if [ -z "$vendor" ]; then
-                vendor="$valor"
-            elif [ "$vendor" != "$valor" ]; then
-                PLATAFORMA_ERRO="Mais de um fabricante de CPU foi reportado: $vendor e $valor."
-                return 1
-            fi
-        done <<< "$saida"
+    if [ -n "$vendor" ]; then
+        texto="Vendor ID: $vendor"
+        estado=present
+    elif ! command -v lscpu >/dev/null 2>&1; then
+        estado=unavailable
+    elif texto="$(LC_ALL=C lscpu 2>/dev/null)"; then
+        estado=present
+    else
+        texto=""
+        estado=error
     fi
-    case "$vendor" in
-        AuthenticAMD|GenuineIntel) ;;
-        *) PLATAFORMA_ERRO="Fabricante de CPU ausente ou não suportado: ${vendor:-desconhecido}."; return 1 ;;
-    esac
-    PLATAFORMA_CPU_VENDOR="$vendor"
+    payload=(
+        cpuinfo_text "" cpuinfo_state absent
+        lscpu_text "$texto" lscpu_state "$estado"
+    )
+    if ! python_core_pares_payload PLAT_CPU_PERMITIDAS PLAT_ platform-cpu-vendor payload; then
+        PLATAFORMA_ERRO="${PYTHON_CORE_ERRO:-Não foi possível identificar o fabricante da CPU pelo core.}"
+        return 1
+    fi
+    if [ "${PLAT_VALID:-0}" != 1 ]; then
+        PLATAFORMA_ERRO="$PLAT_ERROR"
+        return 1
+    fi
+    PLATAFORMA_CPU_VENDOR="$PLAT_CPU_VENDOR"
+    PLATAFORMA_CPU_VENDOR_SUPORTADO="$PLAT_CPU_VENDOR_SUPPORTED"
+    # Motivo próprio do eixo: vendor detectado e não suportado é fato, não erro
+    # de detecção. Quem transforma isso em recusa é `plataforma_validar_cpu_amd`.
+    PLATAFORMA_CPU_VENDOR_MOTIVO="$PLAT_ERROR"
 }
 
 
 plataforma_validar_cpu_amd() {
     # O argumento opcional é encaminhado apenas por testes unitários diretos.
     plataforma_detectar_cpu_vendor "${1:-}" || return 1
-    [ "$PLATAFORMA_CPU_VENDOR" = AuthenticAMD ] || {
-        PLATAFORMA_ERRO="CPU $PLATAFORMA_CPU_VENDOR bloqueada: esta implementação oferece apenas AMD (amd_iommu=on/AMD-Vi). Intel e outros fabricantes não sofrerão qualquer mutação."
+    [ "$PLATAFORMA_CPU_VENDOR_SUPORTADO" = 1 ] || {
+        PLATAFORMA_ERRO="$PLATAFORMA_CPU_VENDOR_MOTIVO"
         return 1
     }
+}
+
+plataforma_detectar_gpu_vendor() {
+    # I8.8: o eixo de fabricante de GPU não existia; era propriedade implícita
+    # espalhada por dezenas de pontos. Aqui ele nasce como FATO exposto, com
+    # motivo próprio, sem entrar em `guard_mutation` e sem habilitar fabricante
+    # nenhum: só NVIDIA continua suportada, exatamente como antes.
+    #
+    # $1 = BDF já escolhido (opcional). $2 e $3 injetam as capturas de `lspci` e
+    # dos grupos IOMMU, e existem só para teste direto; produção sonda o host.
+    local bdf="${1:-}" pci="${2:-}" grupos="${3:-}"
+    local pci_estado=present grupos_estado=present base grupo dispositivo
+    local -a payload=()
+    local -a PLAT_GPU_PERMITIDAS=(
+        CORE_VERSION PROTOCOL_VERSION SUBCOMMAND
+        ERROR ERROR_CODE GPU_COUNT GPU_VENDOR GPU_VENDOR_COUNT
+        GPU_VENDOR_EVIDENCE GPU_VENDOR_FAMILY GPU_VENDOR_LABEL GPU_VENDOR_STATE
+        GPU_VENDOR_SUPPORTED IOMMU_CAPTURE IOMMU_GROUP PCI_CAPTURE VALID
+    )
+    PLATAFORMA_GPU_VENDOR=""
+    PLATAFORMA_GPU_VENDOR_FAMILIA=""
+    PLATAFORMA_GPU_VENDOR_SUPORTADO=0
+    PLATAFORMA_GPU_VENDOR_MOTIVO=""
+    PLATAFORMA_GPU_IOMMU_GRUPO=""
+    PLATAFORMA_ERRO=""
+    if [ -z "$pci" ]; then
+        if ! command -v lspci >/dev/null 2>&1; then
+            pci_estado=unavailable
+        elif pci="$(LC_ALL=C lspci -Dnn 2>/dev/null)"; then
+            pci_estado=present
+        else
+            pci=""
+            pci_estado=error
+        fi
+    fi
+    if [ -z "$grupos" ]; then
+        if declare -F caminho_sistema >/dev/null 2>&1; then
+            base="$(caminho_sistema /sys/kernel/iommu_groups)" || base=""
+        else
+            base=/sys/kernel/iommu_groups
+        fi
+        if [ -n "$base" ] && [ -d "$base" ]; then
+            for grupo in "$base"/*; do
+                [ -d "$grupo/devices" ] || continue
+                for dispositivo in "$grupo/devices"/*; do
+                    [ -e "$dispositivo" ] || continue
+                    grupos+="${grupos:+$'\n'}${grupo##*/} ${dispositivo##*/}"
+                done
+            done
+        else
+            grupos_estado=absent
+        fi
+    fi
+    payload=(
+        pci_text "$pci" pci_state "$pci_estado"
+        iommu_text "$grupos" iommu_state "$grupos_estado"
+        bdf "$bdf"
+    )
+    if ! python_core_pares_payload PLAT_GPU_PERMITIDAS PLAT_ platform-gpu-vendor payload; then
+        PLATAFORMA_ERRO="${PYTHON_CORE_ERRO:-Não foi possível identificar o fabricante da GPU pelo core.}"
+        return 1
+    fi
+    PLATAFORMA_GPU_VENDOR="$PLAT_GPU_VENDOR"
+    PLATAFORMA_GPU_VENDOR_FAMILIA="$PLAT_GPU_VENDOR_FAMILY"
+    PLATAFORMA_GPU_VENDOR_SUPORTADO="$PLAT_GPU_VENDOR_SUPPORTED"
+    PLATAFORMA_GPU_VENDOR_MOTIVO="$PLAT_ERROR"
+    PLATAFORMA_GPU_IOMMU_GRUPO="$PLAT_IOMMU_GROUP"
+    [ "${PLAT_VALID:-0}" = 1 ] || { PLATAFORMA_ERRO="$PLAT_ERROR"; return 1; }
 }

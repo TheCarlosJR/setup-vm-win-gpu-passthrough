@@ -63,10 +63,11 @@ não esteja disponível pode produzir estado indeterminado; isso não prova que 
 configuração está errada. Quando necessário, rode o verificador específico em
 uma sessão local controlada.
 
-`util/diagnostico.sh` cria um relatório em:
+`util/diagnostico.sh` cria um relatório na raiz única de estado do projeto (a
+mesma do inventário e do log de ações; respeita `XDG_STATE_HOME`):
 
 ```text
-~/inventario-hardware/diagnostico-AAAAMMDD-HHMM.txt
+~/.local/state/vm-passthrough/inventario/diagnostico-AAAAMMDD-HHMM.txt
 ```
 
 O relatório reúne informações de libvirt, IOMMU, linha de comando do kernel,
@@ -749,9 +750,13 @@ bash menu.sh --status
 ```
 
 A etapa 1 publica o inventário validado em
-`~/inventario-hardware/inventario-<timestamp>.txt` e troca atomicamente o link
+`~/.local/state/vm-passthrough/inventario/inventario-<timestamp>.txt` (raiz única
+de estado, que respeita `XDG_STATE_HOME`) e troca atomicamente o link
 `ultimo-inventario.txt`. Uma coleta interrompida não substitui o último
-inventário válido.
+inventário válido. Existindo a pasta antiga `~/inventario-hardware/`, a etapa 1
+oferece uma migração conferida item por item (caminhos, contagem, tipo, modo,
+mtime, alvo de link e digest) que só remove a origem depois da conferência;
+recusar é seguro e não copia nem remove nada.
 
 ### Redetectar hardware
 
@@ -860,7 +865,7 @@ conhecidamente funcional.
 
 | Caminho | Função | Observação |
 |---|---|---|
-| `~/inventario-hardware/` | inventários e diagnósticos | pode conter identificadores sensíveis |
+| `~/.local/state/vm-passthrough/inventario/` | inventários, diagnósticos e grupos IOMMU | raiz única de estado (respeita `XDG_STATE_HOME`); a etapa 1 oferece migração conferida da pasta antiga `~/inventario-hardware/` e recusar é seguro; pode conter identificadores sensíveis |
 | `backups/` | XML e backups locais de configuração | não equivale ao backup completo da VM |
 | `<BACKUPS_VM_DIR>` | conjuntos produzidos por `backup-vm.sh` | confirme disco físico e espaço |
 | `/run/libvirt-gpu-passthrough/` | state file da entrega dinâmica da GPU | não remova manualmente |

@@ -49,6 +49,22 @@ LOG_ACOES_ROTACAO_BYTES=1048576
 LOG_SCRIPT_ID="${BASH_SOURCE[-1]:-desconhecido}"
 LOG_SCRIPT_ID="${LOG_SCRIPT_ID##*/}"
 
+# --- Raiz única de estado na home --------------------------------------------
+# Tudo o que os scripts gravam na home do operador vive sob a MESMA raiz que o
+# log de ações já usa: LOG_ACOES_DIR. O caminho literal existe em UM lugar só
+# (a linha de LOG_ACOES_DIR acima); nenhum consumidor pode montá-lo por conta
+# própria. Antes da unificação os relatórios moravam em ~/inventario-hardware;
+# esse caminho legado continua nomeado aqui apenas para que a etapa 1 possa
+# oferecer a migração e removê-lo depois de provar a cópia.
+INVENTARIO_LEGADO_DIR="$HOME/inventario-hardware"
+
+diretorio_inventario() {
+    # Acessor ÚNICO do diretório de relatórios (inventários, diagnósticos e
+    # listagens de grupos IOMMU). Não cria nada: quem grava chama mkdir. O
+    # override INVENTARIO_DIR existe para os testes; produção nunca o define.
+    printf '%s\n' "${INVENTARIO_DIR:-$LOG_ACOES_DIR/inventario}"
+}
+
 _log_acoes_rotacionar() {
     local tamanho
     [ -f "$LOG_ACOES_ARQUIVO" ] || return 0
@@ -348,8 +364,8 @@ modo_execucao_etapa02() {
 
 resolver_ultimo_inventario() {
     # Imprime o inventário principal mais recente. O diretório opcional existe
-    # para testes; em produção a única fonte é ~/inventario-hardware.
-    local diretorio="${1:-${INVENTARIO_DIR:-$HOME/inventario-hardware}}"
+    # para testes; em produção a única fonte é o acessor diretorio_inventario.
+    local diretorio="${1:-$(diretorio_inventario)}"
     local ponteiro="$diretorio/ultimo-inventario.txt" alvo nome candidato
     local -a candidatos=()
     INVENTARIO_ERRO=""
@@ -471,6 +487,258 @@ publicar_inventario_completo() {
     fi
     INVENTARIO_PUBLICADO="$arquivo"
     printf '%s\n' "$arquivo"
+}
+
+# --- Migração da pasta legada de relatórios ----------------------------------
+# Até a unificação, os relatórios moravam em ~/inventario-hardware, fora da raiz
+# de estado. A migração é uma TRANSAÇÃO explícita e sempre confirmada pelo
+# operador: copia preservando metadados, PROVA que a cópia confere (conjunto de
+# caminhos, contagem, tipo, modo, mtime, alvo de link e digest do conteúdo) e só
+# então remove a origem. Qualquer divergência remove o que foi copiado, deixa a
+# origem intacta e diagnostica. Com a migração já feita, a pasta legada não
+# existe mais e toda execução seguinte é um no-op exato, sem pergunta.
+INVENTARIO_MIGRACAO_ERRO=""
+INVENTARIO_MIGRACAO_ITENS=0
+INVENTARIO_LEGADO_ITENS=0
+
+_inventario_entradas_relativas() {
+    # _inventario_entradas_relativas ARRAY BASE: preenche ARRAY com todo caminho
+    # relativo da árvore, separados por NUL (nomes com quebra de linha entram
+    # sem ambiguidade) e sem seguir links simbólicos.
+    local -n _inv_entradas_ref="$1"
+    local base="${2:-}" lista rel
+    _inv_entradas_ref=()
+    [ -d "$base" ] && [ ! -L "$base" ] || return 1
+    lista="$(mktemp "${TMPDIR:-/tmp}/.inventario-migracao.XXXXXXXXX")" || return 1
+    if ! ( cd -- "$base" && LC_ALL=C find . -mindepth 1 -print0 ) > "$lista" 2>/dev/null; then
+        rm -f -- "$lista" 2>/dev/null || true
+        return 1
+    fi
+    while IFS= read -r -d '' rel; do
+        _inv_entradas_ref+=("${rel#./}")
+    done < "$lista"
+    rm -f -- "$lista" 2>/dev/null || true
+    return 0
+}
+
+_inventario_linha_manifesto() {
+    # Uma linha por entrada: caminho|tipo|modo|mtime|conteúdo. Links entram pelo
+    # alvo textual (nunca pelo destino resolvido) e arquivos pelo digest, para
+    # que "a cópia confere" seja uma afirmação sobre bytes e metadados, não
+    # sobre o retorno do cp.
+    local base="${1:-}" rel="${2:-}" caminho meta modo mtime dado
+    caminho="$base/$rel"
+    if [ -L "$caminho" ]; then
+        dado="$(readlink -- "$caminho")" || return 1
+        printf '%s|L|-|-|%s\n' "$rel" "$dado"
+        return 0
+    fi
+    if [ ! -e "$caminho" ]; then
+        printf '%s|X|-|-|\n' "$rel"
+        return 0
+    fi
+    meta="$(stat -c '%a %Y' -- "$caminho")" || return 1
+    modo="${meta%% *}"
+    mtime="${meta##* }"
+    if [ -d "$caminho" ]; then
+        printf '%s|D|%s|%s|\n' "$rel" "$modo" "$mtime"
+    elif [ -f "$caminho" ]; then
+        dado="$(sha256sum -- "$caminho")" || return 1
+        printf '%s|F|%s|%s|%s\n' "$rel" "$modo" "$mtime" "${dado%% *}"
+    else
+        printf '%s|O|%s|%s|\n' "$rel" "$modo" "$mtime"
+    fi
+}
+
+_inventario_manifesto_de() {
+    # _inventario_manifesto_de BASE ENTRADA...: manifesto na ordem recebida.
+    local base="${1:-}" rel
+    shift || return 1
+    for rel in "$@"; do
+        _inventario_linha_manifesto "$base" "$rel" || return 1
+    done
+}
+
+inventario_legado_pendente() {
+    # 0 somente quando existe pasta legada REAL, distinta do destino e com pelo
+    # menos uma entrada. Pasta ausente, link simbólico e pasta vazia são no-op.
+    local origem="$INVENTARIO_LEGADO_DIR" destino
+    local -a _inv_legado_entradas=()
+    INVENTARIO_LEGADO_ITENS=0
+    destino="$(diretorio_inventario)"
+    [ -d "$origem" ] && [ ! -L "$origem" ] || return 1
+    [ "$origem" != "$destino" ] || return 1
+    _inventario_entradas_relativas _inv_legado_entradas "$origem" || return 1
+    INVENTARIO_LEGADO_ITENS="${#_inv_legado_entradas[@]}"
+    [ "$INVENTARIO_LEGADO_ITENS" -gt 0 ] || return 1
+    return 0
+}
+
+_inventario_desfazer_copia() {
+    # Remove do destino EXATAMENTE os nomes de topo que a transação criou. A
+    # checagem de colisão garante que nenhum deles existia antes da cópia.
+    local destino="${1:-}" topo
+    shift || return 0
+    for topo in "$@"; do
+        rm -rf -- "$destino/$topo" 2>/dev/null || true
+    done
+}
+
+migrar_inventario_legado() {
+    local origem destino topo rel
+    local -a origem_entradas=() destino_entradas=() origem_confirmacao=() topos_migrados=()
+    local -A origem_conjunto=() destino_conjunto=() topos_vistos=()
+    local manifesto_origem manifesto_destino ponteiro alvo
+
+    INVENTARIO_MIGRACAO_ERRO=""
+    INVENTARIO_MIGRACAO_ITENS=0
+    origem="$INVENTARIO_LEGADO_DIR"
+    destino="$(diretorio_inventario)"
+
+    inventario_legado_pendente || {
+        INVENTARIO_MIGRACAO_ERRO="Nada a migrar: $origem não existe, está vazio ou já é o destino."
+        return 1
+    }
+    _inventario_entradas_relativas origem_entradas "$origem" || {
+        INVENTARIO_MIGRACAO_ERRO="Não foi possível listar a pasta legada: $origem"
+        return 1
+    }
+    for rel in "${origem_entradas[@]}"; do
+        origem_conjunto["$rel"]=1
+        topo="${rel%%/*}"
+        if [ -z "${topos_vistos[$topo]:-}" ]; then
+            topos_vistos["$topo"]=1
+            topos_migrados+=("$topo")
+        fi
+    done
+
+    [ ! -L "$destino" ] \
+        || { INVENTARIO_MIGRACAO_ERRO="Destino de inventários é um link simbólico: $destino"; return 1; }
+    mkdir -p -- "$destino" \
+        || { INVENTARIO_MIGRACAO_ERRO="Não foi possível criar o destino de inventários: $destino"; return 1; }
+
+    # Colisão de nome nunca é resolvida sozinha: sobrescrever é perder dado.
+    for topo in "${topos_migrados[@]}"; do
+        if [ -e "$destino/$topo" ] || [ -L "$destino/$topo" ]; then
+            INVENTARIO_MIGRACAO_ERRO="Migração recusada: '$topo' já existe em $destino. Nada foi copiado nem removido; resolva o conflito manualmente."
+            return 1
+        fi
+    done
+
+    if ! cp -a -- "$origem/." "$destino/"; then
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="Falha ao copiar $origem para $destino; a pasta antiga foi mantida intacta e a cópia parcial foi removida."
+        return 1
+    fi
+
+    # --- Prova da cópia, antes de qualquer remoção ---------------------------
+    if ! _inventario_entradas_relativas destino_entradas "$destino"; then
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="Não foi possível conferir o destino $destino; a pasta antiga foi mantida intacta."
+        return 1
+    fi
+    local -a destino_migradas=()
+    for rel in "${destino_entradas[@]}"; do
+        topo="${rel%%/*}"
+        [ -n "${topos_vistos[$topo]:-}" ] || continue
+        destino_migradas+=("$rel")
+        destino_conjunto["$rel"]=1
+    done
+    if [ "${#destino_migradas[@]}" -ne "${#origem_entradas[@]}" ]; then
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="Cópia divergente: ${#origem_entradas[@]} entradas na origem e ${#destino_migradas[@]} no destino; a pasta antiga foi mantida intacta."
+        return 1
+    fi
+    for rel in "${origem_entradas[@]}"; do
+        if [ -z "${destino_conjunto[$rel]:-}" ]; then
+            _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+            INVENTARIO_MIGRACAO_ERRO="Cópia incompleta: '$rel' não chegou a $destino; a pasta antiga foi mantida intacta."
+            return 1
+        fi
+    done
+    for rel in "${destino_migradas[@]}"; do
+        if [ -z "${origem_conjunto[$rel]:-}" ]; then
+            _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+            INVENTARIO_MIGRACAO_ERRO="Cópia inesperada: '$rel' apareceu em $destino sem origem; a pasta antiga foi mantida intacta."
+            return 1
+        fi
+    done
+
+    manifesto_origem="$(_inventario_manifesto_de "$origem" "${origem_entradas[@]}")" || {
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="Não foi possível descrever a pasta legada $origem; nada foi removido."
+        return 1
+    }
+    manifesto_destino="$(_inventario_manifesto_de "$destino" "${origem_entradas[@]}")" || {
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="Não foi possível descrever a cópia em $destino; a pasta antiga foi mantida intacta."
+        return 1
+    }
+    if [ "$manifesto_origem" != "$manifesto_destino" ]; then
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="Conteúdo ou metadados divergiram entre $origem e $destino; a pasta antiga foi mantida intacta."
+        return 1
+    fi
+
+    # A origem não pode ter mudado durante a transação.
+    _inventario_entradas_relativas origem_confirmacao "$origem" || {
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="A pasta legada $origem ficou ilegível durante a migração; nada foi removido."
+        return 1
+    }
+    if [ "${#origem_confirmacao[@]}" -ne "${#origem_entradas[@]}" ]; then
+        _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+        INVENTARIO_MIGRACAO_ERRO="A pasta legada $origem mudou durante a migração; nada foi removido."
+        return 1
+    fi
+
+    # O ponteiro é relativo por contrato: depois da cópia ele precisa continuar
+    # resolvendo dentro do destino, sem apontar para a pasta antiga.
+    ponteiro="$origem/ultimo-inventario.txt"
+    if [ -L "$ponteiro" ]; then
+        alvo="$(readlink -- "$destino/ultimo-inventario.txt" 2>/dev/null || true)"
+        if [ ! -L "$destino/ultimo-inventario.txt" ] || [[ "$alvo" == /* ]] \
+           || [ ! -e "$destino/$alvo" ]; then
+            _inventario_desfazer_copia "$destino" "${topos_migrados[@]}"
+            INVENTARIO_MIGRACAO_ERRO="O ponteiro ultimo-inventario.txt não ficou válido em $destino; a pasta antiga foi mantida intacta."
+            return 1
+        fi
+    fi
+
+    # --- Só agora a origem sai ------------------------------------------------
+    [[ "$origem" == /* ]] && [ "$origem" != / ] && [ -d "$origem" ] && [ ! -L "$origem" ] \
+        && [ "$origem" = "$HOME/inventario-hardware" ] \
+        || { INVENTARIO_MIGRACAO_ERRO="Recusa de segurança: a origem $origem não é a pasta legada esperada."; return 1; }
+    if ! rm -rf -- "$origem"; then
+        INVENTARIO_MIGRACAO_ERRO="A cópia foi conferida em $destino, mas $origem não pôde ser removida; remova-a manualmente após conferir."
+        return 1
+    fi
+    if [ -e "$origem" ] || [ -L "$origem" ]; then
+        INVENTARIO_MIGRACAO_ERRO="A cópia foi conferida em $destino, mas $origem continua presente; remova-a manualmente após conferir."
+        return 1
+    fi
+    INVENTARIO_MIGRACAO_ITENS="${#origem_entradas[@]}"
+    return 0
+}
+
+inventario_migracao_interativa() {
+    # Pergunta UMA vez, na etapa 1, e só quando há pasta legada com conteúdo.
+    # Recusar não quebra nada: os relatórios novos vão para o destino unificado.
+    local destino
+    destino="$(diretorio_inventario)"
+    inventario_legado_pendente || return 0
+    echo
+    aviso "Relatórios antigos encontrados em $INVENTARIO_LEGADO_DIR ($INVENTARIO_LEGADO_ITENS itens)."
+    info "Este projeto passou a guardar tudo sob uma raiz única de estado: $destino"
+    info "A migração copia preservando metadados, confere a cópia inteira e só então remove a pasta antiga."
+    if confirmar "Migrar agora os relatórios antigos para a raiz de estado?"; then
+        migrar_inventario_legado || falhar "$INVENTARIO_MIGRACAO_ERRO"
+        ok "Migração concluída: $INVENTARIO_MIGRACAO_ITENS itens conferidos em $destino."
+        info "A pasta antiga $INVENTARIO_LEGADO_DIR foi removida somente depois da conferência."
+    else
+        aviso "Migração recusada: $INVENTARIO_LEGADO_DIR continua onde está e nada foi copiado nem removido."
+        info "Os relatórios novos vão para $destino, e a verificação da etapa 1 considera apenas esse diretório."
+    fi
 }
 
 INVENTARIO_DECISION_FINGERPRINT=""

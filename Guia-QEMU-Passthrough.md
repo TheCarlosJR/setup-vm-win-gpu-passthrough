@@ -200,10 +200,19 @@ bash etapas/00-inventario.sh
 ```
 
 Gera primeiro um temporário e, somente após concluir todas as seções, publica
-`~/inventario-hardware/inventario-AAAAMMDD-HHMMSS-NNNNNNNNN.txt`. O symlink
-relativo `ultimo-inventario.txt` é atualizado atomicamente; coletas interrompidas
-não substituem a referência anterior e os históricos são mantidos. **Guarde uma
+`~/.local/state/vm-passthrough/inventario/inventario-AAAAMMDD-HHMMSS-NNNNNNNNN.txt`.
+Essa é a raiz única de estado do projeto, a mesma do log de ações, e respeita
+`XDG_STATE_HOME` quando essa variável está definida. O symlink relativo
+`ultimo-inventario.txt` é atualizado atomicamente; coletas interrompidas não
+substituem a referência anterior e os históricos são mantidos. **Guarde uma
 cópia fora do disco do sistema**: é a referência para conferir modelo e serial.
+
+> Se ainda existir a pasta antiga `~/inventario-hardware/`, a etapa 1 pergunta
+> uma única vez se deve migrá-la: a cópia preserva metadados, é conferida inteira
+> (caminhos, contagem, tipo, modo, mtime, alvo de link e digest) e a pasta antiga
+> só é removida depois disso. Recusar é seguro: nada é copiado nem removido, os
+> relatórios novos vão para a raiz de estado e a pergunta volta na próxima
+> execução da etapa.
 
 > Esta etapa pede senha de administrador logo no início: `dmidecode` lê a tabela
 > SMBIOS e o `dmesg` do Pop!_OS é restrito a root (`kernel.dmesg_restrict=1`).

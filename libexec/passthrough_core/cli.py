@@ -31,6 +31,7 @@ from . import (
     network,
     network_xml,
     nvidia_lookup,
+    platform,
     protocol,
     qemu_image,
 )
@@ -65,6 +66,8 @@ USAGE = (
     "  network-revalidate, network-route-audit, network-snapshot,\n"
     "  nvidia-product-match,\n"
     "  nvidia-download-info, qemu-image-inspect,\n"
+    "  platform-os-release, platform-detect, platform-cpu-vendor,\n"
+    "  platform-gpu-vendor, platform-service-resolve,\n"
     "  cpu-topology, cpu-layout, cpu-plan, cpu-memory,\n"
     "  inventory-parse, inventory-diff, inventory-disk-plan,\n"
     "  inventory-usb-resolve, inventory-normalize\n"
@@ -719,6 +722,11 @@ _PURE_COMMANDS: dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] = {
     "network-snapshot": network.network_snapshot,
     "nvidia-download-info": nvidia_lookup.download_info,
     "nvidia-product-match": nvidia_lookup.product_match,
+    "platform-cpu-vendor": platform.cpu_vendor_fact,
+    "platform-detect": platform.support_state,
+    "platform-gpu-vendor": platform.gpu_vendor_fact,
+    "platform-os-release": platform.os_release_facts,
+    "platform-service-resolve": platform.service_unit_choice,
     "config-validate": config.validate_pair,
     "qemu-image-inspect": qemu_image.inspect_image,
 }

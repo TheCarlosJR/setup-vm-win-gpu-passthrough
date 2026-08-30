@@ -1,0 +1,4 @@
+libexec/passthrough_core/platform.py
+tests/manifests/i8-files.txt
+tests/python/test_platform.py
+tests/test-i8-platform.sh

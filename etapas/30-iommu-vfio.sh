@@ -229,9 +229,13 @@ ok "Grupo limpo: apenas GPU, áudio configurado e bridges PCI de classe 0x06."
 salvar_conf IOMMU_GROUP_GPU "$GRUPO"
 info "IOMMU_GROUP_GPU=$GRUPO validado e gravado no passthrough.conf."
 
-info "5) Listagem completa dos grupos (registro em ~/inventario-hardware/):"
-mkdir -p "$HOME/inventario-hardware"
-bash "$PROJETO_DIR/util/listar-grupos-iommu.sh" | tee "$HOME/inventario-hardware/grupos-iommu-$(date +%Y%m%d).txt" | tail -n 5
+# O caminho literal dos relatórios existe em UM lugar só (`lib/common.sh`); aqui
+# ele vem do acessor, para que a listagem de grupos caia na mesma raiz de estado
+# do inventário e do log de ações, e não na pasta legada da home.
+DIRETORIO_RELATORIOS="$(diretorio_inventario)"
+info "5) Listagem completa dos grupos (registro em $DIRETORIO_RELATORIOS/):"
+mkdir -p "$DIRETORIO_RELATORIOS"
+bash "$PROJETO_DIR/util/listar-grupos-iommu.sh" | tee "$DIRETORIO_RELATORIOS/grupos-iommu-$(date +%Y%m%d).txt" | tail -n 5
 info "(arquivo completo salvo; acima só as últimas linhas)"
 
 echo

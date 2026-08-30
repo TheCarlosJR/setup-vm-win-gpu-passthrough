@@ -89,6 +89,7 @@ assert_evidencia_retida() {
     # Prova de retenção: identificador aleatório de 128 bits no stderr, bundle
     # `0700` com metadados de criação/expiração e artefatos `0600`.
     local description=$1 identifier bundle modo linha criado expira
+    local declarados presentes nome tamanho
     identifier=$(recovery_id_emitido)
     [[ -n $identifier ]] || fail "$description não emitiu recovery_id"
     bundle="$(recovery_root)/$identifier"
@@ -102,12 +103,62 @@ assert_evidencia_retida() {
         modo=$(/usr/bin/stat -c '%a' "$linha")
         [[ $modo == 600 ]] || fail "$description reteve artefato com modo $modo (esperado 600): ${linha##*/}"
     done < <(/usr/bin/find "$bundle" -type f)
+    # I7.8: até aqui a prova era vacuamente satisfeita por um bundle que
+    # contivesse apenas `metadata`: o laço acima percorre os arquivos achados e
+    # não exigia nenhum. `_recovery_copiar` engole todo erro de cópia
+    # (`|| { RECOVERY_TRUNCADOS++; return 0; }`), então um bundle vazio seria
+    # retido, o operador receberia o localizador sem material de recuperação e a
+    # campanha continuaria verde. Agora a contagem declarada tem de bater com os
+    # arquivos realmente presentes em `estado/`, e cada linha `artifact=` tem de
+    # nomear arquivo existente com o tamanho declarado.
+    declarados=$(/usr/bin/sed -n 's/^artifact_count=//p' "$bundle/metadata")
+    [[ $declarados =~ ^[0-9]+$ ]] \
+        || fail "$description não declarou artifact_count no bundle"
+    [[ $declarados -gt 0 ]] \
+        || fail "$description reteve bundle sem artefato nenhum (artifact_count=0)"
+    presentes=$(/usr/bin/find "$bundle/estado" -type f | /usr/bin/wc -l)
+    [[ $presentes -eq $declarados ]] \
+        || fail "$description declarou $declarados artefatos e reteve $presentes"
+    while IFS= read -r linha; do
+        nome=${linha%% *}
+        tamanho=${linha##* }
+        [[ -f $bundle/estado/$nome ]] \
+            || fail "$description declarou o artefato '$nome', que não está no bundle"
+        [[ $(/usr/bin/stat -c '%s' "$bundle/estado/$nome") == "$tamanho" ]] \
+            || fail "$description reteve '$nome' com tamanho diferente do declarado"
+    done < <(/usr/bin/sed -n 's/^artifact=//p' "$bundle/metadata")
     criado=$(/usr/bin/sed -n 's/^created_epoch=//p' "$bundle/metadata")
     expira=$(/usr/bin/sed -n 's/^expires_epoch=//p' "$bundle/metadata")
     [[ $criado =~ ^[0-9]+$ && $expira =~ ^[0-9]+$ ]] \
         || fail "$description não registrou criação/expiração em epoch"
     [[ $((expira - criado)) -eq 604800 ]] \
         || fail "$description registrou retenção diferente de sete dias"
+}
+assert_perfil_retido_e_o_anterior() {
+    # I7.8: prova direta do bloqueador corrigido nesta revisão. O bundle copiava
+    # `$TMP_DIR/artefato-host-vm-passthrough-bridge`, que `_capturar_artefato`
+    # REESCREVE a cada recaptura; como `capturar_estado` roda em toda fronteira
+    # do plano, depois da publicação aquele arquivo já contém o perfil NOVO, e o
+    # bundle o entregava ao operador com o nome de "anterior" — material que,
+    # reaplicado no console sem rede, repete a falha. A prova antiga olhava só
+    # modo, metadados e expiração, então não via nada disso.
+    local esperado=$1 description=$2 identifier bundle retido
+    identifier=$(recovery_id_emitido)
+    [[ -n $identifier ]] || fail "$description não emitiu recovery_id"
+    bundle="$(recovery_root)/$identifier"
+    retido="$bundle/estado/netplan-bridge.anterior.yaml"
+    if [[ -s $esperado ]]; then
+        [[ -f $retido ]] \
+            || fail "$description não reteve o perfil de rede anterior no bundle"
+        /usr/bin/cmp -s "$esperado" "$retido" \
+            || fail "$description reteve um perfil de rede diferente do que existia antes da transação"
+        ! /usr/bin/grep -q 'bridges:' "$retido" \
+            || fail "$description reteve o perfil publicado (com bridge) sob o nome de anterior"
+    else
+        [[ ! -e $retido ]] \
+            || fail "$description inventou um perfil 'anterior' que nunca existiu no host"
+    fi
+    return 0
 }
 assert_recuperacao_redigida() {
     # Seção 3.9: a mensagem humana emite só `recovery_id` e comando seguro.
@@ -559,6 +610,24 @@ pass
 #                                                            define-vm,conf
 #   bridge-perfil-existente perfil publicado      9  13  restore-perfil,apply,
 #                                                        define,conf
+#
+# I7.8 (D-NET-ROLLBACK-DIVERGE): a quarta coluna de `ROLLBACK_CENARIOS` lista as
+# posições em que a DIVERGÊNCIA SILENCIOSA — a ferramenta devolve rc=0 sem
+# aplicar — tem de ser acusada. Nos modos `before`/`after` o shim devolve 97 e
+# `registrar_falha_rollback` já acusa pelo código de retorno; com a ferramenta
+# mentindo, a pós-condição de cada passo é a única coisa que sobra, e é por isso
+# que ela é o oráculo do verbo. Ficam de fora duas famílias de posição, por
+# medição e não por escolha, porque nelas o passo de restauração JÁ É no-op e a
+# mentira é indistinguível da verdade:
+#   * `host-network-activate` em bridge-perfil-existente (11): o sinal cai no
+#     efeito 9, ANTES do `netplan apply` da ida, então o uplink nunca saiu do
+#     master capturado. `LINK-TOPOLOGY` é falsificada em bridge-limpo/10, onde o
+#     apply da ida aconteceu;
+#   * `configuration-restore` (12, 12, 15 e 13): nos quatro cenários toda
+#     `configuration-publish` converge, porque a conf semeada já traz os valores
+#     pretendidos; o `cp` de restauração copia um arquivo idêntico ao que já
+#     está lá. `CONFIGURATION-DIGEST` ganha um cenário próprio adiante, com
+#     `VM_NIC_MAC` vazio, em que a ida MUDA a conf de verdade.
 semear_cenario_rollback() {
     local scenario=$1
     case $scenario in
@@ -611,16 +680,25 @@ entrada_cenario_rollback() {
 snapshot_conteudo_restaurado() {
     local output=$1
     snapshot_observable "$output.bruto" content
-    /usr/bin/grep -v '\.bak-[0-9]' "$output.bruto" | /usr/bin/cut -d'|' -f1,2,4 > "$output"
+    # I7.8: a projeção era `| /usr/bin/cut -d'|' -f1,2,4`, que apagava a coluna
+    # de modo de TODAS as linhas, embora a justificativa acima valha só para os
+    # XML de rede. Com ela, uma restauração com o conteúdo certo e a permissão
+    # errada — `/etc/netplan/90-vm-passthrough-bridge.yaml` fora de 0600, ou o
+    # próprio `passthrough.conf` — passava despercebida. Agora o modo é
+    # descartado só nas linhas `state/network-*.xml` e preservado no resto.
+    /usr/bin/grep -v '\.bak-[0-9]' "$output.bruto" \
+        | /usr/bin/awk -F'|' 'BEGIN { OFS = "|" }
+            $1 ~ /^state\/network-[^|]*\.xml$/ { print $1, $2, $4; next }
+            { print }' > "$output"
 }
 ROLLBACK_CENARIOS=(
-    'nat-limpo|8|12'
-    'bridge-limpo|8|12'
-    'nat-rede-consumidor|8|15'
-    'bridge-perfil-existente|9|13'
+    'nat-limpo|8|12|9 10 11'
+    'bridge-limpo|8|12|9 10 11'
+    'nat-rede-consumidor|8|15|9 10 11 12 13 14'
+    'bridge-perfil-existente|9|13|10 12'
 )
 for scenario_row in "${ROLLBACK_CENARIOS[@]}"; do
-    IFS='|' read -r scenario signal_effect total_effects <<< "$scenario_row"
+    IFS='|' read -r scenario signal_effect total_effects divergent_effects <<< "$scenario_row"
     entrada_cenario_rollback "$scenario"
     network_input=$ENTRADA_CENARIO
     # Primeiro a prova positiva: o rollback INTEIRO daquela forma restaura o
@@ -649,17 +727,35 @@ for scenario_row in "${ROLLBACK_CENARIOS[@]}"; do
     assert_sem_evidencia "o rollback comprovado de $scenario"
     assert_confined "rollback comprovado de $scenario"
 
-    for fail_mode in before after; do
+    # I7.8: `diverge` é o terceiro modo de injeção — a ferramenta devolve rc=0
+    # sem aplicar —, exercitado só nas posições da quarta coluna. Todas as
+    # asserções abaixo valem iguais nos três modos: o rollback não comprovado é
+    # erro grave com evidência retida, venha ele de um comando que falhou ou de
+    # um que mentiu.
+    for fail_mode in before after diverge; do
         for ((rollback_effect = signal_effect + 1; rollback_effect <= total_effects; rollback_effect++)); do
+            [[ $fail_mode != diverge || " $divergent_effects " == *" $rollback_effect "* ]] || continue
             limpar_evidencias_recuperacao
             semear_cenario_rollback "$scenario"
+            # I7.8: o perfil que existia ANTES da transação é congelado aqui,
+            # para ser comparado com o que o bundle retém depois da falha.
+            perfil_inicial="$MUTATOR_HARNESS_DIR/perfil-inicial.yaml"
+            /usr/bin/rm -f "$perfil_inicial"
+            if [[ -e $MUTATOR_ROOT/etc/netplan/90-vm-passthrough-bridge.yaml ]]; then
+                /usr/bin/cp -p "$MUTATOR_ROOT/etc/netplan/90-vm-passthrough-bridge.yaml" \
+                    "$perfil_inicial"
+            fi
             MUTATOR_TEST_SIGNAL_EFFECT=$signal_effect
             MUTATOR_TEST_SIGNAL_NAME=EXIT
-            MUTATOR_TEST_FAIL_EFFECT=$rollback_effect
-            MUTATOR_TEST_FAIL_MODE=$fail_mode
+            if [[ $fail_mode == diverge ]]; then
+                MUTATOR_TEST_DIVERGE_EFFECT=$rollback_effect
+            else
+                MUTATOR_TEST_FAIL_EFFECT=$rollback_effect
+                MUTATOR_TEST_FAIL_MODE=$fail_mode
+            fi
             mutator_harness_run 60-rede-bridge.sh "$network_input"
             unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
-            unset MUTATOR_TEST_FAIL_EFFECT MUTATOR_TEST_FAIL_MODE
+            unset MUTATOR_TEST_FAIL_EFFECT MUTATOR_TEST_FAIL_MODE MUTATOR_TEST_DIVERGE_EFFECT
             assert_nonzero "$MUTATOR_RC" "falha $fail_mode no rollback $scenario/$rollback_effect"
             assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
                 "rollback $scenario/$rollback_effect não sinalizou falha"
@@ -669,9 +765,13 @@ for scenario_row in "${ROLLBACK_CENARIOS[@]}"; do
                 "falha no rollback $scenario/$rollback_effect produziu falso commit"
             assert_eq "$total_effects" "$(mutator_harness_effect_count)" \
                 "a falha $fail_mode em $rollback_effect interrompeu a sequência de rollback de $scenario"
+            [[ $fail_mode != diverge ]] || assert_text "$MUTATOR_CALL_LOG" '\|DIVERGE\|' \
+                "a divergência em $scenario/$rollback_effect não foi observada"
             # I7.6 (D-NET-RECOVERY-EVIDENCE): rollback não comprovado é erro
             # grave COM recuperação orientada, em toda ação do rollback.
             assert_evidencia_retida "rollback $scenario/$rollback_effect ($fail_mode)"
+            assert_perfil_retido_e_o_anterior "$perfil_inicial" \
+                "rollback $scenario/$rollback_effect ($fail_mode)"
             assert_recuperacao_redigida "rollback $scenario/$rollback_effect ($fail_mode)"
             assert_confined "rollback $scenario/$rollback_effect"
         done
@@ -681,18 +781,70 @@ for scenario_row in "${ROLLBACK_CENARIOS[@]}"; do
 done
 limpar_evidencias_recuperacao
 
+# I7.8: sinal DENTRO da janela de rollback, que a matriz de I7.6 não alcançava.
+# Até esta revisão `tratar_saida` começava com `trap - EXIT INT TERM`, e por isso
+# `INT`/`TERM` voltavam à ação PADRÃO exatamente onde o host está no meio da
+# restauração: um Ctrl-C (gesto documentado do próprio `netplan try`, que a etapa
+# usa) matava o processo entre restaurar o arquivo e reativar a rede, sem
+# `ROLLBACK INCOMPLETO`, sem bundle e sem localizador — estado partido que
+# ninguém nomeou. Agora o sinal é contado e diferido: a sequência inteira
+# executa, o passo cujo comando morreu com o sinal é reprovado pela pós-condição,
+# e o veredito sai com evidência.
+#
+# A entrada na janela é por FALHA e não por sinal, porque o injetor de sinal do
+# harness é um só por execução e aqui ele é gasto DENTRO do rollback: a falha no
+# oitavo efeito abre o rollback, e o sinal cai no segundo passo dele.
+for signal_name in INT TERM; do
+    limpar_evidencias_recuperacao
+    semear_cenario_rollback nat-limpo
+    MUTATOR_TEST_FAIL_EFFECT=8
+    MUTATOR_TEST_FAIL_MODE=after
+    MUTATOR_TEST_SIGNAL_EFFECT=10
+    MUTATOR_TEST_SIGNAL_NAME=$signal_name
+    mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
+    unset MUTATOR_TEST_FAIL_EFFECT MUTATOR_TEST_FAIL_MODE
+    unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
+    assert_nonzero "$MUTATOR_RC" "sinal $signal_name durante o rollback"
+    # 12 efeitos = os 8 da ida mais os 4 passos do rollback. É esta asserção que
+    # separa "sinal diferido" de "processo morto no meio": com o trap antigo a
+    # sequência parava no efeito do sinal.
+    assert_eq 12 "$(mutator_harness_effect_count)" \
+        "o sinal $signal_name durante o rollback interrompeu a sequência de restauração"
+    assert_text "$MUTATOR_OUTPUT" 'Interrupção recebida durante o rollback' \
+        "o sinal $signal_name durante o rollback não foi diferido nem diagnosticado"
+    assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
+        "o sinal $signal_name durante o rollback não produziu erro grave"
+    assert_no_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+        "o sinal $signal_name durante o rollback foi anunciado como sucesso"
+    assert_no_text "$MUTATOR_OUTPUT" 'Commit lógico da transação de rede concluído' \
+        "o sinal $signal_name durante o rollback produziu falso commit"
+    assert_evidencia_retida "sinal $signal_name durante o rollback"
+    assert_recuperacao_redigida "sinal $signal_name durante o rollback"
+    assert_confined "sinal $signal_name durante o rollback"
+    pass
+done
+limpar_evidencias_recuperacao
+
 # I7.6: `INT`, `TERM` e `EXIT` nas janelas mutantes que a matriz por efeito não
 # alcança, porque só existem quando a transação encontra estado anterior:
 # destruir uma rede libvirt que já estava ATIVA, com outra VM definida
 # consumindo-a, e arquivar o backup datado de um perfil de rede já publicado.
 # A matriz completa por efeito continua sendo a dos dois cenários limpos; aqui a
 # cobertura é dirigida à janela nova, uma por cenário, nos três sinais.
+#
+# I7.8: a tabela ganhou o total de efeitos esperado (sinal + passos de
+# rollback), medido nas seis execuções. Sem ele, todas as asserções deste bloco
+# eram negativas ou de invariância — rc, manifesto igual, ausência de commit, de
+# `ROLLBACK INCOMPLETO` e de evidência —, e um sinal que deixasse de cair depois
+# da primeira mutação degradaria o caso em "saiu antes de mutar" continuando
+# verde. As duas asserções novas são as mesmas provas positivas do bloco
+# anterior: contagem de efeitos e rollback anunciado como comprovado.
 JANELAS_NOVAS=(
-    'nat-rede-consumidor|6'
-    'bridge-perfil-existente|5'
+    'nat-rede-consumidor|6|11'
+    'bridge-perfil-existente|5|8'
 )
 for scenario_row in "${JANELAS_NOVAS[@]}"; do
-    IFS='|' read -r scenario signal_effect <<< "$scenario_row"
+    IFS='|' read -r scenario signal_effect total_effects <<< "$scenario_row"
     entrada_cenario_rollback "$scenario"
     network_input=$ENTRADA_CENARIO
     for signal_name in INT TERM EXIT; do
@@ -708,6 +860,10 @@ for scenario_row in "${JANELAS_NOVAS[@]}"; do
             TERM) assert_eq 143 "$MUTATOR_RC" "TERM em $scenario/$signal_effect" ;;
             EXIT) assert_nonzero "$MUTATOR_RC" "EXIT em $scenario/$signal_effect" ;;
         esac
+        assert_eq "$total_effects" "$(mutator_harness_effect_count)" \
+            "o sinal $signal_name em $scenario/$signal_effect não executou todos os passos esperados"
+        assert_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+            "o rollback do sinal $signal_name em $scenario/$signal_effect não foi comprovado"
         snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/janela-after"
         assert_manifest_equal "$MUTATOR_HARNESS_DIR/janela-before" "$MUTATOR_HARNESS_DIR/janela-after" \
             "sinal $signal_name não restaurou $scenario/$signal_effect"
@@ -781,6 +937,65 @@ for fail_mode in before after; do
     assert_recuperacao_redigida "falha $fail_mode no autostart do rollback"
     assert_confined "falha $fail_mode no autostart do rollback"
 done
+pass
+limpar_evidencias_recuperacao
+
+# I7.8 (D-NET-ROLLBACK-DIVERGE): `CONFIGURATION-DIGEST` é a única pós-condição
+# de rollback que a tabela acima não consegue falsificar por divergência, porque
+# nos quatro cenários toda `configuration-publish` converge: a conf semeada já
+# traz os valores pretendidos, o `cp` de restauração copia um arquivo idêntico
+# ao que já está lá, e uma ferramenta que devolve rc=0 sem copiar deixa o mesmo
+# byte. Aqui `VM_NIC_MAC` entra vazio e a etapa persiste o MAC da única NIC do
+# domínio, então a ida MUDA a conf de verdade.
+#
+# A forma do rollback é ponto a ponto a mesma de `nat-limpo` — doze efeitos e a
+# mesma cauda —, então a injeção fica EXATAMENTE no passo da configuração, em
+# vez de repetir as três outras posições que a tabela já cobriu com os mesmos
+# comandos.
+semear_rollback_conf_divergente() {
+    prepare_network nat
+    mutator_harness_set_conf VM_NIC_MAC ''
+}
+limpar_evidencias_recuperacao
+semear_rollback_conf_divergente
+snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/conf-before"
+MUTATOR_TEST_SIGNAL_EFFECT=8
+MUTATOR_TEST_SIGNAL_NAME=EXIT
+mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
+unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME
+assert_nonzero "$MUTATOR_RC" 'sinal EXIT com configuração mutada na ida'
+assert_eq 12 "$(mutator_harness_effect_count)" \
+    'o rollback da configuração mutada não executou todos os passos esperados'
+snapshot_conteudo_restaurado "$MUTATOR_HARNESS_DIR/conf-after"
+assert_manifest_equal "$MUTATOR_HARNESS_DIR/conf-before" "$MUTATOR_HARNESS_DIR/conf-after" \
+    'o rollback da configuração mutada não restaurou o conteúdo capturado'
+assert_text "$MUTATOR_PROJECT/passthrough.conf" '^VM_NIC_MAC=""$' \
+    'o rollback não devolveu VM_NIC_MAC ao valor capturado'
+assert_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+    'o rollback da configuração mutada não foi comprovado'
+assert_sem_evidencia 'rollback comprovado da configuração mutada'
+assert_confined 'rollback comprovado da configuração mutada'
+limpar_evidencias_recuperacao
+semear_rollback_conf_divergente
+MUTATOR_TEST_SIGNAL_EFFECT=8
+MUTATOR_TEST_SIGNAL_NAME=EXIT
+MUTATOR_TEST_DIVERGE_EFFECT=12
+mutator_harness_run 60-rede-bridge.sh "$NAT_INPUT"
+unset MUTATOR_TEST_SIGNAL_EFFECT MUTATOR_TEST_SIGNAL_NAME MUTATOR_TEST_DIVERGE_EFFECT
+assert_nonzero "$MUTATOR_RC" 'divergência no passo de configuração do rollback'
+assert_text "$MUTATOR_CALL_LOG" '\|DIVERGE\|' \
+    'a divergência no passo de configuração não foi observada'
+assert_text "$MUTATOR_ERROR" 'ROLLBACK INCOMPLETO' \
+    'divergência no passo de configuração não sinalizou erro grave'
+assert_text "$MUTATOR_ERROR" 'passthrough\.conf diverge do capturado' \
+    'divergência no passo de configuração não nomeou o artefato divergente'
+assert_no_text "$MUTATOR_OUTPUT" 'Rollback concluído: estados anteriores restaurados' \
+    'divergência no passo de configuração foi anunciada como sucesso'
+assert_eq 12 "$(mutator_harness_effect_count)" \
+    'a divergência no passo de configuração interrompeu a sequência de rollback'
+assert_evidencia_retida 'divergência no passo de configuração do rollback'
+assert_recuperacao_redigida 'divergência no passo de configuração do rollback'
+assert_confined 'divergência no passo de configuração do rollback'
 pass
 limpar_evidencias_recuperacao
 

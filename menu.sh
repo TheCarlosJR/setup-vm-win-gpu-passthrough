@@ -22,7 +22,7 @@ ETAPAS=(
     "01-verificar-bios.sh|BIOS/UEFI: checklist e verificação|manual||"
     "02-detectar-config.sh|Reiniciar configuração central: GPU, workingDisk, CPU/RAM e rede|auto||config.manage"
     "10-atualizar-sistema.sh|Atualizar sistema e firmware|auto|reboot|host.update"
-    "11-driver-nvidia.sh|Driver NVIDIA no host|auto|reboot|nvidia.driver"
+    "11-driver-nvidia.sh|Driver NVIDIA no host|auto|reboot|gpu.driver"
     "12-pacotes-base.sh|Pacotes base|auto||packages.base"
     "13-diretorios.sh|Diretório /vm|auto||storage.prepare"
     "14-working-disk.sh|workingDisk externo: preflight|auto||"

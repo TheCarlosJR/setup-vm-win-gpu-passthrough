@@ -30,7 +30,7 @@ verificar() {
 }
 [ "${1:-}" = "--verificar" ] && verificar
 
-guard_mutation nvidia.driver || exit 1
+guard_mutation gpu.driver || exit 1
 exigir_plataforma_suportada
 [ "$PLATAFORMA_GERENCIADOR_PACOTES" = apt ] \
     || falhar "A etapa 5 requer o perfil APT de Ubuntu/Pop!_OS."

@@ -2,9 +2,11 @@
 # ============================================================================
 # etapas/00-inventario.sh - Etapa 1: Inventário de Hardware
 # ============================================================================
-# Levanta a identificação completa do hardware e grava um arquivo datado em
-# ~/inventario-hardware/. A coleta não reconfigura o hardware; se necessário,
-# o script instala dmidecode e sempre cria/atualiza o relatório local.
+# Levanta a identificação completa do hardware e grava um arquivo datado na raiz
+# única de estado do projeto (o diretório vem do acessor diretorio_inventario;
+# por padrão ${XDG_STATE_HOME:-~/.local/state}/vm-passthrough/inventario/). A
+# coleta não reconfigura o hardware; se necessário, o script instala dmidecode e
+# sempre cria/atualiza o relatório local.
 #
 # Por que pede senha de administrador logo no início:
 #   - dmidecode lê a tabela SMBIOS/DMI (memória, placa-mãe, firmware) e exige root;
@@ -34,13 +36,23 @@ guard_mutation inventory.write || exit 1
 exigir_nao_root
 exigir_sudo
 
+# O caminho literal dos relatórios existe em UM lugar só (`lib/common.sh`); aqui
+# ele vem do acessor, para que o inventário caia na mesma raiz de estado do log
+# de ações e das listagens de grupos IOMMU.
+DIRETORIO_INVENTARIO="$(diretorio_inventario)"
+
 titulo "Etapa 1: Inventário de Hardware"
 info "Finalidade: registrar CPU, RAM, firmware, PCI, discos e IOMMU para conferir as próximas etapas."
 info "Pré-requisito: execute como usuário normal com acesso sudo e mantenha o hardware conectado."
-aviso "Alterações: pode atualizar o índice APT e instalar dmidecode; grava um relatório datado em ~/inventario-hardware/."
+aviso "Alterações: pode atualizar o índice APT e instalar dmidecode; grava um relatório datado em $DIRETORIO_INVENTARIO/."
 info "A coleta não altera hardware, BIOS/UEFI, firmware, partições nem configuração dos dispositivos."
 aviso "Risco: o relatório contém modelos, seriais e IDs do equipamento; guarde-o em local confiável."
 info "Não exige reboot; ao terminar, volte ao menu para continuar."
+
+# Pergunta UMA vez, depois dos avisos e antes de qualquer escrita desta etapa:
+# recusar é seguro, porque o relatório novo vai para a raiz de estado de todo
+# modo, e aceitar só remove a pasta antiga depois de conferir a cópia inteira.
+inventario_migracao_interativa
 
 # dmidecode pode não existir antes da etapa 6 (pacotes base); resolve aqui.
 if ! command -v dmidecode >/dev/null 2>&1; then
@@ -49,7 +61,6 @@ if ! command -v dmidecode >/dev/null 2>&1; then
     sudo apt-get install -y dmidecode
 fi
 
-DIRETORIO_INVENTARIO="$HOME/inventario-hardware"
 mkdir -p "$DIRETORIO_INVENTARIO"
 TMP_INVENTARIO="$(umask 077; mktemp "$DIRETORIO_INVENTARIO/.inventario.tmp.XXXXXXXXX")" \
     || falhar "Não foi possível criar o relatório temporário."

@@ -21,29 +21,34 @@ FORBIDDEN_OS_ATTRIBUTES = {
     "posix_spawn", "posix_spawnp", "setuid", "seteuid", "setgid", "setegid",
 }
 DYNAMIC_NAMES = {"eval", "exec", "compile", "__import__"}
-INVENTORY_FORBIDDEN_NAMES = {"open", "input"}
-INVENTORY_FORBIDDEN_MODULES = {"os", "pathlib", "shutil", "sys", "tempfile"}
+# I8.2: a regra estrita (nenhum caminho aberto, nenhum acesso ao host) valia
+# só para `inventory.py`, por nome de arquivo. `platform.py` faz a mesma
+# promessa — recebe capturas do Bash e nunca abre `/etc/os-release` —, e sem
+# entrar aqui essa promessa ficaria apenas nos testes, fora do gate.
+PURE_DOMAIN_FILES = {"inventory.py", "platform.py"}
+PURE_DOMAIN_FORBIDDEN_NAMES = {"open", "input"}
+PURE_DOMAIN_FORBIDDEN_MODULES = {"os", "pathlib", "shutil", "sys", "tempfile"}
 
 
 def inspect(path: Path) -> list[str]:
     failures: list[str] = []
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    is_inventory = path.name == "inventory.py"
+    is_pure_domain = path.name in PURE_DOMAIN_FILES
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 base = alias.name.split(".")[0]
-                if base in FORBIDDEN_MODULES or is_inventory and base in INVENTORY_FORBIDDEN_MODULES:
+                if base in FORBIDDEN_MODULES or is_pure_domain and base in PURE_DOMAIN_FORBIDDEN_MODULES:
                     failures.append(f"{path}:{node.lineno}: import proibido {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             base = (node.module or "").split(".")[0]
-            if base in FORBIDDEN_MODULES or is_inventory and base in INVENTORY_FORBIDDEN_MODULES:
+            if base in FORBIDDEN_MODULES or is_pure_domain and base in PURE_DOMAIN_FORBIDDEN_MODULES:
                 failures.append(f"{path}:{node.lineno}: import proibido {node.module}")
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id == "os" and node.attr in FORBIDDEN_OS_ATTRIBUTES:
                 failures.append(f"{path}:{node.lineno}: os.{node.attr} proibido")
         elif isinstance(node, ast.Name):
-            if node.id in DYNAMIC_NAMES or is_inventory and node.id in INVENTORY_FORBIDDEN_NAMES:
+            if node.id in DYNAMIC_NAMES or is_pure_domain and node.id in PURE_DOMAIN_FORBIDDEN_NAMES:
                 failures.append(f"{path}:{node.lineno}: nome proibido {node.id}")
     return failures
 
@@ -61,7 +66,7 @@ def main() -> int:
         print(failure)
     if failures:
         return 1
-    print("OK: fronteira Python pura sem processo, rede, elevação ou probes no inventory.py")
+    print("OK: fronteira Python pura sem processo, rede, elevação ou probes em " + ", ".join(sorted(PURE_DOMAIN_FILES)))
     return 0
 
 

@@ -47,6 +47,22 @@ TX_REDE_XML_ATIVO=""
 # do perfil de rede não pode depender só do rc de "netplan apply": o master do
 # uplink é o menor fato que separa "bridge desfeita" de "bridge ainda montada".
 TX_UPLINK_MASTER=""
+# I7.8: a topologia da bridge no instante em que a transação foi armada. A prova
+# `LINK-TOPOLOGY` do rollback comparava apenas o master do uplink, então uma
+# bridge que sobrevivesse ao `netplan apply` da restauração passava como "estados
+# anteriores restaurados" com o host sem endereço no uplink.
+TX_BRIDGE_EXISTIA=0
+TX_BRIDGE_PORTAS=""
+# I7.8: cópia LEGÍVEL e CONGELADA do perfil de rede anterior, criada uma única
+# vez na captura da transação. O bundle de recuperação não pode usar a cópia de
+# `_capturar_artefato`, que é reescrita a cada recaptura.
+TX_PERFIL_ANTERIOR_LEGIVEL=""
+# I7.8: leitura da topologia de bridge feita DEPOIS dos passos de restauração.
+OBS_BRIDGE_EXISTE=0
+OBS_BRIDGE_PORTAS=""
+# I7.8: sinais recebidos dentro da janela de saída (rollback, retenção de
+# evidência e limpeza). São contados e diferidos, nunca fatais.
+SAIDA_SINAIS=0
 ROLLBACK_FALHOU=0
 
 # --- I7.5: identificador lógico do perfil de rede do host ---------------------
@@ -298,12 +314,15 @@ reter_evidencia_recuperacao() {
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
         _recovery_copiar "$TMP_DIR/vm-anterior.xml" "$bundle" vm-anterior.xml
         _recovery_copiar "$TMP_DIR/passthrough.conf.anterior" "$bundle" passthrough.conf.anterior
-        # O perfil de rede do host vem da cópia LEGÍVEL feita por
-        # `_capturar_artefato`, e não de `netplan-bridge.anterior.yaml`: aquela
-        # foi criada com `sudo cp -p` e continua root:root 0600, ilegível para o
-        # operador que vai inspecionar o bundle. As duas têm o mesmo conteúdo.
-        _recovery_copiar "$TMP_DIR/artefato-$PERFIL_HOST_ESCOPO-$PERFIL_HOST_ID" \
-            "$bundle" netplan-bridge.anterior.yaml
+        # I7.8: o perfil retido é a cópia CONGELADA na captura da transação, e
+        # não a de `_capturar_artefato`. Aquela é reescrita a cada recaptura, e
+        # `capturar_estado` roda em toda fronteira do plano: depois da publicação
+        # ela contém exatamente o perfil NOVO, e o bundle o entregava ao operador
+        # com o nome de "anterior" — material que, reaplicado no console, repete
+        # a falha. Sem perfil anterior, nada é inventado.
+        [ -z "$TX_PERFIL_ANTERIOR_LEGIVEL" ] \
+            || _recovery_copiar "$TX_PERFIL_ANTERIOR_LEGIVEL" \
+                "$bundle" netplan-bridge.anterior.yaml
         _recovery_copiar "$TMP_DIR/rede-anterior-persistente.xml" "$bundle" rede-anterior-persistente.xml
         _recovery_copiar "$TMP_DIR/rede-anterior-ativa.xml" "$bundle" rede-anterior-ativa.xml
     fi
@@ -1095,6 +1114,15 @@ capturar_estado_transacao() {
         TX_NETPLAN_EXISTIA=1
         sudo cp -p "$NETPLAN_BRIDGE_ARQUIVO" "$TMP_DIR/netplan-bridge.anterior.yaml" \
             || falhar "Falha ao capturar $NETPLAN_BRIDGE_ARQUIVO antes da transação."
+        # I7.8: a cópia acima é a autoritativa da RESTAURAÇÃO e continua
+        # root:root 0600, ilegível para o operador. Esta segunda é a autoritativa
+        # da EVIDÊNCIA: legível, congelada aqui e nunca reescrita, ao contrário
+        # de `artefato-$PERFIL_HOST_ESCOPO-$PERFIL_HOST_ID`, que `capturar_estado`
+        # regrava em toda fronteira do plano.
+        sudo install -m 0644 -- "$NETPLAN_BRIDGE_ARQUIVO" \
+            "$TMP_DIR/perfil-host-anterior-legivel.yaml" >/dev/null 2>&1 \
+            || falhar "Falha ao congelar uma cópia legível de $NETPLAN_BRIDGE_ARQUIVO antes da transação."
+        TX_PERFIL_ANTERIOR_LEGIVEL="$TMP_DIR/perfil-host-anterior-legivel.yaml"
     fi
 
     if [ "$CAP_REDE_EXISTE" -eq 1 ]; then
@@ -1114,7 +1142,12 @@ capturar_estado_transacao() {
         fi
     fi
 
-    TX_UPLINK_MASTER="$(master_da_interface "$INTERFACE_FISICA" || true)"
+    TX_UPLINK_MASTER="$(master_da_interface "$INTERFACE_FISICA")" \
+        || falhar "Não foi possível ler o link do uplink $INTERFACE_FISICA antes de armar a transação."
+    # I7.8: a topologia da bridge entra na transação junto com o master, porque é
+    # ela que a prova de restauração compara depois do rollback.
+    TX_BRIDGE_EXISTIA="$CAP_BRIDGE_EXISTE"
+    TX_BRIDGE_PORTAS="$CAP_BRIDGE_PORTAS"
 
     guardar_fingerprints_capturados
 
@@ -1206,7 +1239,7 @@ expandir_autorizacao() {
 revalidar_estado() {
     # $1 = componentes autorizados a mudar neste trecho (separados por espaço);
     # $2 = rótulo do momento, usado só no diagnóstico.
-    local autorizados momento="$2" campo divergentes="" nome novo
+    local autorizados momento="$2" campo divergentes="" nome novo alvo_ilegivel=0
     local -a payload=()
     REVAL_CONFLITO=""
     REVAL_DIVERGENTES=""
@@ -1244,8 +1277,20 @@ revalidar_estado() {
                 [[ "$autorizados" == *" target "* ]] || divergentes+="${divergentes:+, }target"
             fi
         else
+            # I7.8: falha ao reler o domínio deixou de ser silêncio. Antes, um
+            # `dumpxml` sem resposta zerava `novo` e a comparação era pulada sem
+            # divergência: a VM removida por terceiro passava sem conflito, o
+            # passo de domínio não era bloqueado, `virsh define` a ressuscitava e
+            # o rollback era anunciado como comprovado. Não poder observar não é
+            # autorização para sobrescrever.
             novo=""
+            alvo_ilegivel=1
         fi
+    fi
+    if [ "$alvo_ilegivel" -eq 1 ]; then
+        REVAL_DIVERGENTES=" target "
+        REVAL_CONFLITO="não foi possível reler o XML do domínio $VM_NAME $momento; a verificação de concorrência não pôde ser concluída"
+        return 1
     fi
     # A base só avança quando a observação foi ACEITA. Avançá-la no conflito
     # apagaria a evidência: a revalidação seguinte (a de antes de restaurar)
@@ -1486,15 +1531,30 @@ executar_rollback() {
     return 1
 }
 
+_diferir_sinal_saida() {
+    # I7.8: sinal recebido DENTRO da janela de saída não pode matar o processo.
+    # Antes desta correção `tratar_saida` começava com `trap - EXIT INT TERM` e
+    # `INT`/`TERM` voltavam à ação padrão: um Ctrl-C durante o rollback (que é o
+    # gesto documentado do próprio `netplan try`) matava a etapa entre restaurar
+    # o arquivo e reativar a rede, sem `ROLLBACK INCOMPLETO`, sem bundle e sem
+    # localizador. O sinal passa a ser contado e diferido até a sequência
+    # terminar; nenhuma prova é dispensada por causa dele.
+    SAIDA_SINAIS=$((SAIDA_SINAIS + 1))
+}
+
 tratar_saida() {
     local status="$1" rollback_status=0
-    trap - EXIT INT TERM
+    trap - EXIT
+    trap _diferir_sinal_saida INT TERM
     set +e
     if [ "$TX_ARMADA" -eq 1 ] && [ "$TX_COMMIT" -eq 0 ] && [ "$TX_MUTOU" -eq 1 ]; then
         executar_rollback
         rollback_status=$?
         if [ "$rollback_status" -ne 0 ] && [ "$status" -eq 0 ]; then
             status=1
+        fi
+        if [ "$SAIDA_SINAIS" -gt 0 ]; then
+            aviso "Interrupção recebida durante o rollback: a sequência foi concluída até o fim antes de sair ($SAIDA_SINAIS sinal(is) diferido(s))."
         fi
     fi
     # I7.6 (D-NET-RECOVERY-EVIDENCE): a evidência é promovida ANTES de
@@ -1631,8 +1691,46 @@ nic_vm_confere_fonte() {
 }
 
 master_da_interface() {
-    ip -o link show "$1" 2>/dev/null \
+    # I7.8: saída vazia deixou de ser ambígua. Antes, "interface sem master" e
+    # "interface inexistente" produziam a mesma string vazia com rc 0 (o rc era o
+    # do `awk` no fim do pipe), e a prova de restauração aprovava um uplink que
+    # tinha sumido. Ausência do link agora é rc 1.
+    local linha
+    linha="$(ip -o link show "$1" 2>/dev/null)" || return 1
+    [ -n "$linha" ] || return 1
+    printf '%s\n' "$linha" \
         | awk '{for (i=1; i<=NF; i++) if ($i=="master") {print $(i+1); exit}}'
+}
+
+observar_topologia_bridge() {
+    # I7.8: releitura independente da topologia da bridge para a prova do
+    # rollback. `CAP_BRIDGE_*` não serve aqui: a última recaptura acontece ANTES
+    # dos passos de restauração, e o que precisa ser provado é o estado DEPOIS
+    # deles. O nome do link é normalizado como em `capturar_links`.
+    local saida linha nome master i
+    local -a campos=()
+    OBS_BRIDGE_EXISTE=0
+    OBS_BRIDGE_PORTAS=""
+    saida="$(ip -o link show 2>/dev/null)" || return 1
+    while IFS= read -r linha; do
+        [ -n "$linha" ] || continue
+        read -r -a campos <<< "$linha"
+        nome="${campos[1]:-}"
+        nome="${nome%:}"
+        nome="${nome%%@*}"
+        [ -n "$nome" ] || continue
+        master=""
+        for ((i = 2; i < ${#campos[@]}; i++)); do
+            [ "${campos[i]}" = master ] || continue
+            master="${campos[i + 1]:-}"
+            break
+        done
+        [ "$nome" = "$REDE_BRIDGE" ] && OBS_BRIDGE_EXISTE=1
+        [ "$master" = "$REDE_BRIDGE" ] \
+            && OBS_BRIDGE_PORTAS+="${OBS_BRIDGE_PORTAS:+$PAIRS_NL}$nome"
+    done <<< "$saida"
+    [ "$OBS_BRIDGE_EXISTE" -eq 1 ] || OBS_BRIDGE_PORTAS=""
+    return 0
 }
 
 bridge_runtime_confere() {
@@ -1822,8 +1920,13 @@ verificar() {
             v_falta "REDE_NAT_CIDR ausente ou inválida."
             v_fim
         fi
-        MASTER_UPLINK="$(master_da_interface "$INTERFACE_FISICA")"
-        if [ -n "$MASTER_UPLINK" ]; then
+        # I7.8: `master_da_interface` passou a devolver rc 1 quando o link não
+        # existe, e sob `set -e` a atribuição crua derrubaria o verificador sem
+        # diagnóstico. Link ilegível é falta explícita, como REQ-VERIFY-FAILCLOSED
+        # exige.
+        if ! MASTER_UPLINK="$(master_da_interface "$INTERFACE_FISICA")"; then
+            v_falta "Não foi possível ler o link do uplink $INTERFACE_FISICA para verificar se ele ainda é porta de uma bridge."
+        elif [ -n "$MASTER_UPLINK" ]; then
             v_falta "Uplink $INTERFACE_FISICA ainda é porta de '$MASTER_UPLINK'; restaure o Netplan antes de usar NAT."
         else
             v_ok "Uplink $INTERFACE_FISICA não está escravizado a bridge anterior."
@@ -2812,9 +2915,24 @@ provar_postcondicao() {
                 || falha_postcondicao "$escopo" "o perfil de rede restaurado não é renderizável."
             ;;
         LINK-TOPOLOGY)
-            atual="$(master_da_interface "$INTERFACE_FISICA" || true)"
-            [ "$atual" = "$TX_UPLINK_MASTER" ] \
-                || falha_postcondicao "$escopo" "o uplink $sujeito ficou sob master '${atual:-nenhum}', mas o capturado era '${TX_UPLINK_MASTER:-nenhum}'."
+            # I7.8: a prova comparava só o master do uplink. Uma bridge que
+            # sobrevivesse ao `netplan apply` da restauração, com o endereço do
+            # host preso nela e o uplink já liberado, produzia master vazio igual
+            # ao capturado: o rollback era anunciado como comprovado com o host
+            # sem rede. A topologia inteira da bridge entrou na prova.
+            if ! atual="$(master_da_interface "$INTERFACE_FISICA")"; then
+                falha_postcondicao "$escopo" "o uplink $sujeito não pôde ser lido após a restauração; a topologia de links não foi comprovada."
+            elif [ "$atual" != "$TX_UPLINK_MASTER" ]; then
+                falha_postcondicao "$escopo" "o uplink $sujeito ficou sob master '${atual:-nenhum}', mas o capturado era '${TX_UPLINK_MASTER:-nenhum}'."
+            elif ! observar_topologia_bridge; then
+                falha_postcondicao "$escopo" "não foi possível reler a topologia de links após a restauração de $sujeito."
+            elif [ "$OBS_BRIDGE_EXISTE" != "$TX_BRIDGE_EXISTIA" ] && [ "$OBS_BRIDGE_EXISTE" -eq 1 ]; then
+                falha_postcondicao "$escopo" "a bridge $REDE_BRIDGE continua presente após a restauração, mas não existia quando a transação foi armada."
+            elif [ "$OBS_BRIDGE_EXISTE" != "$TX_BRIDGE_EXISTIA" ]; then
+                falha_postcondicao "$escopo" "a bridge $REDE_BRIDGE não voltou a existir após a restauração, mas existia quando a transação foi armada."
+            elif [ "$OBS_BRIDGE_PORTAS" != "$TX_BRIDGE_PORTAS" ]; then
+                falha_postcondicao "$escopo" "as portas de $REDE_BRIDGE divergem das capturadas quando a transação foi armada."
+            fi
             ;;
         BRIDGE-RUNTIME)
             bridge_runtime_confere \

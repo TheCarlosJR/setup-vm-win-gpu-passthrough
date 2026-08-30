@@ -15,8 +15,11 @@ guard_mutation diagnostic.write || exit 1
 exigir_nao_root
 exigir_sudo
 
-mkdir -p "$HOME/inventario-hardware"
-ARQUIVO="$HOME/inventario-hardware/diagnostico-$(date +%Y%m%d-%H%M).txt"
+# Mesma raiz única de estado do inventário, do log de ações e da listagem de
+# grupos IOMMU: o caminho literal vive só em `lib/common.sh` e chega pelo acessor.
+DIRETORIO_RELATORIOS="$(diretorio_inventario)"
+mkdir -p "$DIRETORIO_RELATORIOS"
+ARQUIVO="$DIRETORIO_RELATORIOS/diagnostico-$(date +%Y%m%d-%H%M).txt"
 
 titulo "Diagnóstico parcial do host e da VM"
 info "Finalidade: reunir evidências locais para investigar VM, IOMMU, GPU, memória, montagens e serviços."
