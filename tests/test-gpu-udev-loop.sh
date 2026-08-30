@@ -17,6 +17,11 @@ BIN="$TMPDIR_TESTE/bin"
 mkdir -p "$PROJETO/lib/shell" "$PROJETO/etapas" "$RENDER" "$BIN" "$TMPDIR_TESTE/state"
 cp "$RAIZ/lib/common.sh" "$RAIZ/lib/platform.sh" "$RAIZ/lib/python-core.sh" "$PROJETO/lib/"
 cp "$RAIZ/lib/shell/boot.sh" "$PROJETO/lib/shell/boot.sh"
+# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
+# incondicional, e o módulo lê a matriz de política em lib/policy/.
+cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO/lib/shell/waivers.sh"
+mkdir -p "$PROJETO/lib/policy"
+cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO/lib/policy/waivers.tsv"
 cp -a "$RAIZ/libexec" "$PROJETO/libexec"
 cp "$RAIZ/etapas/50-hooks-gpu-hd1.sh" "$PROJETO/etapas/50-hooks-gpu-hd1.sh"
 cat > "$PROJETO/passthrough.conf" <<'CONF'

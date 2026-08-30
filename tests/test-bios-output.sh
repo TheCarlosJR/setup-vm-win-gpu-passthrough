@@ -15,6 +15,11 @@ cp "$RAIZ/lib/python-core.sh" "$PROJETO_TESTE/lib/python-core.sh"
 # I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
 mkdir -p "$PROJETO_TESTE/lib/shell"
 cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_TESTE/lib/shell/boot.sh"
+# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
+# incondicional, e o módulo lê a matriz de política em lib/policy/.
+cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO_TESTE/lib/shell/waivers.sh"
+mkdir -p "$PROJETO_TESTE/lib/policy"
+cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO_TESTE/lib/policy/waivers.tsv"
 # A fachada carrega a ponte e os consumidores de produção usam o core
 # Python desde I3, então o projeto mínimo precisa do libexec real.
 cp -a "$RAIZ/libexec" "$PROJETO_TESTE/libexec"

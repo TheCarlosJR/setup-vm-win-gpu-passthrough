@@ -604,6 +604,11 @@ cp "$RAIZ/lib/python-core.sh" "$PROJETO_MENU/lib/python-core.sh"
 # I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
 mkdir -p "$PROJETO_MENU/lib/shell"
 cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_MENU/lib/shell/boot.sh"
+# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
+# incondicional, e o módulo lê a matriz de política em lib/policy/.
+cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO_MENU/lib/shell/waivers.sh"
+mkdir -p "$PROJETO_MENU/lib/policy"
+cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO_MENU/lib/policy/waivers.tsv"
 cp -a "$RAIZ/libexec" "$PROJETO_MENU/libexec"
 cp "$RAIZ/menu.sh" "$PROJETO_MENU/menu.sh"
 mapfile -t ARQUIVOS_MENU < <(awk -F'["|]' '/^    "[0-9][0-9]-/ { print $2 }' "$RAIZ/menu.sh")
@@ -673,6 +678,11 @@ cp "$RAIZ/lib/python-core.sh" "$PROJETO_EP/lib/python-core.sh"
 # I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
 mkdir -p "$PROJETO_EP/lib/shell"
 cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_EP/lib/shell/boot.sh"
+# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
+# incondicional, e o módulo lê a matriz de política em lib/policy/.
+cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO_EP/lib/shell/waivers.sh"
+mkdir -p "$PROJETO_EP/lib/policy"
+cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO_EP/lib/policy/waivers.tsv"
 cp -a "$RAIZ/libexec" "$PROJETO_EP/libexec"
 for ETAPA_EP in 10-atualizar-sistema.sh 11-driver-nvidia.sh 20-virtualizacao.sh \
     21-usuario-grupos.sh 40-criar-vm.sh; do
