@@ -47,7 +47,7 @@ _mutator_harness_materialize_path() {
     local command
     local -a stateful=(
         sudo virsh xmlstarlet virt-xml-validate ip netplan systemctl ufw sshd
-        mount umount mountpoint findmnt dpkg apt apt-get getent id groupadd
+        mount umount mountpoint findmnt dpkg apt apt-get getent id passwd groupadd
         useradd userdel groupdel ssh-keygen lsblk udevadm lscpu lsmod lspci
         update-initramfs update-grub kernelstub flock logger ping dmesg
         cp mv rm mkdir chmod chown chgrp touch install tee sed grep find stat
@@ -340,6 +340,16 @@ XML
     _mutator_harness_write_initial_boot
     printf '%s\n' '{"sequence":0,"effects":0,"calls":{}}' > "$MUTATOR_STATE_DIR/counters.json"
     : > "$MUTATOR_ROOT/etc/ufw/added.rules"
+    # O pacote ufw sempre entrega /etc/default/ufw, e é dele que sai a família
+    # atendida pelo firewall (IPV6=). Sem o arquivo, a prova de IPv4/IPv6 do
+    # airlock seria indeterminada por fixture ausente, não por estado do host.
+    /usr/bin/mkdir -p "$MUTATOR_ROOT/etc/default"
+    cat > "$MUTATOR_ROOT/etc/default/ufw" <<'UFWDEFAULT'
+IPV6=yes
+DEFAULT_INPUT_POLICY="DROP"
+DEFAULT_OUTPUT_POLICY="ACCEPT"
+DEFAULT_FORWARD_POLICY="DROP"
+UFWDEFAULT
 }
 
 _mutator_harness_copy_project() {
@@ -384,7 +394,7 @@ mutator_harness_setup() {
         "$MUTATOR_ROOT/bin" "$MUTATOR_ROOT/etc/modules-load.d" "$MUTATOR_ROOT/etc/default" \
         "$MUTATOR_ROOT/etc/netplan" "$MUTATOR_ROOT/etc/libvirt/hooks" "$MUTATOR_ROOT/etc/ssh/sshd_config.d" \
         "$MUTATOR_ROOT/etc/ssh/authorized_keys" "$MUTATOR_ROOT/etc/ufw" \
-        "$MUTATOR_ROOT/var/lib/vm-passthrough" "$MUTATOR_ROOT/srv/airlock" \
+        "$MUTATOR_ROOT/var/lib/vm-passthrough" "$MUTATOR_ROOT/srv" \
         "$MUTATOR_ROOT/vm" "$MUTATOR_ROOT/backup" "$MUTATOR_STATE_DIR" \
         "$MUTATOR_HOME" "$MUTATOR_TMP" "$MUTATOR_HARNESS_RUNTIME_DIR" \
         "$MUTATOR_ROOT/sys/kernel/iommu_groups/17/devices" \

@@ -463,7 +463,45 @@ def handle_find(args: list[str]) -> int:
     return completed.returncode
 
 
+STAT_FORMATO_DONO = "%U %G %a"
+
+
+def stat_dono_declarado(alvo: str) -> tuple[str, str]:
+    """Dono nominal de um caminho, declarado pelo harness.
+
+    `chown` é no-op no sandbox (o processo não é root), então o dono REAL de
+    tudo é o operador. A prova de metadados do airlock pergunta pelo dono
+    nominal (root:root é pré-condição do ChrootDirectory), e é isso que este
+    override responde. O modo continua vindo do stat real: é um fato de
+    verdade do filesystem simulado, e a matriz precisa que 0644 numa chave
+    reprove.
+    """
+    caminho = STATE / "stat-owners"
+    if caminho.exists():
+        for linha in caminho.read_text(encoding="utf-8").splitlines():
+            campos = linha.split("|")
+            if len(campos) != 3:
+                continue
+            try:
+                declarado = map_path(campos[0]) if campos[0].startswith("/") else campos[0]
+            except ExternalPathError:
+                continue
+            if declarado == alvo:
+                return campos[1], campos[2]
+    return "root", "root"
+
+
 def handle_stat(args: list[str]) -> int:
+    if STAT_FORMATO_DONO in args:
+        alvo = args[-1]
+        mapeado = map_path(alvo) if alvo.startswith("/") else alvo
+        completed = run_real("stat", ["-c", "%a", "--", mapeado], capture=True)
+        if completed.returncode != 0:
+            return completed.returncode
+        modo = completed.stdout.decode(errors="replace").strip()
+        dono, grupo = stat_dono_declarado(mapeado)
+        print(f"{dono} {grupo} {modo}")
+        return 0
     if any(arg in ("%u", "%g") for arg in args):
         print("0")
         return 0
@@ -1389,6 +1427,238 @@ def ufw_allow_shape_is_modeled(args: list[str]) -> bool:
     return False
 
 
+# --- Modelo do sshd, do bindfs e do ufw (REQ-AIRLOCK-VERIFY) -----------------
+# O verificador do airlock prova POLÍTICA EFETIVA. Um shim que devolve 0 e
+# imprime nada só consegue provar o falso sucesso, então estes modelos derivam
+# a resposta do estado real da raiz simulada (drop-in, fstab, /etc/default/ufw)
+# e aceitam um perfil declarado pelo teste para encenar divergências.
+SSHD_DROPIN_REL = "etc/ssh/sshd_config.d/10-airlock.conf"
+SSHD_MULTIVALORADAS = ("listenaddress", "hostkey", "subsystem", "acceptenv")
+# Padrões de um sshd recém-instalado: é o "host virgem" contra o qual o
+# endurecimento global precisa aparecer como pendência.
+SSHD_PADROES: tuple[tuple[str, str], ...] = (
+    ("port", "22"),
+    ("addressfamily", "any"),
+    ("listenaddress", "0.0.0.0:22"),
+    ("listenaddress", "[::]:22"),
+    ("permitrootlogin", "prohibit-password"),
+    ("passwordauthentication", "yes"),
+    ("kbdinteractiveauthentication", "yes"),
+    ("pubkeyauthentication", "yes"),
+    ("authorizedkeysfile", ".ssh/authorized_keys"),
+    ("allowtcpforwarding", "yes"),
+    ("allowagentforwarding", "yes"),
+    ("x11forwarding", "no"),
+    ("permittunnel", "no"),
+    ("usepam", "yes"),
+    ("subsystem", "sftp /usr/lib/openssh/sftp-server"),
+)
+
+
+def sshd_parse_dropin() -> tuple[list[tuple[str, str]], list[tuple[dict[str, str], list[tuple[str, str]]]]]:
+    """Separa o drop-in em parte global e blocos Match, como o sshd faz."""
+    caminho = ROOT / SSHD_DROPIN_REL
+    globais: list[tuple[str, str]] = []
+    blocos: list[tuple[dict[str, str], list[tuple[str, str]]]] = []
+    if not caminho.is_file():
+        return globais, blocos
+    atual: tuple[dict[str, str], list[tuple[str, str]]] | None = None
+    for bruta in caminho.read_text(encoding="utf-8", errors="replace").splitlines():
+        linha = bruta.strip()
+        if not linha or linha.startswith("#"):
+            continue
+        chave, _, valor = linha.partition(" ")
+        chave = chave.lower()
+        valor = valor.strip()
+        if chave == "match":
+            partes = valor.split()
+            criterios = {
+                partes[indice].lower(): partes[indice + 1]
+                for indice in range(0, len(partes) - 1, 2)
+            }
+            atual = (criterios, [])
+            blocos.append(atual)
+            continue
+        (atual[1] if atual is not None else globais).append((chave, valor))
+    return globais, blocos
+
+
+def sshd_perfil(escopo: str) -> tuple[str, list[str], list[tuple[str, str]]]:
+    """Perfil declarado em STATE/sshd-profile.
+
+    Linhas: `chave valor` (define), `-chave` (remove) e `__modo=<vazio|
+    truncado|erro>`. O prefixo opcional `global:`/`contexto:` restringe a linha
+    a uma das duas consultas (`sshd -T` e `sshd -T -C`).
+    """
+    caminho = STATE / "sshd-profile"
+    modo = ""
+    removidos: list[str] = []
+    definidos: list[tuple[str, str]] = []
+    if not caminho.exists():
+        return modo, removidos, definidos
+    for bruta in caminho.read_text(encoding="utf-8").splitlines():
+        linha = bruta.strip()
+        if not linha or linha.startswith("#"):
+            continue
+        prefixo, separador, resto = linha.partition(":")
+        if separador and prefixo in ("global", "contexto"):
+            if prefixo != escopo:
+                continue
+            linha = resto.strip()
+        if linha.startswith("__modo="):
+            modo = linha.partition("=")[2].strip()
+            continue
+        if linha.startswith("-"):
+            removidos.append(linha[1:].strip().lower())
+            continue
+        chave, _, valor = linha.partition(" ")
+        definidos.append((chave.lower(), valor.strip()))
+    return modo, removidos, definidos
+
+
+def sshd_aplicar(destino: list[tuple[str, str]], itens: list[tuple[str, str]]) -> None:
+    for chave, valor in itens:
+        if chave in SSHD_MULTIVALORADAS:
+            destino.append((chave, valor))
+            continue
+        for indice, (existente, _) in enumerate(destino):
+            if existente == chave:
+                destino[indice] = (chave, valor)
+                break
+        else:
+            destino.append((chave, valor))
+
+
+def sshd_efetivo(contexto: str | None) -> tuple[str, list[tuple[str, str]]]:
+    escopo = "contexto" if contexto else "global"
+    pares = list(SSHD_PADROES)
+    globais, blocos = sshd_parse_dropin()
+    sshd_aplicar(pares, globais)
+    if contexto:
+        atual: dict[str, str] = {}
+        for item in contexto.split(","):
+            chave, _, valor = item.partition("=")
+            atual[chave.strip().lower()] = valor.strip()
+        for criterios, itens in blocos:
+            if criterios and all(atual.get(nome) == valor for nome, valor in criterios.items()):
+                sshd_aplicar(pares, itens)
+    modo, removidos, definidos = sshd_perfil(escopo)
+    sshd_aplicar(pares, definidos)
+    return modo, [(chave, valor) for chave, valor in pares if chave not in removidos]
+
+
+SHAPE_NAO_MODELADA = -1
+
+
+def handle_sshd(args: list[str]) -> int:
+    """Responde `sshd -t`, `sshd -T` e `sshd -T -C ctx`.
+
+    Devolve SHAPE_NAO_MODELADA para o chamador recusar a assinatura, mantendo
+    a política fail-closed do dispatcher.
+    """
+    if args == ["-t"]:
+        return 0
+    contexto: str | None = None
+    if len(args) == 3 and args[:2] == ["-T", "-C"]:
+        contexto = args[2]
+    elif args != ["-T"]:
+        return SHAPE_NAO_MODELADA
+    modo, pares = sshd_efetivo(contexto)
+    if modo == "erro":
+        print("sshd: no hostkeys available -- exiting.", file=sys.stderr)
+        return 1
+    linhas = [f"{chave} {valor}".rstrip() for chave, valor in pares]
+    if modo == "vazio":
+        linhas = []
+    elif modo == "truncado":
+        linhas = linhas[:3]
+    if linhas:
+        print("\n".join(linhas))
+    return 0
+
+
+def airlock_bind_fisico() -> str:
+    destino = os.environ.get("MUTATOR_AIRLOCK_BIND", "")
+    if not destino:
+        return ""
+    return str(Path(destino).resolve(strict=False))
+
+
+def airlock_montagem() -> tuple[str, str, str]:
+    """Tipo, origem e opções da montagem bindfs, declarados pelo harness."""
+    padrao = (
+        "fuse.bindfs",
+        os.environ.get("MUTATOR_AIRLOCK_TRANSIT", ""),
+        "rw,nosuid,nodev,noexec,relatime,user_id=0,group_id=0,default_permissions,allow_other",
+    )
+    caminho = STATE / "airlock-mount"
+    if not caminho.exists():
+        return padrao
+    campos = caminho.read_text(encoding="utf-8").strip().split("|")
+    if len(campos) != 3:
+        return padrao
+    return campos[0], campos[1], campos[2]
+
+
+def montado_em(mapeado: str) -> bool:
+    if mapeado and mapeado == airlock_bind_fisico():
+        return (STATE / "airlock-mounted").exists()
+    caminho = STATE / "mountpoints"
+    if not caminho.exists():
+        return False
+    return mapeado in caminho.read_text(encoding="utf-8").split()
+
+
+def ufw_politicas_padrao() -> tuple[str, str]:
+    caminho = STATE / "ufw-defaults"
+    if caminho.exists():
+        campos = caminho.read_text(encoding="utf-8").split()
+        if len(campos) >= 2:
+            return campos[0], campos[1]
+    return "deny", "allow"
+
+
+def ufw_ipv6_habilitado() -> bool:
+    caminho = ROOT / "etc/default/ufw"
+    if not caminho.is_file():
+        return False
+    for linha in caminho.read_text(encoding="utf-8", errors="replace").splitlines():
+        if linha.strip().startswith("IPV6="):
+            return linha.partition("=")[2].strip().strip("\"'").lower() == "yes"
+    return False
+
+
+def ufw_status_verbose(regras: list[str], ativo: bool) -> int:
+    if not ativo:
+        print("Status: inactive")
+        return 0
+    entrada, saida = ufw_politicas_padrao()
+    linhas = [
+        "Status: active",
+        "",
+        "Logging: on (low)",
+        f"Default: {entrada} (incoming), {saida} (outgoing), disabled (routed)",
+        "New profiles: skip",
+        "",
+        "To                         Action      From",
+        "--                         ------      ----",
+    ]
+    for regra in regras:
+        campos = regra.split()
+        if "from" not in campos:
+            continue
+        origem = campos[campos.index("from") + 1]
+        if "on" in campos:
+            interface = campos[campos.index("on") + 1]
+            linhas.append(f"22/tcp on {interface}      ALLOW IN    {origem}")
+        else:
+            linhas.append(f"22/tcp                     ALLOW IN    {origem}")
+    if ufw_ipv6_habilitado() and (STATE / "ufw-v6-aberta").exists():
+        linhas.append("22/tcp (v6)                ALLOW IN    Anywhere (v6)")
+    print("\n".join(linhas))
+    return 0
+
+
 def systemd_unit_table() -> dict[str, tuple[str, str, str, str]]:
     """Estado declarado das unidades systemd, mantido pelo harness."""
     path = STATE / "systemd-units"
@@ -1471,7 +1741,18 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
         ):
             return systemctl_show(args[1], args[2:])
         if len(args) == 2 and args[0] in ("restart", "reload", "start") and not args[1].startswith("-"):
-            return simple_effect(f"systemctl:{args[0]}:{args[1]}")
+            def recarregar() -> None:
+                # O reload é o COMMIT da fase de SSH. Este gancho troca o perfil
+                # efetivo do sshd exatamente nesse instante, para que a matriz
+                # possa exercitar a pós-condição pós-commit: um drop-in válido
+                # no disco não prova que o daemon recarregado o aplica.
+                pendente = STATE / "sshd-profile-apos-reload"
+                if args[0] in ("reload", "restart") and pendente.exists():
+                    (STATE / "sshd-profile").write_text(
+                        pendente.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
+                    pendente.unlink()
+            return simple_effect(f"systemctl:{args[0]}:{args[1]}", recarregar)
         if len(args) == 3 and args[:2] == ["enable", "--now"] and not args[2].startswith("-"):
             return simple_effect(f"systemctl:enable:{args[2]}")
         return reject_shape()
@@ -1503,6 +1784,20 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
         if len(args) != 2 or args[0] not in ("passwd", "group") or args[1].startswith("-"):
             return reject_shape()
         database, name = args
+        # Override do NSS declarado pelo teste: uma linha por entrada, no
+        # formato real do banco. É assim que a matriz encena shell errado, GID
+        # primário errado e a MESMA conta resolvendo para duas entradas.
+        override = STATE / f"nss-{database}"
+        if override.exists():
+            linhas = [
+                linha
+                for linha in override.read_text(encoding="utf-8").splitlines()
+                if linha.split(":", 1)[0] == name
+            ]
+            if linhas:
+                print("\n".join(linhas))
+                return 0
+            return 2
         if database == "passwd" and name == "fixture":
             print(f"fixture:x:1000:1000:Fixture:{HARNESS / 'home'}:/bin/bash")
             return 0
@@ -1559,8 +1854,10 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
             path = args[2]
         else:
             return reject_shape()
-        map_path(path)
-        return 0 if (STATE / "airlock-mounted").exists() else 1
+        # O caminho consultado passou a importar: responder "montado" para
+        # qualquer ponto deixava a montagem do airlock indistinguível de
+        # qualquer outra, que é o mesmo defeito que o verificador precisa punir.
+        return 0 if montado_em(map_path(path)) else 1
     if command == "mount":
         if args != ["-a"] and not (len(args) == 1 and args[0].startswith("/")):
             return reject_shape()
@@ -1574,6 +1871,8 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
         return simple_effect("umount:airlock", lambda: (STATE / "airlock-mounted").unlink(missing_ok=True))
     if command == "findmnt":
         valid = False
+        ponto = ""
+        campos = ""
         if args == ["-no", "SOURCE", "/"]:
             valid = True
         elif (
@@ -1583,27 +1882,64 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
             and args[5] in ("TARGET", "SOURCE", "FSTYPE", "TARGET,SOURCE,FSTYPE,OPTIONS")
         ):
             map_path(args[3])
+            ponto, campos = args[3], args[5]
+            valid = True
+        elif (
+            len(args) == 5
+            and args[:2] == ["-rn", "--mountpoint"]
+            and args[3] == "--output"
+            and args[4] in ("TARGET", "SOURCE", "FSTYPE", "TARGET,SOURCE,FSTYPE,OPTIONS")
+        ):
+            # Assinatura de v_prova_montagem (sem --raw): é ela que lê tipo,
+            # origem e opções reais, e sem esta forma o dispatcher a recusava.
+            map_path(args[2])
+            ponto, campos = args[2], args[4]
             valid = True
         if not valid:
             return reject_shape()
+        if ponto and map_path(ponto) == airlock_bind_fisico():
+            if not (STATE / "airlock-mounted").exists():
+                return 1
+            fstype, origem, opcoes = airlock_montagem()
+            valores = {"TARGET": ponto, "SOURCE": origem, "FSTYPE": fstype, "OPTIONS": opcoes}
+            print(" ".join(valores[nome] for nome in campos.split(",")))
+            return 0
         print(f"{os.environ.get('MUTATOR_AIRLOCK_TRANSIT', ROOT / 'var/lib/vm-passthrough/airlock')} /dev/fixture ext4 rw")
         return 0
     if command == "sshd":
-        if args == ["-t"] or (len(args) == 3 and args[:2] == ["-T", "-C"]):
-            return 0
-        return reject_shape()
+        rc = handle_sshd(args)
+        return reject_shape() if rc == SHAPE_NAO_MODELADA else rc
     if command == "ssh-keygen":
         if len(args) != 3 or args[:2] != ["-l", "-f"]:
             return reject_shape()
-        map_path(args[2])
-        print("256 SHA256:fixture airlock (ED25519)")
+        alvo = Path(map_path(args[2]))
+        try:
+            conteudo = alvo.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            print(f"{args[2]}: No such file or directory", file=sys.stderr)
+            return 255
+        # Aprovar qualquer arquivo era o mesmo falso sucesso de `[ -s ]`: um
+        # authorized_keys com lixo passaria por "chave instalada".
+        chaves = [linha for linha in conteudo.splitlines() if linha.strip() and not linha.startswith("#")]
+        modelo = re.compile(r"^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-[A-Za-z0-9-]+)\s+[A-Za-z0-9+/=]+")
+        if not chaves or not all(modelo.match(linha) for linha in chaves):
+            print(f"{args[2]} is not a public key file.", file=sys.stderr)
+            return 255
+        for _ in chaves:
+            print("256 SHA256:fixture airlock (ED25519)")
         return 0
     if command == "ufw":
         rules_path = ROOT / "etc/ufw/added.rules"
         rules = rules_path.read_text(encoding="utf-8").splitlines() if rules_path.exists() else []
-        if args in (["status"], ["status", "verbose"]):
-            print("Status: active" if (STATE / "ufw-active").exists() else "Status: inactive")
+        ativo = (STATE / "ufw-active").exists()
+        if args == ["status"]:
+            print("Status: active" if ativo else "Status: inactive")
             return 0
+        if args == ["status", "verbose"]:
+            # Políticas padrão e famílias atendidas são fatos que só aparecem
+            # aqui; sem eles o verificador não consegue distinguir "porta
+            # fechada por padrão" de "tudo aberto com uma regra a mais".
+            return ufw_status_verbose(rules, ativo)
         if args == ["show", "added"]:
             print("\n".join(rules))
             return 0
@@ -1618,7 +1954,14 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
                 rules_path.write_text("\n".join(remaining) + ("\n" if remaining else ""), encoding="utf-8")
             return simple_effect("ufw:delete", delete_rule)
         if args in (["default", "deny", "incoming"], ["default", "allow", "outgoing"]):
-            return simple_effect("ufw:default:" + ":".join(args[1:]))
+            def registrar_padrao() -> None:
+                entrada, saida = ufw_politicas_padrao()
+                if args[2] == "incoming":
+                    entrada = args[1]
+                else:
+                    saida = args[1]
+                (STATE / "ufw-defaults").write_text(f"{entrada} {saida}\n", encoding="utf-8")
+            return simple_effect("ufw:default:" + ":".join(args[1:]), registrar_padrao)
         if ufw_allow_shape_is_modeled(args):
             idx = args.index("comment")
             comment = args[idx + 1]
@@ -1630,6 +1973,23 @@ def handle_system(command: str, args: list[str], data: bytes) -> int:
                 rules_path.write_text("\n".join(new_rules) + "\n", encoding="utf-8")
             return simple_effect("ufw:allow", add_rule)
         return reject_shape()
+    if command == "passwd":
+        # `passwd -S` é a única leitura que distingue senha utilizável (P) de
+        # conta travada (L) e de conta sem senha (NP).
+        if len(args) != 2 or args[0] != "-S" or args[1].startswith("-"):
+            return reject_shape()
+        usuario = args[1]
+        if usuario == "vmtransfer" and not (STATE / "user-vmtransfer").exists():
+            print(f"passwd: user '{usuario}' does not exist", file=sys.stderr)
+            return 1
+        estado = "L"
+        caminho = STATE / "passwd-status"
+        if caminho.exists():
+            declarado = caminho.read_text(encoding="utf-8").strip()
+            if declarado:
+                estado = declarado
+        print(f"{usuario} {estado} 01/01/2026 0 99999 7 -1")
+        return 0
     if command == "lsblk":
         allowed_first = {
             "--discard", "-o", "-dn", "-dno", "-lnpo", "-s", "-nro",
@@ -1752,10 +2112,20 @@ def handle_mutator_effect_exec(args: list[str]) -> int:
 
 def handle_sudo(args: list[str], data: bytes) -> int:
     args = list(args)
+    sem_senha = False
     while args and args[0] in ("-n", "-v"):
         option = args.pop(0)
+        if option == "-n":
+            sem_senha = True
         if option == "-v" and not args:
             return 0
+    # Host sem credencial de sudo em cache: `sudo -n` falha e NADA privilegiado
+    # pode ser observado. É o estado real do host de desenvolvimento, e o
+    # verificador precisa cair em indeterminado por causa dele, nunca em
+    # pendência e muito menos em sucesso.
+    if sem_senha and (STATE / "sudo-sem-senha-negado").exists():
+        print("sudo: a password is required", file=sys.stderr)
+        return 1
     if args[:1] == ["-u"] and len(args) >= 3:
         args = args[2:]
     if not args:
