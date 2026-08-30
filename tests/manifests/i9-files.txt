@@ -1,0 +1,2 @@
+tests/manifests/i9-files.txt
+tests/test-i9-verify-helpers.sh
