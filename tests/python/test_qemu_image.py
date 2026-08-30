@@ -184,5 +184,161 @@ class ChainTests(unittest.TestCase):
         self.assertIn("limite", str(contexto.exception))
 
 
+class IdentityTests(unittest.TestCase):
+    """REQ-WINDOWS-STATE: identidade estável do arquivo QCOW2, sem lê-lo."""
+
+    BASE = {
+        "path": "/vm/win11.qcow2",
+        "device": "64768",
+        "inode": "1234567",
+        "birth": "",
+        "format": "qcow2",
+    }
+
+    def identidade(self, **mudancas: str) -> dict:
+        entrada = dict(self.BASE)
+        entrada.update(mudancas)
+        return qemu_image.image_identity(entrada)
+
+    def test_sem_birth(self) -> None:
+        dados = self.identidade()
+        self.assertEqual(dados["identity_kind"], "inode")
+        self.assertEqual(dados["identity_birth"], "-")
+        self.assertRegex(dados["identity_digest"], r"^[0-9a-f]{64}$")
+        # Sem birth o digest gravado e o digest base coincidem por construção.
+        self.assertEqual(dados["identity_digest"], dados["identity_digest_base"])
+
+    def test_birth_ausente_canonicaliza_como_traco(self) -> None:
+        # `stat -c '%w'` devolve '-' em vários filesystems: vazio e '-' precisam
+        # produzir exatamente a mesma identidade, senão a evidência já gravada
+        # deixaria de conferir só por causa do formato da captura.
+        self.assertEqual(
+            self.identidade(birth="-")["identity_digest"],
+            self.identidade(birth="")["identity_digest"],
+        )
+        self.assertEqual(self.identidade(birth="-")["identity_kind"], "inode")
+
+    def test_birth_presente_fortalece_a_identidade(self) -> None:
+        com_birth = self.identidade(birth="20260817-120000")
+        sem_birth = self.identidade()
+        self.assertEqual(com_birth["identity_kind"], "inode+birth")
+        self.assertEqual(com_birth["identity_birth"], "20260817-120000")
+        self.assertNotEqual(com_birth["identity_digest"], sem_birth["identity_digest"])
+        # O digest base ignora o birth: é ele que sustenta evidência gravada
+        # antes de o filesystem passar a expor birth.
+        self.assertEqual(
+            com_birth["identity_digest_base"], sem_birth["identity_digest"]
+        )
+
+    def test_identidade_e_determinista(self) -> None:
+        self.assertEqual(
+            self.identidade()["identity_digest"],
+            self.identidade()["identity_digest"],
+        )
+
+    def test_arquivos_distintos_produzem_identidades_distintas(self) -> None:
+        digests = {
+            self.identidade()["identity_digest"],
+            self.identidade(inode="7654321")["identity_digest"],
+            self.identidade(device="64769")["identity_digest"],
+            self.identidade(path="/vm/outro.qcow2")["identity_digest"],
+            self.identidade(birth="20260817-120000")["identity_digest"],
+        }
+        self.assertEqual(len(digests), 5)
+
+    def test_formato_diferente_de_qcow2_recusado(self) -> None:
+        for formato in ("raw", "vmdk", "QCOW2", ""):
+            with self.assertRaises(DataError) as contexto:
+                self.identidade(format=formato)
+            self.assertIn("qcow2", str(contexto.exception))
+
+    def test_inode_nao_numerico_recusado(self) -> None:
+        for inode in ("abc", "12a", "1.5", " 12", "12 ", "+12", "-12", "١٢"):
+            with self.assertRaises(DataError):
+                self.identidade(inode=inode)
+
+    def test_inode_e_device_precisam_ser_positivos(self) -> None:
+        for campo in ("inode", "device"):
+            for valor in ("0", "00", "0123"):
+                with self.assertRaises(DataError):
+                    self.identidade(**{campo: valor})
+
+    def test_numero_absurdamente_longo_recusado(self) -> None:
+        with self.assertRaises(DataError):
+            self.identidade(inode="1" * 21)
+
+    def test_path_relativo_recusado(self) -> None:
+        for caminho in ("vm/win11.qcow2", "./win11.qcow2", "", "win11.qcow2", "/"):
+            with self.assertRaises(DataError):
+                self.identidade(path=caminho)
+
+    def test_path_nao_canonico_recusado(self) -> None:
+        for caminho in (
+            "/vm/../etc/win11.qcow2",
+            "/vm/./win11.qcow2",
+            "/vm//win11.qcow2",
+            "/vm/win11.qcow2/",
+            "/vm/..",
+        ):
+            with self.assertRaises(DataError):
+                self.identidade(path=caminho)
+
+    def test_path_com_controle_recusado(self) -> None:
+        for caminho in ("/vm/win\n11.qcow2", "/vm/win\t11.qcow2", "/vm/win\x7f.qcow2"):
+            with self.assertRaises(DataError):
+                self.identidade(path=caminho)
+
+    def test_path_acima_do_limite_recusado(self) -> None:
+        with self.assertRaises(DataError):
+            self.identidade(path="/vm/" + "a" * qemu_image.MAX_IDENTITY_PATH_BYTES)
+
+    def test_birth_malformado_recusado(self) -> None:
+        for birth in (
+            "2026-08-17",
+            "20260817",
+            "20260817-1200",
+            "20260817 120000",
+            "ontem",
+            "20260817-120000 ",
+        ):
+            with self.assertRaises(DataError):
+                self.identidade(birth=birth)
+
+    def test_campo_obrigatorio_ausente(self) -> None:
+        for campo in ("path", "device", "inode", "format"):
+            entrada = dict(self.BASE)
+            del entrada[campo]
+            with self.assertRaises(DataError) as contexto:
+                qemu_image.image_identity(entrada)
+            self.assertIn("obrigatório", str(contexto.exception))
+
+    def test_birth_ausente_no_payload_e_aceito(self) -> None:
+        entrada = dict(self.BASE)
+        del entrada["birth"]
+        self.assertEqual(
+            qemu_image.image_identity(entrada)["identity_digest"],
+            self.identidade()["identity_digest"],
+        )
+
+    def test_campo_desconhecido_recusado(self) -> None:
+        with self.assertRaises(DataError) as contexto:
+            qemu_image.image_identity(dict(self.BASE, sha256="x"))
+        self.assertIn("desconhecido", str(contexto.exception))
+
+    def test_campo_com_tipo_errado_recusado(self) -> None:
+        for campo in ("path", "device", "inode", "format", "birth"):
+            with self.assertRaises(DataError):
+                qemu_image.image_identity(dict(self.BASE, **{campo: 7}))
+
+    def test_texto_canonico_e_versionado(self) -> None:
+        texto = qemu_image._identity_text(
+            "inode", "/vm/win11.qcow2", "64768", "1234567", "-"
+        )
+        self.assertTrue(texto.startswith(qemu_image.IDENTITY_VERSION + "\n"))
+        self.assertTrue(texto.endswith("\n"))
+        self.assertIn("kind=inode\n", texto)
+        self.assertIn("format=qcow2\n", texto)
+
+
 if __name__ == "__main__":
     unittest.main()

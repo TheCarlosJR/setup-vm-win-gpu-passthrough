@@ -169,6 +169,11 @@ inicializar_raiz_teste
 # todos já definidos acima. Nenhum módulo produz efeito ao ser sourceado.
 # shellcheck source=lib/shell/boot.sh
 source "$COMMON_DIR/shell/boot.sh"
+# Política de dispensas (REQ-WAIVERS). Carrega só definições: a matriz em
+# lib/policy/waivers.tsv é lida na primeira consulta, nunca no source, e
+# nunca por source/eval. Depende apenas de PROJETO_DIR, definido no topo.
+# shellcheck source=lib/shell/waivers.sh
+source "$COMMON_DIR/shell/waivers.sh"
 
 # --- Pré-checagens ------------------------------------------------------------
 exigir_nao_root() {
@@ -3167,6 +3172,166 @@ xml_disco_qcow2_estado() {
     return 2
 }
 
+# --- Identidade e evidência durável da instalação (REQ-WINDOWS-STATE) --------
+# Três eixos independentes moram aqui: a identidade do ARQUIVO QCOW2, a leitura
+# da metadata namespaced e a geração do candidato que a grava. Nenhum deles
+# consulta o guest agent nem o estado de energia da VM: a evidência de
+# instalação precisa sobreviver a VM desligada e a agent ausente.
+
+QCOW2_IDENTIDADE_ERRO=""
+QCOW2_IDENTIDADE_DIGEST=""
+QCOW2_IDENTIDADE_BASE=""
+QCOW2_IDENTIDADE_KIND=""
+QCOW2_IDENTIDADE_BIRTH=""
+qcow2_identidade_digest() {
+    # qcow2_identidade_digest CAMINHO
+    # Retornos: 0 identidade medida; 1 não observável (ferramenta ausente,
+    # arquivo ausente/ilegível, host sem resposta); 2 dado recusado pelo core.
+    #
+    # O digest identifica o ARQUIVO (device/inode/birth/caminho/formato), nunca
+    # o conteúdo: hashear dezenas ou centenas de GB a cada `--verificar` seria
+    # inviável, e o conteúdo do QCOW2 muda a cada boot do Windows sem que o
+    # disco tenha sido trocado. Todo o dado é capturado aqui, no shell; o core
+    # só canoniza e calcula.
+    local caminho="${1:-}" info="" device="" inode="" birth="" nascimento=""
+    local -a inspecionar=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        FORMAT HAS_BACKING BACKING_FILENAME CHAIN_LENGTH
+        VIRTUAL_SIZE ACTUAL_SIZE CLUSTER_SIZE
+    )
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        IDENTITY_DIGEST IDENTITY_DIGEST_BASE IDENTITY_KIND IDENTITY_BIRTH
+    )
+    local -a payload=()
+    QCOW2_IDENTIDADE_ERRO=""
+    QCOW2_IDENTIDADE_DIGEST=""
+    QCOW2_IDENTIDADE_BASE=""
+    QCOW2_IDENTIDADE_KIND=""
+    QCOW2_IDENTIDADE_BIRTH=""
+    caminho_absoluto_seguro "$caminho" \
+        || { QCOW2_IDENTIDADE_ERRO="Caminho do QCOW2 inválido ou não absoluto."; return 2; }
+    command -v stat >/dev/null 2>&1 && command -v qemu-img >/dev/null 2>&1 \
+        || { QCOW2_IDENTIDADE_ERRO="stat ou qemu-img ausente; a identidade do QCOW2 não pôde ser medida."; return 1; }
+    [ -e "$caminho" ] \
+        || { QCOW2_IDENTIDADE_ERRO="QCOW2 ausente: $caminho"; return 1; }
+    [ -f "$caminho" ] && [ ! -L "$caminho" ] \
+        || { QCOW2_IDENTIDADE_ERRO="QCOW2 não é arquivo regular: $caminho"; return 1; }
+    [ -r "$caminho" ] \
+        || { QCOW2_IDENTIDADE_ERRO="QCOW2 sem permissão de leitura: $caminho"; return 1; }
+    device="$(LC_ALL=C stat -c '%d' -- "$caminho" 2>/dev/null)" || device=""
+    inode="$(LC_ALL=C stat -c '%i' -- "$caminho" 2>/dev/null)" || inode=""
+    [ -n "$device" ] && [ -n "$inode" ] \
+        || { QCOW2_IDENTIDADE_ERRO="stat não devolveu device/inode do QCOW2."; return 1; }
+    # Birth é opcional de propósito: `%W` devolve 0 e `%w` devolve '-' em vários
+    # filesystems (o NTFS/fuseblk deste checkout entre eles). Ausência de birth
+    # NÃO invalida a identidade: ela apenas reduz o identity_kind para 'inode'.
+    nascimento="$(LC_ALL=C stat -c '%W' -- "$caminho" 2>/dev/null)" || nascimento=""
+    if [[ "$nascimento" =~ ^[1-9][0-9]*$ ]] && command -v date >/dev/null 2>&1; then
+        birth="$(LC_ALL=C date -u -d "@$nascimento" +%Y%m%d-%H%M%S 2>/dev/null)" || birth=""
+        [[ "$birth" =~ ^[0-9]{8}-[0-9]{6}$ ]] || birth=""
+    fi
+    info="$(LC_ALL=C qemu-img info --output=json -- "$caminho" 2>/dev/null)" || info=""
+    [ -n "$info" ] \
+        || { QCOW2_IDENTIDADE_ERRO="qemu-img não conseguiu inspecionar o QCOW2 $caminho."; return 1; }
+    # O formato vem do parser fechado do core, nunca de regex sobre o JSON.
+    # A cadeia de backing NÃO é política desta função: a evidência se vincula ao
+    # ARQUIVO em QCOW2_PATH, e um overlay criado depois é outro inode, logo
+    # outra identidade. Quem exige imagem independente é o backup.
+    payload=(json "$info" expect_format qcow2)
+    if ! python_core_pares_payload inspecionar QIMG_ qemu-image-inspect payload \
+            2>/dev/null; then
+        QCOW2_IDENTIDADE_ERRO="$(_core_diagnostico 'A imagem em QCOW2_PATH não é um qcow2 válido.')"
+        return 2
+    fi
+    payload=(
+        path "$caminho" device "$device" inode "$inode" birth "$birth"
+        format "${QIMG_FORMAT:-}"
+    )
+    if ! python_core_pares_payload permitidas QID_ qemu-image-identity payload \
+            2>/dev/null; then
+        QCOW2_IDENTIDADE_ERRO="$(_core_diagnostico 'Identidade do QCOW2 recusada pelo core.')"
+        return 2
+    fi
+    QCOW2_IDENTIDADE_DIGEST="$QID_IDENTITY_DIGEST"
+    QCOW2_IDENTIDADE_BASE="$QID_IDENTITY_DIGEST_BASE"
+    QCOW2_IDENTIDADE_KIND="$QID_IDENTITY_KIND"
+    QCOW2_IDENTIDADE_BIRTH="$QID_IDENTITY_BIRTH"
+}
+
+WINDOWS_INSTALL_ESTADO=""
+WINDOWS_INSTALL_DIGEST=""
+WINDOWS_INSTALL_QUANDO=""
+WINDOWS_INSTALL_ORIGEM=""
+WINDOWS_INSTALL_TERCEIROS=0
+WINDOWS_INSTALL_ERRO=""
+xml_metadata_instalacao() {
+    # xml_metadata_instalacao ARQUIVO [DIGEST_ESPERADO]
+    # Lê a metadata namespaced vmpass:windows-install do XML INATIVO e a
+    # confronta com a identidade do QCOW2 atual.
+    #
+    # WINDOWS_INSTALL_ESTADO recebe a evidência lida:
+    #   ausente    nenhuma evidência gravada;
+    #   registrada evidência gravada e vinculada a ESTE QCOW2;
+    #   divergente evidência gravada para OUTRO disco (ou disco trocado);
+    #   invalida   metadata presente e fora do schema (digest/data/origem).
+    # Quando nada pôde ser observado (XML ilegível, core sem resposta) o estado
+    # vira 'erro' e WINDOWS_INSTALL_ERRO traz o diagnóstico: "não observei"
+    # jamais pode passar por "ausente".
+    #
+    # Retornos alinhados a STATUS_*: 0 registrada, 1 ausente, 2 divergente,
+    # 3 invalida/erro.
+    local arquivo="${1:-}" esperado="${2:-}" rc=0
+    local -a permitidas=(
+        "${CORE_PARES_ENVELOPE[@]}"
+        METADATA_PRESENT INSTALL_PRESENT INSTALL_DIGEST INSTALL_RECORDED_AT
+        INSTALL_SOURCE DIGEST_MATCHES FOREIGN_CHILD_COUNT
+    )
+    local -a payload=()
+    WINDOWS_INSTALL_ESTADO=erro
+    WINDOWS_INSTALL_DIGEST=""
+    WINDOWS_INSTALL_QUANDO=""
+    WINDOWS_INSTALL_ORIGEM=""
+    WINDOWS_INSTALL_TERCEIROS=0
+    WINDOWS_INSTALL_ERRO=""
+    _xml_ler_arquivo "$arquivo" \
+        || { WINDOWS_INSTALL_ERRO="XML inativo ausente ou ilegível."; return 3; }
+    payload=(xml "$XML_CONTEUDO" qcow2_digest "$esperado")
+    python_core_pares_payload permitidas WINST_ domain-metadata payload \
+        2>/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        WINDOWS_INSTALL_ERRO="$(_core_diagnostico 'Falha ao ler a metadata de instalação.')"
+        # Só dado recusado pelo core (65) é metadata inválida; qualquer outro
+        # código interno é ausência de observação, não veredicto sobre o XML.
+        if [ "$rc" -eq "$PYTHON_CORE_EXIT_DADO" ]; then
+            WINDOWS_INSTALL_ESTADO=invalida
+        fi
+        return 3
+    fi
+    WINDOWS_INSTALL_TERCEIROS="${WINST_FOREIGN_CHILD_COUNT:-0}"
+    if [ "${WINST_INSTALL_PRESENT:-0}" != 1 ]; then
+        WINDOWS_INSTALL_ESTADO=ausente
+        return 1
+    fi
+    WINDOWS_INSTALL_DIGEST="${WINST_INSTALL_DIGEST:-}"
+    WINDOWS_INSTALL_QUANDO="${WINST_INSTALL_RECORDED_AT:-}"
+    WINDOWS_INSTALL_ORIGEM="${WINST_INSTALL_SOURCE:-}"
+    if [ -z "$esperado" ]; then
+        # Evidência presente sem digest para confrontar: o vínculo com o disco
+        # não foi provado, e sem prova não existe veredicto.
+        WINDOWS_INSTALL_ESTADO=erro
+        WINDOWS_INSTALL_ERRO="Identidade do QCOW2 não informada; o vínculo da evidência com o disco não foi provado."
+        return 3
+    fi
+    if [ "${WINST_DIGEST_MATCHES:-0}" = 1 ]; then
+        WINDOWS_INSTALL_ESTADO=registrada
+        return 0
+    fi
+    WINDOWS_INSTALL_ESTADO=divergente
+    WINDOWS_INSTALL_ERRO="A evidência gravada aponta para outro QCOW2 (identidade $WINDOWS_INSTALL_DIGEST)."
+    return 2
+}
+
 XML_DOMINIO_ERRO=""
 XML_DOMINIO_FINGERPRINT=""
 xml_dominio_fingerprint() {
@@ -3246,6 +3411,13 @@ xml_candidato_fonte_nic() {
     _xml_candidato_gerar "$1" "$2" \
         op_count 1 op_0 nic-source \
         op_0_mac "$3" op_0_type "$4" op_0_attribute "$5" op_0_value "$6"
+}
+
+xml_candidato_instalacao() {
+    # xml_candidato_instalacao ORIGEM DESTINO DIGEST QUANDO [ORIGEM_EVIDENCIA]
+    _xml_candidato_gerar "$1" "$2" \
+        op_count 1 op_0 install-metadata \
+        op_0_qcow2_digest "$3" op_0_recorded_at "$4" op_0_source "${5:-operador}"
 }
 
 xml_candidato_usb() {

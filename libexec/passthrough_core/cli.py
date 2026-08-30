@@ -65,7 +65,7 @@ USAGE = (
     "  network-nat-addresses, network-overlap, network-plan,\n"
     "  network-revalidate, network-route-audit, network-snapshot,\n"
     "  nvidia-product-match,\n"
-    "  nvidia-download-info, qemu-image-inspect,\n"
+    "  nvidia-download-info, qemu-image-inspect, qemu-image-identity,\n"
     "  platform-os-release, platform-detect, platform-cpu-vendor,\n"
     "  platform-gpu-vendor, platform-service-resolve,\n"
     "  cpu-topology, cpu-layout, cpu-plan, cpu-memory,\n"
@@ -728,6 +728,7 @@ _PURE_COMMANDS: dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] = {
     "platform-os-release": platform.os_release_facts,
     "platform-service-resolve": platform.service_unit_choice,
     "config-validate": config.validate_pair,
+    "qemu-image-identity": qemu_image.image_identity,
     "qemu-image-inspect": qemu_image.inspect_image,
 }
 
