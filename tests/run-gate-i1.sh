@@ -134,6 +134,11 @@ if [[ -f tests/check-python-boundary.py ]]; then
     python3 -I -S -B tests/check-python-boundary.py --root "$ROOT"
 fi
 
+if [[ -f tests/check-waivers-matrix.py ]]; then
+    secao 'matriz de política de dispensas'
+    python3 -I -S -B tests/check-waivers-matrix.py --root "$ROOT"
+fi
+
 secao 'ShellCheck'
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck --version

@@ -1,0 +1,30 @@
+# schema_version=1
+# Matriz de política de dispensas (REQ-WAIVERS, tarefa I9.10).
+#
+# Por que este arquivo existe: antes dele os pré-requisitos do projeto eram
+# implícitos e estavam espalhados em três lugares que não conversavam entre si
+# (a ordem textual do array ETAPAS de menu.sh, os exigir_conf/falhar dentro de
+# cada etapa, e prosa em mensagens info). Não havia como responder "qual
+# pré-requisito esta dispensa exclui, e com que autorização", que é exatamente
+# o que o requisito exige antes de o menu poder ignorar um pré-requisito.
+#
+# Decisão registrada em I4.8 (D-WAIVERS) e reafirmada em I9.10: as duas chaves
+# que sobreviveram NÃO são dispensa de etapa. São escolha entre montagens
+# mutuamente exclusivas, e por isso o tipo é 'escolha-de-modo'. Consequência
+# direta: o estado real do host com a escolha registrada é "este fluxo não usa
+# esse recurso", o verificador continua devolvendo 0, e o que muda é apenas o
+# SÍMBOLO da UI, para que o menu pare de chamar isso de "concluída".
+#
+# Colunas, separadas por TAB:
+#   etapa            arquivo em etapas/, sem diretório
+#   flag             chave de passthrough.conf, sempre terminada em _DISPENSADO
+#   tipo             escolha-de-modo (único valor aceito hoje)
+#   prereq_excluido  identificador do pré-requisito que a flag dispensa
+#   simbolo_ui       disp (o menu troca o símbolo) ou nenhum (só efeito interno)
+#   conflito         fatal (caminho definido junto com a flag em 'sim' recusa)
+#
+# Ordenado em ordem C. Validado por tests/check-waivers-matrix.py.
+14-working-disk.sh	WORKING_DISK_DISPENSADO	escolha-de-modo	workingdisk-montado	disp	fatal
+50-hooks-gpu-hd1.sh	HD1_DISPENSADO	escolha-de-modo	hd1-anexado	disp	fatal
+61-airlock.sh	WORKING_DISK_DISPENSADO	escolha-de-modo	airlock-em-workingdisk	nenhum	fatal
+70-trim-discard.sh	WORKING_DISK_DISPENSADO	escolha-de-modo	backups-em-workingdisk	nenhum	fatal
