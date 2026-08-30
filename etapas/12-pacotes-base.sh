@@ -20,12 +20,16 @@ PACOTES=(pciutils usbutils dmidecode curl wget git htop xmlstarlet rsync
 
 verificar() {
     local p
+    # `dpkg -s` devolve 0 para pacote REMOVIDO que deixou config-files, então a
+    # etapa relatava como instalado um pacote que não existe mais no host.
+    # v_prova_pacote é a prova real e depende do gerenciador do perfil: sem
+    # perfil resolvido não há autoridade para afirmar instalação nenhuma.
+    if ! plataforma_carregar; then
+        v_erro "$PLATAFORMA_ERRO"
+        v_fim
+    fi
     for p in "${PACOTES[@]}"; do
-        if dpkg -s "$p" >/dev/null 2>&1; then
-            v_ok "$p instalado."
-        else
-            v_falta "$p ausente."
-        fi
+        v_prova_pacote "$p" || true
     done
     v_fim
 }

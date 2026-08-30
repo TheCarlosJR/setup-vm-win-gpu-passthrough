@@ -248,6 +248,10 @@ guard_mutation() { return 0; }
 exigir_nao_root() { :; }
 exigir_sudo() { :; }
 vm_existe() { return 0; }
+# I9.9: a etapa 15 passou a usar o tri-estado, e o shim virsh do harness
+# responde 64 a dominfo. Sem este override o verificador encerraria em
+# indeterminado antes de listar o XML, escondendo o que o teste mede.
+vm_existe_estado() { VM_EXISTE_MOTIVO=""; return 0; }
 exigir_vm_desligada() { :; }
 xml_backup() {
     if [[ ${USB_CONCURRENT_BACKUP:-0} -eq 1 ]]; then

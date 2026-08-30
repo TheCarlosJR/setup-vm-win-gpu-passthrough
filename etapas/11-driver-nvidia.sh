@@ -11,20 +11,54 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 verificar() {
+    local saida_nvidia="" identificacao="" rc_nvidia=0
+    local raiz_pci="" link_driver="" alvo_driver="" driver=""
     if plataforma_carregar; then
         v_ok "Estratégia NVIDIA do perfil $PLATAFORMA_PERFIL: $PLATAFORMA_NVIDIA_ESTRATEGIA."
     else
         v_erro "$PLATAFORMA_ERRO"
     fi
-    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-        v_ok "nvidia-smi funcional: $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -n1)"
+    # Mesma política já corrigida em util/atualizar-host.sh: sem a ferramenta
+    # nada foi observado (indeterminado); rc 0 com saída não parseável não é
+    # prova de driver; e rc != 0 é estado observado e errado.
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        v_indeterminado "nvidia-smi não está disponível; o driver NVIDIA não pôde ser sondado."
+    elif saida_nvidia="$(nvidia-smi 2>&1)"; then
+        if nvidia_smi_comprovado "$saida_nvidia"; then
+            # A identificação sai da MESMA saída já comprovada; a consulta
+            # extra de antes podia vir vazia e ainda assim virar "funcional".
+            identificacao="$(LC_ALL=C grep -Eo 'Driver Version:[[:space:]]*[0-9][0-9.]*' \
+                <<< "$saida_nvidia" | head -n1)" || identificacao=""
+            v_ok "nvidia-smi funcional: ${identificacao:-driver comprovado na saída}"
+        else
+            v_indeterminado "nvidia-smi terminou com zero, mas a saída não contém identificação e versão parseáveis; o driver não foi comprovado."
+        fi
     else
-        v_falta "nvidia-smi ausente ou sem GPU (driver não instalado/carregado)."
+        rc_nvidia=$?
+        v_erro "nvidia-smi falhou com código $rc_nvidia; o driver NVIDIA não está operacional neste boot."
     fi
-    if lspci -nnk 2>/dev/null | grep -A3 -i 'vga' | grep -q 'Kernel driver in use: nvidia'; then
-        v_ok "GPU vinculada ao driver 'nvidia'."
-    else
-        v_falta "GPU não está com o driver 'nvidia' em uso."
+    # O vínculo é lido no sysfs do dispositivo configurado. A janela `-A3` do
+    # lspci casava QUALQUER VGA e podia aprovar uma GPU que não é a da VM.
+    if v_var_definida GPU_PCI_ID pci_bdf_valido; then
+        raiz_pci="$(caminho_sistema /sys/bus/pci/devices)" || raiz_pci=""
+        link_driver="$raiz_pci/$GPU_PCI_ID/driver"
+        if [ -z "$raiz_pci" ] || [ ! -d "$raiz_pci" ]; then
+            v_indeterminado "Barramento PCI não legível em ${raiz_pci:-/sys/bus/pci/devices}; o driver em uso não pôde ser observado."
+        elif [ ! -d "$raiz_pci/$GPU_PCI_ID" ]; then
+            v_erro "GPU $GPU_PCI_ID não está presente no barramento PCI; a configuração aponta para um endereço inexistente."
+        elif [ ! -L "$link_driver" ]; then
+            v_falta "GPU não está com o driver 'nvidia' em uso."
+        else
+            alvo_driver="$(readlink -f -- "$link_driver" 2>/dev/null)" || alvo_driver=""
+            driver="${alvo_driver##*/}"
+            if [ -z "$driver" ]; then
+                v_indeterminado "Não foi possível resolver o driver vinculado a $GPU_PCI_ID; o estado não pôde ser observado."
+            elif [ "$driver" = nvidia ]; then
+                v_ok "GPU vinculada ao driver 'nvidia'."
+            else
+                v_falta "GPU não está com o driver 'nvidia' em uso; driver atual: $driver."
+            fi
+        fi
     fi
     v_fim
 }
@@ -49,9 +83,13 @@ exigir_sudo
 
 titulo "Etapa 5: Driver NVIDIA no host"
 
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+# A mesma prova do verificador: rc 0 com saída não parseável não autoriza
+# anunciar "já funciona" nem pular a instalação do driver.
+SAIDA_NVIDIA=""
+if command -v nvidia-smi >/dev/null 2>&1 && SAIDA_NVIDIA="$(nvidia-smi 2>&1)" \
+   && nvidia_smi_comprovado "$SAIDA_NVIDIA"; then
     ok "nvidia-smi já funciona: nenhum pacote será alterado e não é necessário reiniciar."
-    nvidia-smi
+    printf '%s\n' "$SAIDA_NVIDIA"
     exit 0
 fi
 

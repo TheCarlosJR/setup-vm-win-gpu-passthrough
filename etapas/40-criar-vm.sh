@@ -133,9 +133,98 @@ criar_qcow2_novo() {
         || falhar "Não foi possível criar/publicar o QCOW2 atomicamente como $QEMU_USUARIO."
 }
 
+# REQ-VERIFY-FAILCLOSED: `validar_modelo_diretorio_vm` só devolve 0/1 e colapsa
+# num único "pendente" três coisas diferentes: modelo observado e divergente,
+# ferramenta de ACL ausente e sistema de arquivos incapaz de carregar ACL POSIX
+# (risco real aqui: /vm sobre NTFS/fuseblk, onde chmod/setfacl são no-op). Estas
+# duas funções separam o que foi OBSERVADO do que não pôde ser observado.
+diretorio_sem_suporte_acl() {
+    # 0 somente quando o tipo do FS é conhecidamente incapaz de carregar ACL
+    # POSIX. Sem findmnt não há resposta e o chamador segue pela via normal:
+    # ausência de resposta nunca pode virar sucesso nem diagnóstico inventado.
+    local caminho="${1:-}" fstype=""
+    command -v findmnt >/dev/null 2>&1 || return 1
+    fstype="$(LC_ALL=C findmnt -no FSTYPE --target "$caminho" 2>/dev/null)" || return 1
+    case "$fstype" in
+        fuseblk|fuse.*|ntfs|ntfs3|vfat|exfat|msdos) return 0 ;;
+    esac
+    return 1
+}
+
+MODELO_VM_MOTIVO=""
+modelo_diretorio_vm_estado() {
+    # 0 provado, 1 pendente (observado e ainda não convergido), 2 indeterminado.
+    local diretorio="${1:-}"
+    MODELO_VM_MOTIVO=""
+    if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+        MODELO_VM_MOTIVO="getfacl/setfacl indisponíveis; a herança ACL de $diretorio não pôde ser observada"
+        return 2
+    fi
+    if validar_modelo_diretorio_vm "$@"; then
+        return 0
+    fi
+    MODELO_VM_MOTIVO="$GRUPO_VM_ERRO"
+    case "$GRUPO_VM_ERRO" in
+        *'indisponível para comprovar'*|*'Não foi possível ler as ACLs'*|*'Não foi possível inspecionar'*)
+            return 2
+            ;;
+        *'ACL de acesso/default'*|*'ACL inesperada'*)
+            if diretorio_sem_suporte_acl "$diretorio"; then
+                MODELO_VM_MOTIVO="o sistema de arquivos de $diretorio não carrega ACL POSIX; a herança não pôde ser observada"
+                return 2
+            fi
+            ;;
+    esac
+    return 1
+}
+
+# Marcador ancorado da regra: `grep -qF '/vm/** rwk,'` também casava a MESMA
+# linha comentada, que o parser do AppArmor ignora por completo.
+REGRA_APPARMOR_MARCADOR='^[[:space:]]*/vm/\*\*[[:space:]]+rwk,[[:space:]]*$'
+# A abstração local só chega ao perfil gerado pelo libvirt se a abstração
+# oficial a incluir. `#include <...>` (sintaxe legada) e `include if exists
+# <...>` (atual) são as duas formas válidas; `#` ali NÃO é comentário.
+APPARMOR_INCLUDE_MARCADOR='^[[:space:]]*(#include|include([[:space:]]+if[[:space:]]+exists)?)[[:space:]]*<local/abstractions/libvirt-qemu>'
+APPARMOR_EFETIVO_MOTIVO=""
+apparmor_regra_efetiva() {
+    # Presença textual não prova política: a abstração local precisa estar
+    # incluída pela abstração que o libvirt gera e o AppArmor precisa estar
+    # ativo no kernel. 0 provado, 2 indeterminado, 3 erro.
+    local abstracao habilitado conteudo=""
+    APPARMOR_EFETIVO_MOTIVO=""
+    abstracao="$(caminho_sistema /etc/apparmor.d/abstractions/libvirt-qemu)" || abstracao=""
+    if [ -z "$abstracao" ] || [ ! -e "$abstracao" ]; then
+        APPARMOR_EFETIVO_MOTIVO="a abstração libvirt-qemu do AppArmor não existe neste host"
+        return 2
+    fi
+    if [ ! -r "$abstracao" ]; then
+        APPARMOR_EFETIVO_MOTIVO="a abstração libvirt-qemu do AppArmor não é legível"
+        return 2
+    fi
+    if ! LC_ALL=C grep -Eq -- "$APPARMOR_INCLUDE_MARCADOR" "$abstracao"; then
+        APPARMOR_EFETIVO_MOTIVO="a abstração libvirt-qemu não inclui local/abstractions/libvirt-qemu, então a regra nunca entra no perfil"
+        return 3
+    fi
+    habilitado="$(caminho_sistema /sys/module/apparmor/parameters/enabled)" || habilitado=""
+    if [ -z "$habilitado" ] || [ ! -r "$habilitado" ]; then
+        APPARMOR_EFETIVO_MOTIVO="o estado do AppArmor no kernel não pôde ser lido"
+        return 2
+    fi
+    IFS= read -r conteudo < "$habilitado" 2>/dev/null || conteudo=""
+    case "$conteudo" in
+        Y|y|1) return 0 ;;
+        "") APPARMOR_EFETIVO_MOTIVO="o estado do AppArmor no kernel veio vazio"; return 2 ;;
+        *)
+            APPARMOR_EFETIVO_MOTIVO="o AppArmor está desabilitado no kernel ('$conteudo'), então a regra não tem efeito"
+            return 3
+            ;;
+    esac
+}
+
 verificar() {
-    [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido (etapa 3)."; v_fim; }
     local usuario_ok=0 qemu_ok=0 qemu_rc
+    local modelo_rc=0 vm_rc=0 apparmor_rc=0
+    v_var_definida VM_NAME nome_vm_valido || v_fim
     if ! plataforma_carregar; then
         v_erro "$PLATAFORMA_ERRO"
     elif [ -z "${USUARIO_LINUX:-}" ]; then
@@ -169,11 +258,17 @@ verificar() {
             QEMU_USUARIO=""
         fi
     fi
-    if [ "$usuario_ok" -eq 1 ] && [ "$qemu_ok" -eq 1 ] \
-       && validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP"; then
-        v_ok "/vm pronto para operador e QEMU via $VM_STORAGE_GROUP."
+    if [ "$usuario_ok" -eq 1 ] && [ "$qemu_ok" -eq 1 ]; then
+        modelo_rc=0
+        modelo_diretorio_vm_estado "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" \
+            "$VM_STORAGE_GROUP" || modelo_rc=$?
+        v_classificar "$modelo_rc" \
+            "/vm pronto para operador e QEMU via $VM_STORAGE_GROUP." \
+            "Modelo de acesso a /vm pendente: ${MODELO_VM_MOTIVO:-identidades indisponíveis}." \
+            "Modelo de acesso a /vm não pôde ser observado: ${MODELO_VM_MOTIVO:-sem diagnóstico}." \
+            "Modelo de acesso a /vm inconsistente: ${MODELO_VM_MOTIVO:-sem diagnóstico}."
     else
-        v_falta "Modelo de acesso a /vm pendente: ${GRUPO_VM_ERRO:-identidades indisponíveis}."
+        v_falta "Modelo de acesso a /vm pendente: identidades indisponíveis."
     fi
     if validar_config_rede; then
         v_ok "Rede final selecionada: $REDE_MODO via $INTERFACE_FISICA (NAT default permanece temporária até a etapa 19)."
@@ -183,7 +278,9 @@ verificar() {
     if [ -z "${QCOW2_PATH:-}" ]; then
         v_falta "QCOW2_PATH não definido."
     elif ! command -v qemu-img >/dev/null 2>&1; then
-        v_falta "qemu-img ausente para validar o QCOW2."
+        # Sem a ferramenta nada foi observado: o QCOW2 pode estar correto, e
+        # mandar o operador reexecutar a etapa resolveria a coisa errada.
+        v_indeterminado "qemu-img ausente para validar o QCOW2."
     elif validar_qcow2_configurado "$QCOW2_PATH" "$VM_STORAGE_GROUP"; then
         if [ "$ARMAZENAMENTO_QCOW2_ESTADO" = existente ]; then
             v_ok "QCOW2 regular, canônico e validado: $QCOW2_PATH."
@@ -207,22 +304,41 @@ verificar() {
     else
         v_falta "ISO_VIRTIO não definida."
     fi
-    if vm_existe "$VM_NAME"; then
-        v_ok "VM '$VM_NAME' definida no libvirt."
-        if [ -n "${VM_NIC_MAC:-}" ]; then
-            mac_valido "$VM_NIC_MAC" \
-                && v_ok "MAC persistido da NIC: $VM_NIC_MAC" \
-                || v_falta "VM_NIC_MAC inválido: $VM_NIC_MAC"
-        else
-            v_ok "Configuração antiga: a etapa 19 registrará VM_NIC_MAC antes de alterar a NIC."
-        fi
-    else
-        v_falta "VM '$VM_NAME' não definida."
-    fi
-    if grep -qF "$REGRA_APPARMOR" "$APPARMOR_LOCAL" 2>/dev/null; then
-        v_ok "Regra AppArmor para /vm presente."
-    else
-        v_falta "Regra AppArmor para /vm ausente."
+    # vm_existe fundia "domínio não existe" com libvirtd fora do ar, virsh
+    # ausente e permissão negada; só o primeiro é pendência desta etapa.
+    vm_rc=0
+    vm_existe_estado "$VM_NAME" || vm_rc=$?
+    case "$vm_rc" in
+        0)
+            v_ok "VM '$VM_NAME' definida no libvirt."
+            if [ -n "${VM_NIC_MAC:-}" ]; then
+                mac_valido "$VM_NIC_MAC" \
+                    && v_ok "MAC persistido da NIC: $VM_NIC_MAC" \
+                    || v_falta "VM_NIC_MAC inválido: $VM_NIC_MAC"
+            else
+                # A etapa 19 trata o MESMO estado como pendência bloqueante
+                # (etapas/60-rede-bridge.sh); anunciá-lo como [ok] aqui fazia a
+                # etapa 12 fechar em 0 com um pré-requisito da 19 em aberto.
+                v_falta "VM_NIC_MAC ainda não persistido; execute a etapa 19 para migrar a configuração antiga antes de alterar a NIC."
+            fi
+            ;;
+        1) v_falta "VM '$VM_NAME' não definida." ;;
+        *) v_indeterminado "Estado da VM '$VM_NAME' no libvirt não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}." ;;
+    esac
+    # `grep -qF` aprovava a mesma linha comentada e transformava arquivo
+    # ilegível em "ausente"; v_prova_arquivo separa ausente, ilegível e sem o
+    # marcador ancorado. Só depois disso vale perguntar se a regra é efetiva.
+    apparmor_rc=0
+    v_prova_arquivo "$APPARMOR_LOCAL" "Regra AppArmor para /vm" \
+        --marcador "$REGRA_APPARMOR_MARCADOR" || apparmor_rc=$?
+    if [ "$apparmor_rc" -eq 0 ]; then
+        apparmor_rc=0
+        apparmor_regra_efetiva || apparmor_rc=$?
+        v_classificar "$apparmor_rc" \
+            "Regra AppArmor para /vm alcançável pelo perfil gerado do libvirt e AppArmor ativo no kernel." \
+            "Regra AppArmor para /vm ainda não efetiva: ${APPARMOR_EFETIVO_MOTIVO:-sem diagnóstico}." \
+            "Efetividade da regra AppArmor para /vm não pôde ser observada: ${APPARMOR_EFETIVO_MOTIVO:-sem diagnóstico}." \
+            "Regra AppArmor para /vm presente mas inefetiva: ${APPARMOR_EFETIVO_MOTIVO:-sem diagnóstico}."
     fi
     v_fim
 }

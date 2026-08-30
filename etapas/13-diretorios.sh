@@ -12,7 +12,8 @@ carregar_conf
 VM_STORAGE_GROUP="${VM_STORAGE_GROUP:-vm-passthrough}"
 
 verificar() {
-    local usuario_valido=0
+    local usuario_valido=0 diretorio_vm=""
+    diretorio_vm="$(caminho_sistema /vm)" || diretorio_vm=""
     if [ -z "${USUARIO_LINUX:-}" ]; then
         v_falta "USUARIO_LINUX não definido (etapa 3)."
     elif validar_usuario_linux "$USUARIO_LINUX"; then
@@ -25,10 +26,23 @@ verificar() {
     else
         v_erro "$USUARIO_VALIDACAO_ERRO"
     fi
+    # validar_modelo_diretorio_vm devolve 1 tanto para "modelo divergente"
+    # quanto para "não consegui olhar" (getfacl/getent/stat ausentes, ou
+    # filesystem sem suporte a ACL, caso real em partições NTFS/fuseblk).
+    # Cada impedimento de OBSERVAÇÃO é separado antes da chamada.
     if ! nome_grupo_vm_dedicado_valido "$VM_STORAGE_GROUP"; then
         v_erro "VM_STORAGE_GROUP deve usar o namespace dedicado vm-passthrough[-sufixo]: '$VM_STORAGE_GROUP'."
-    elif [ "$usuario_valido" -eq 1 ] \
-         && validar_modelo_diretorio_vm /vm "$USUARIO_LINUX" "" "$VM_STORAGE_GROUP"; then
+    elif [ "$usuario_valido" -ne 1 ]; then
+        v_falta "Modelo base de /vm pendente: usuário ainda não validado."
+    elif [ -z "$diretorio_vm" ]; then
+        v_indeterminado "Não foi possível resolver /vm; o modelo de diretórios não pôde ser observado."
+    elif [ ! -d "$diretorio_vm" ]; then
+        v_falta "Modelo base de /vm pendente: Diretório $diretorio_vm não existe."
+    elif ! v_exigir_comando getfacl getent stat id; then
+        : # v_exigir_comando já classificou a falta de ferramenta.
+    elif ! getfacl -cp -- "$diretorio_vm" >/dev/null 2>&1; then
+        v_indeterminado "Não foi possível ler as ACLs de $diretorio_vm; o filesystem pode não suportar ACL ou o acesso pode estar negado."
+    elif validar_modelo_diretorio_vm "$diretorio_vm" "$USUARIO_LINUX" "" "$VM_STORAGE_GROUP"; then
         v_ok "/vm usa root:$VM_STORAGE_GROUP, modo 2770 e ACL padrão rwx/rwx/---."
     else
         v_falta "Modelo base de /vm pendente: ${GRUPO_VM_ERRO:-usuário ainda não validado}."

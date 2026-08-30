@@ -15,29 +15,44 @@ inicializar_perfil_virtualizacao() {
     [ "${#PACOTES[@]}" -gt 0 ]
 }
 
+# Prova funcional de um comando da pilha: presença no PATH não distingue
+# binário quebrado de binário instalado, e um pacote meio instalado deixa o
+# nome resolvendo para algo que não executa. O subcomando é somente leitura.
+prova_comando_virtualizacao() {
+    local comando="${1:-}"
+    command -v "$comando" >/dev/null 2>&1 || return 1
+    "$comando" --version >/dev/null 2>&1 || return 3
+    return 0
+}
+
 verificar() {
-    local p ovmf_dir servico_rc
+    local p ovmf_dir servico_rc rc_comando
+    local ovmf_code="" ovmf_vars=""
+    local -a ovmf_codigos=() ovmf_variaveis=()
     if ! inicializar_perfil_virtualizacao; then
         v_erro "$PLATAFORMA_ERRO"
         v_fim
     fi
     ovmf_dir="$(caminho_sistema /usr/share/OVMF)" \
         || { v_erro "Não foi possível resolver o diretório OVMF."; v_fim; }
-    if dpkg -s "$PLATAFORMA_QEMU_PACOTE" >/dev/null 2>&1; then
-        v_ok "Pacote QEMU do perfil instalado: $PLATAFORMA_QEMU_PACOTE."
-    else
-        v_falta "Pacote QEMU do perfil ausente: $PLATAFORMA_QEMU_PACOTE."
-    fi
-    if command -v "$PLATAFORMA_QEMU_COMANDO" >/dev/null 2>&1 \
-       && "$PLATAFORMA_QEMU_COMANDO" --version >/dev/null 2>&1; then
-        v_ok "Capacidade QEMU x86 disponível: $PLATAFORMA_QEMU_COMANDO."
-    else
-        v_falta "Capacidade QEMU x86 indisponível: $PLATAFORMA_QEMU_COMANDO."
-    fi
+    # `dpkg -s` devolve 0 para pacote removido com config-files: era prova de
+    # que o dpkg conhece o nome, não de que o pacote está instalado.
+    v_prova_pacote "$PLATAFORMA_QEMU_PACOTE" || true
+    rc_comando=0
+    prova_comando_virtualizacao "$PLATAFORMA_QEMU_COMANDO" || rc_comando=$?
+    v_classificar "$rc_comando" \
+        "Capacidade QEMU x86 disponível: $PLATAFORMA_QEMU_COMANDO." \
+        "Capacidade QEMU x86 indisponível: $PLATAFORMA_QEMU_COMANDO." \
+        "Capacidade QEMU x86 não pôde ser sondada: $PLATAFORMA_QEMU_COMANDO." \
+        "Capacidade QEMU x86 presente, mas '$PLATAFORMA_QEMU_COMANDO --version' falhou; a instalação está quebrada."
     for p in qemu-img virsh virt-install virt-manager swtpm; do
-        command -v "$p" >/dev/null 2>&1 \
-            && v_ok "Comando $p disponível." \
-            || v_falta "Comando $p ausente."
+        rc_comando=0
+        prova_comando_virtualizacao "$p" || rc_comando=$?
+        v_classificar "$rc_comando" \
+            "Comando $p disponível." \
+            "Comando $p ausente." \
+            "Comando $p não pôde ser sondado." \
+            "Comando $p presente, mas '$p --version' falhou; a instalação está quebrada."
     done
     if ! command -v systemctl >/dev/null 2>&1; then
         v_indeterminado "systemctl indisponível para sondar o perfil libvirt."
@@ -65,10 +80,27 @@ verificar() {
             v_falta "$LIBVIRT_ACESSO_ERRO"
         fi
     fi
-    if compgen -G "$ovmf_dir/OVMF_CODE*.fd" >/dev/null; then
-        v_ok "Firmware OVMF presente."
-    else
+    # O glob sozinho não prova legibilidade, tipo de arquivo nem o PAR
+    # CODE/VARS que a VM exige; um OVMF_CODE sem OVMF_VARS não inicializa
+    # firmware nenhum.
+    mapfile -t ovmf_codigos < <(compgen -G "$ovmf_dir/OVMF_CODE*.fd" 2>/dev/null \
+        | LC_ALL=C sort || true)
+    if [ "${#ovmf_codigos[@]}" -eq 0 ]; then
         v_falta "Arquivos OVMF não encontrados em $ovmf_dir."
+    else
+        ovmf_code="${ovmf_codigos[0]}"
+        v_prova_arquivo "$ovmf_code" "Firmware OVMF" || true
+        ovmf_vars="${ovmf_code//OVMF_CODE/OVMF_VARS}"
+        if [ ! -e "$ovmf_vars" ]; then
+            mapfile -t ovmf_variaveis < <(compgen -G "$ovmf_dir/OVMF_VARS*.fd" 2>/dev/null \
+                | LC_ALL=C sort || true)
+            ovmf_vars="${ovmf_variaveis[0]:-}"
+        fi
+        if [ -z "$ovmf_vars" ]; then
+            v_falta "Par do firmware OVMF incompleto: nenhum OVMF_VARS*.fd em $ovmf_dir."
+        else
+            v_prova_arquivo "$ovmf_vars" "Modelo de variáveis OVMF" || true
+        fi
     fi
     v_fim
 }

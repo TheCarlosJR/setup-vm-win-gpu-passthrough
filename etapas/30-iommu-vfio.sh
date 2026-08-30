@@ -31,8 +31,36 @@ validar_cpu_amd_suportada() {
         || { CPU_SUPORTE_ERRO="$PLATAFORMA_ERRO"; return 1; }
 }
 
+IOMMU_GRUPOS_DIR=/sys/kernel/iommu_groups
+
+grupo_iommu_gpu_estado() {
+    # Tri-estado sobre `validar_grupo_iommu_gpu`, que devolve só 0/1 e por isso
+    # entregava "pendente" tanto para grupo divergente quanto para sysfs
+    # ilegível ou valor persistido sintaticamente inválido.
+    # 0 provado, 1 pendente, 2 indeterminado, 3 erro.
+    # O pré-teste usa o caminho literal de propósito: `validar_grupo_iommu_gpu`
+    # lê /sys sem passar por caminho_sistema, e um pré-teste roteado julgaria
+    # uma raiz que a validação real nem consulta.
+    if [ -e "$IOMMU_GRUPOS_DIR" ] \
+       && { [ ! -r "$IOMMU_GRUPOS_DIR" ] || [ ! -x "$IOMMU_GRUPOS_DIR" ]; }; then
+        IOMMU_ERRO="$IOMMU_GRUPOS_DIR existe mas não é legível; o grupo IOMMU da GPU não pôde ser observado."
+        return 2
+    fi
+    if validar_grupo_iommu_gpu "$@"; then
+        return 0
+    fi
+    case "$IOMMU_ERRO" in
+        # Nada foi observado: ferramenta, privilégio ou sysfs indisponível.
+        *'Não foi possível'*|*'não possui membros legíveis'*) return 2 ;;
+        # Observado e contraditório: valor persistido fora do formato ou BDF que
+        # hoje identifica outro dispositivo. Reexecutar a etapa não conserta.
+        *'inválido'*|*'agora identifica'*) return 3 ;;
+    esac
+    return 1
+}
+
 verificar() {
-    local rc_vfio=0
+    local rc_vfio=0 rc_grupo=0 lsmod_saida="" modulos_sys=""
     if ! plataforma_carregar; then
         v_erro "$PLATAFORMA_ERRO"
         v_fim
@@ -72,7 +100,22 @@ verificar() {
         1) v_falta "$VFIO_MODULES_ARQUIVO ausente ou divergente do bloco gerenciado." ;;
         *) v_erro "$VFIO_MODULES_ERRO" ;;
     esac
-    if lsmod | grep -q '^vfio_pci'; then
+    # `lsmod | grep -q '^vfio_pci'` casava também vfio_pci_core, que é um módulo
+    # DISTINTO e está presente neste host: o núcleo sozinho aprovava a etapa.
+    # A prova primária é o sysfs (roteável por caminho_sistema); lsmod entra só
+    # como segunda fonte, com o campo ancorado. Sem nenhuma das duas nada foi
+    # observado, e lsmod ausente produzia saída vazia que virava pendência.
+    modulos_sys="$(caminho_sistema /sys/module/vfio_pci)" || modulos_sys=""
+    if [ -n "$modulos_sys" ] && [ -d "$modulos_sys" ]; then
+        v_ok "Módulo vfio_pci carregado."
+    elif [ -n "$modulos_sys" ] && [ -d "${modulos_sys%/*}" ]; then
+        v_falta "Módulo vfio_pci não carregado."
+    elif ! command -v lsmod >/dev/null 2>&1; then
+        v_indeterminado "lsmod ausente e /sys/module indisponível; a carga de vfio_pci não pôde ser observada."
+    elif ! lsmod_saida="$(LC_ALL=C lsmod 2>/dev/null)" || [ -z "$lsmod_saida" ]; then
+        v_indeterminado "lsmod não devolveu a lista de módulos; a carga de vfio_pci não pôde ser observada."
+    elif LC_ALL=C awk '$1 == "vfio_pci" { achou = 1 } END { exit(achou ? 0 : 1) }' \
+            <<< "$lsmod_saida"; then
         v_ok "Módulo vfio_pci carregado."
     else
         v_falta "Módulo vfio_pci não carregado."
@@ -83,12 +126,15 @@ verificar() {
         v_falta "IOMMU_GROUP_GPU ainda não foi persistido pela fase B."
     elif [ -n "${GPU_AUDIO_PCI_ID:-}" ] && [ -z "${GPU_AUDIO_VENDOR_DEVICE_ID:-}" ]; then
         v_falta "GPU_AUDIO_PCI_ID existe, mas seu vendor/device não foi persistido."
-    elif validar_grupo_iommu_gpu \
-            "$GPU_PCI_ID" "${GPU_AUDIO_PCI_ID:-}" "$IOMMU_GROUP_GPU" \
-            "${GPU_VENDOR_DEVICE_ID:-}" "${GPU_AUDIO_VENDOR_DEVICE_ID:-}"; then
-        v_ok "GPU, áudio e bridges autorizadas formam exatamente o grupo IOMMU $IOMMU_GRUPO_ATUAL."
     else
-        v_falta "$IOMMU_ERRO"
+        rc_grupo=0
+        grupo_iommu_gpu_estado \
+            "$GPU_PCI_ID" "${GPU_AUDIO_PCI_ID:-}" "$IOMMU_GROUP_GPU" \
+            "${GPU_VENDOR_DEVICE_ID:-}" "${GPU_AUDIO_VENDOR_DEVICE_ID:-}" \
+            || rc_grupo=$?
+        v_classificar "$rc_grupo" \
+            "GPU, áudio e bridges autorizadas formam exatamente o grupo IOMMU $IOMMU_GRUPO_ATUAL." \
+            "$IOMMU_ERRO" "$IOMMU_ERRO" "$IOMMU_ERRO"
     fi
     v_fim
 }

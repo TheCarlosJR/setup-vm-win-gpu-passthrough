@@ -13,20 +13,51 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 verificar() {
-    if lscpu | grep -qiw svm; then
-        v_ok "Flag 'svm' presente na CPU."
-    else
-        v_falta "Flag 'svm' ausente: habilite SVM Mode na BIOS."
+    # As três checagens são leitura pura, mas cada uma precisa separar
+    # "não observei" de "observei e está errado": mandar o operador à BIOS
+    # porque o lscpu sumiu é exatamente o falso negativo que REQ-VERIFY-FAILCLOSED
+    # proíbe. Os caminhos de sistema passam por caminho_sistema para que o
+    # sandbox hermético consiga exercitar os ramos.
+    local saida_lscpu="" rc_lscpu=0 caminho_efi="" caminho_kvm=""
+    if v_exigir_comando lscpu; then
+        if saida_lscpu="$(LC_ALL=C lscpu 2>/dev/null)"; then
+            if [ -z "$saida_lscpu" ]; then
+                v_indeterminado "lscpu não devolveu nenhuma linha; as flags da CPU não puderam ser observadas."
+            elif grep -qiw svm <<< "$saida_lscpu"; then
+                v_ok "Flag 'svm' presente na CPU."
+            elif grep -Eq '^Flags:' <<< "$saida_lscpu"; then
+                v_falta "Flag 'svm' ausente: habilite SVM Mode na BIOS."
+            else
+                # Sem a linha de flags não há o que negar: a ausência de 'svm'
+                # não é observação, é falta de dado.
+                v_indeterminado "lscpu não listou a linha de flags da CPU; a presença de 'svm' não pôde ser observada."
+            fi
+        else
+            rc_lscpu=$?
+            v_indeterminado "lscpu falhou com código $rc_lscpu; as flags da CPU não puderam ser observadas."
+        fi
     fi
-    if [ -d /sys/firmware/efi ]; then
+    caminho_efi="$(caminho_sistema /sys/firmware/efi)" || caminho_efi=""
+    if [ -z "$caminho_efi" ]; then
+        v_indeterminado "Não foi possível resolver /sys/firmware/efi; o modo de firmware não pôde ser observado."
+    elif [ -d "$caminho_efi" ]; then
         v_ok "Sistema inicializado em modo UEFI."
     else
         v_falta "Sistema em Legacy/BIOS: confirme ou converta a instalação para UEFI antes de desativar o CSM."
     fi
-    if [ -e /dev/kvm ]; then
+    caminho_kvm="$(caminho_sistema /dev/kvm)" || caminho_kvm=""
+    if [ -z "$caminho_kvm" ]; then
+        v_indeterminado "Não foi possível resolver /dev/kvm; a aceleração KVM não pôde ser observada."
+    elif [ ! -e "$caminho_kvm" ]; then
+        v_falta "/dev/kvm ausente (SVM desabilitado na BIOS ou pilha KVM ainda não instalada)."
+    elif [ ! -c "$caminho_kvm" ]; then
+        v_erro "$caminho_kvm existe mas não é um dispositivo de caractere; a pilha KVM está inconsistente."
+    elif [ -r "$caminho_kvm" ] && [ -w "$caminho_kvm" ]; then
+        # O acesso é provado pelo builtin do bash (access(2)), que respeita
+        # grupos suplementares; existir não prova que o operador abre.
         v_ok "/dev/kvm existe (SVM ativo e módulo KVM carregado)."
     else
-        v_falta "/dev/kvm ausente (SVM desabilitado na BIOS ou pilha KVM ainda não instalada)."
+        v_falta "/dev/kvm existe, mas o operador não tem leitura e escrita nele (grupo kvm pendente: etapa 10)."
     fi
     v_fim
 }

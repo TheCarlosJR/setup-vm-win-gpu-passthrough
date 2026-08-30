@@ -30,9 +30,10 @@ verificar() {
             v_falta "$pendentes pacote(s) único(s) com ação APT pendente (dist-upgrade: $APT_DIST_INSTALACOES instalar/atualizar, $APT_DIST_REMOCOES remover; autoremove: $APT_AUTOREMOVE_EXCLUSIVAS remoções adicionais)."
         fi
     fi
-    if ! command -v fwupdmgr >/dev/null 2>&1; then
-        v_falta "fwupdmgr ausente; o estado de firmware ainda não pode ser consultado."
-    else
+    # Sem fwupdmgr o estado do firmware é DESCONHECIDO, não pendente: chamar
+    # isso de pendência sugeriria que rodar a etapa resolve, quando o que falta
+    # é a própria capacidade de observar. v_exigir_comando já emite a mensagem.
+    if v_exigir_comando fwupdmgr; then
         if saida_fw="$(fwupdmgr get-updates 2>&1)"; then
             rc_fw=0
         else

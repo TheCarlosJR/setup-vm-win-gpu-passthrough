@@ -37,10 +37,18 @@ resultado_driver() { printf '%s/driver-nvidia-%s.resultado\n' "$RESULTADOS_DIR" 
 
 ler_resultado() {
     # Parser restrito do arquivo de resultado (dados, nunca código).
+    # I9.9 (REQ-VERIFY-FAILCLOSED): tri-estado. O retorno 1 único fundia
+    # "arquivo ausente", "arquivo ilegível" e "registro corrompido sem STATUS",
+    # e o chamador anunciava "ainda não executada" nos três casos, inclusive
+    # quando havia registro e ele estava quebrado.
+    #   0 = lido e com STATUS;      1 = ausente (pendência);
+    #   2 = presente e não legível; 3 = presente, legível e sem STATUS.
     local arquivo="$1" chave valor
     RES_STATUS=""; RES_FASE=""; RES_MOTIVO=""; RES_DRIVER_VERSAO=""
     RES_SETUP_EXIT=""; RES_SMI_OK=""; RES_TOOLS=""; RES_TS_FIM=""
-    [ -f "$arquivo" ] && [ -r "$arquivo" ] || return 1
+    [ -e "$arquivo" ] || return 1
+    [ -f "$arquivo" ] || return 3
+    [ -r "$arquivo" ] || return 2
     while IFS='=' read -r chave valor; do
         case "$chave" in
             STATUS) RES_STATUS="$valor" ;;
@@ -55,27 +63,53 @@ ler_resultado() {
             *) : ;;
         esac
     done < "$arquivo"
-    [ -n "$RES_STATUS" ]
+    [ -n "$RES_STATUS" ] || return 3
+    return 0
 }
 
 verificar() {
-    [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido."; v_fim; }
-    if ! vm_existe "$VM_NAME"; then
+    local vm_estado=0 resultado_rc=0
+    # Ausente é pendência; presente e fora do formato é erro de configuração.
+    v_var_definida VM_NAME nome_vm_valido || v_fim
+    # `vm_existe` relatava "a VM não existe" também quando virsh estava ausente,
+    # o libvirtd fora do ar ou a permissão negada.
+    vm_existe_estado "$VM_NAME" || vm_estado=$?
+    if [ "$vm_estado" -eq 1 ]; then
         v_falta "VM '$VM_NAME' não existe (etapa 12)."
+        v_fim
+    fi
+    if [ "$vm_estado" -ne 0 ]; then
+        v_indeterminado "Estado da VM '$VM_NAME' não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
         v_fim
     fi
     local unidade resultado
     unidade="$(unidade_driver "$VM_NAME")"
     resultado="$(resultado_driver "$VM_NAME")"
+    # Sem systemctl, "unidade parada" é indistinguível de "não sei se ainda está
+    # rodando", e seguir lendo o arquivo de resultado trataria uma execução em
+    # curso como terminada. Ferramenta ausente é indeterminado, nunca sucesso.
+    v_exigir_comando systemctl || v_fim
     if systemctl is-active --quiet "$unidade" 2>/dev/null; then
         ler_resultado "$resultado" || true
         v_indeterminado "Instalação automática em andamento (fase: ${RES_FASE:-inicial}). Acompanhe com: journalctl -u $unidade -f"
         v_fim
     fi
-    if ! ler_resultado "$resultado"; then
-        v_falta "Instalação automática do driver ainda não executada."
-        v_fim
-    fi
+    ler_resultado "$resultado" || resultado_rc=$?
+    case "$resultado_rc" in
+        0) ;;
+        1)
+            v_falta "Instalação automática do driver ainda não executada."
+            v_fim
+            ;;
+        2)
+            v_indeterminado "Registro da execução existe mas não é legível ($resultado); o resultado anterior não pôde ser observado."
+            v_fim
+            ;;
+        *)
+            v_erro "Registro da execução em $resultado está corrompido (sem STATUS); apague-o e rode a etapa novamente."
+            v_fim
+            ;;
+    esac
     case "$RES_STATUS" in
         sucesso)
             if [ "$RES_SMI_OK" = "1" ]; then

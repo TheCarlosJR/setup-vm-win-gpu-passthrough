@@ -209,17 +209,33 @@ finalizar_transacao() {
     exit "$status"
 }
 
+# I9.9 (REQ-VERIFY-FAILCLOSED): validadores de uma variável para v_var_definida.
+# As faixas são as mesmas do schema canônico de configuração do core, para
+# que o verificador não aceite valor que a própria configuração recusa.
+_v_inteiro_vm_vcpus()   { inteiro_na_faixa "${1:-}" 1 65535; }
+_v_inteiro_vm_cores()   { inteiro_na_faixa "${1:-}" 1 65535; }
+_v_inteiro_vm_threads() { inteiro_na_faixa "${1:-}" 1 65535; }
+_v_inteiro_vm_ram_mb()  { inteiro_na_faixa "${1:-}" 1024 1048576; }
+_v_inteiro_hugepages()  { inteiro_na_faixa "${1:-}" 0 1048576; }
+_v_bootloader_valido()  { case "${1:-}" in grub|kernelstub) return 0 ;; *) return 1 ;; esac; }
+
 verificar() {
-    local var faltando=0 tmp="" params=""
+    local faltando=0 tmp="" params="" vm_estado=0
     [ -z "${HUGEPAGES_1G:-}" ] || params="$(param_hugepages)"
-    for var in VM_NAME CPUS_VM CPUS_HOST VM_CORES VM_THREADS VM_VCPUS VM_RAM_MB HUGEPAGES_1G BOOTLOADER; do
-        if [ -n "${!var:-}" ]; then
-            v_ok "$var=${!var}"
-        else
-            v_falta "$var ausente."
-            faltando=1
-        fi
-    done
+    # `[ -n ]` aprovava qualquer literal: lista de CPUs com faixa invertida,
+    # VM_RAM_MB com letras ou BOOTLOADER inexistente passavam como "definido" e
+    # o verificador seguia usando o valor. Ausente continua sendo pendência;
+    # presente e fora do formato é ERRO de configuração, porque reexecutar a
+    # etapa não conserta um literal inválido.
+    v_var_definida VM_NAME nome_vm_valido || faltando=1
+    v_var_definida CPUS_VM lista_cpus_valida || faltando=1
+    v_var_definida CPUS_HOST lista_cpus_valida || faltando=1
+    v_var_definida VM_CORES _v_inteiro_vm_cores || faltando=1
+    v_var_definida VM_THREADS _v_inteiro_vm_threads || faltando=1
+    v_var_definida VM_VCPUS _v_inteiro_vm_vcpus || faltando=1
+    v_var_definida VM_RAM_MB _v_inteiro_vm_ram_mb || faltando=1
+    v_var_definida HUGEPAGES_1G _v_inteiro_hugepages || faltando=1
+    v_var_definida BOOTLOADER _v_bootloader_valido || faltando=1
     if [ "$faltando" -eq 0 ]; then
         if validar_configuracao; then
             v_ok "Layout CPU, topologia, RAM e contagem derivada são coerentes."
@@ -227,24 +243,42 @@ verificar() {
             v_falta "$CPU_LAYOUT_ERRO"
         fi
     fi
-    if ! command -v python3 >/dev/null 2>&1 \
-       || ! command -v virsh >/dev/null 2>&1 \
-       || ! command -v virt-xml-validate >/dev/null 2>&1; then
-        v_falta "python3, virsh e/ou virt-xml-validate indisponíveis para validar o XML."
-    elif [ -n "${VM_NAME:-}" ] && vm_existe "$VM_NAME"; then
-        tmp="$(mktemp)"
-        if $VIRSH dumpxml --inactive "$VM_NAME" > "$tmp" \
-           && virt-xml-validate "$tmp" domain >/dev/null 2>&1 \
-           && [ "$faltando" -eq 0 ] \
-           && validar_xml_cpu_pinning "$tmp" "$CPUS_VM" "$CPUS_HOST" \
-                "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$VM_RAM_MB" sim; then
-            v_ok "XML possui pinning, topologia, memória e página de 1 GiB exatos."
-        else
-            v_falta "XML de CPU/HugePages incompleto ou divergente: ${XML_CPU_ERRO:-dump indisponível}."
-        fi
-        rm -f -- "$tmp"
+    # A guarda de ferramenta virou uma chamada própria: antes, python3/virsh/
+    # virt-xml-validate ausentes viravam UMA v_falta agregada, encadeada por &&
+    # com a validação real, e ausência de ferramenta ficava indistinguível de
+    # divergência de XML. Ferramenta ausente é indeterminado.
+    if ! v_exigir_comando python3 virsh virt-xml-validate; then
+        :
+    elif [ "$faltando" -ne 0 ]; then
+        v_falta "XML de CPU/HugePages não avaliado: a configuração acima precisa estar completa e válida."
     else
-        v_falta "VM '${VM_NAME:-não definida}' não existe."
+        vm_existe_estado "$VM_NAME" || vm_estado=$?
+        if [ "$vm_estado" -eq 1 ]; then
+            v_falta "VM '$VM_NAME' não existe."
+        elif [ "$vm_estado" -ne 0 ]; then
+            # `vm_existe` relatava "não existe" também com virsh mudo, libvirtd
+            # fora do ar ou permissão negada.
+            v_indeterminado "Estado da VM '$VM_NAME' não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
+        elif ! tmp="$(mktemp)"; then
+            # Sem guarda, `mktemp` falhando abortava o verificador sob set -e,
+            # sem sentinel, e o menu exibia "erro" sem diagnóstico nenhum.
+            v_indeterminado "Não foi possível criar o temporário para ler o XML da VM."
+        else
+            # Estágios separados: uma cadeia && de quatro termos colapsava numa
+            # única mensagem "XML incompleto ou divergente" que era FALSA quando
+            # a causa era o dump que falhou.
+            if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$tmp" 2>/dev/null; then
+                v_indeterminado "Não foi possível ler o XML inativo da VM '$VM_NAME'."
+            elif ! virt-xml-validate "$tmp" domain >/dev/null 2>&1; then
+                v_falta "O XML inativo da VM '$VM_NAME' não passa no schema libvirt."
+            elif validar_xml_cpu_pinning "$tmp" "$CPUS_VM" "$CPUS_HOST" \
+                    "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$VM_RAM_MB" sim; then
+                v_ok "XML possui pinning, topologia, memória e página de 1 GiB exatos."
+            else
+                v_falta "XML de CPU/HugePages incompleto ou divergente: ${XML_CPU_ERRO:-sem diagnóstico}."
+            fi
+            rm -f -- "$tmp"
+        fi
     fi
     if [ -n "$params" ] && cmdline_parametros_exatos "$params"; then
         v_ok "As três chaves de HugePages estão ativas uma única vez e com valores exatos."

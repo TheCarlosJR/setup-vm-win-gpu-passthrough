@@ -35,8 +35,54 @@ finalizar_etapa21() {
     exit "$rc"
 }
 
+# REQ-VERIFY-FAILCLOSED: `validar_modelo_diretorio_vm` só devolve 0/1 e colapsa
+# num único "pendente" três coisas diferentes: modelo observado e divergente,
+# ferramenta de ACL ausente e sistema de arquivos incapaz de carregar ACL POSIX
+# (risco real aqui: /vm sobre NTFS/fuseblk, onde chmod/setfacl são no-op). Estas
+# duas funções separam o que foi OBSERVADO do que não pôde ser observado.
+diretorio_sem_suporte_acl() {
+    # 0 somente quando o tipo do FS é conhecidamente incapaz de carregar ACL
+    # POSIX. Sem findmnt não há resposta e o chamador segue pela via normal:
+    # ausência de resposta nunca pode virar sucesso nem diagnóstico inventado.
+    local caminho="${1:-}" fstype=""
+    command -v findmnt >/dev/null 2>&1 || return 1
+    fstype="$(LC_ALL=C findmnt -no FSTYPE --target "$caminho" 2>/dev/null)" || return 1
+    case "$fstype" in
+        fuseblk|fuse.*|ntfs|ntfs3|vfat|exfat|msdos) return 0 ;;
+    esac
+    return 1
+}
+
+MODELO_VM_MOTIVO=""
+modelo_diretorio_vm_estado() {
+    # 0 provado, 1 pendente (observado e ainda não convergido), 2 indeterminado.
+    local diretorio="${1:-}"
+    MODELO_VM_MOTIVO=""
+    if ! command -v getfacl >/dev/null 2>&1 || ! command -v setfacl >/dev/null 2>&1; then
+        MODELO_VM_MOTIVO="getfacl/setfacl indisponíveis; a herança ACL de $diretorio não pôde ser observada"
+        return 2
+    fi
+    if validar_modelo_diretorio_vm "$@"; then
+        return 0
+    fi
+    MODELO_VM_MOTIVO="$GRUPO_VM_ERRO"
+    case "$GRUPO_VM_ERRO" in
+        *'indisponível para comprovar'*|*'Não foi possível ler as ACLs'*|*'Não foi possível inspecionar'*)
+            return 2
+            ;;
+        *'ACL de acesso/default'*|*'ACL inesperada'*)
+            if diretorio_sem_suporte_acl "$diretorio"; then
+                MODELO_VM_MOTIVO="o sistema de arquivos de $diretorio não carrega ACL POSIX; a herança não pôde ser observada"
+                return 2
+            fi
+            ;;
+    esac
+    return 1
+}
+
 verificar() {
     local usuario_ok=0 qemu_ok=0 grupos grupos_sessao grupo_alvo qemu_rc servico_rc
+    local modelo_rc=0
     if ! plataforma_carregar; then
         v_erro "$PLATAFORMA_ERRO"
         v_fim
@@ -73,22 +119,37 @@ verificar() {
     if [ "$usuario_ok" -eq 1 ]; then
         grupos="$(id -nG "$USUARIO_LINUX" 2>/dev/null || true)"
         grupos_sessao="$(id -nG 2>/dev/null || true)"
-        for grupo_alvo in "$PLATAFORMA_LIBVIRT_GRUPO" "$PLATAFORMA_KVM_GRUPO"; do
-            if ! lista_contem_token "$grupos" "$grupo_alvo"; then
-                v_falta "Usuário fora do grupo $grupo_alvo."
-            elif [ "$USUARIO_DIFERE_OPERADOR" -eq 0 ] \
-                 && ! lista_contem_token "$grupos_sessao" "$grupo_alvo"; then
-                v_falta "Grupo $grupo_alvo concedido no NSS, mas ausente desta sessão: faça logout/login para ativá-lo."
-            else
-                v_ok "Usuário no grupo $grupo_alvo."
-            fi
-        done
+        if [ -z "$grupos" ]; then
+            # `id` mudo (binário ausente, NSS fora do ar) devolvia lista vazia e
+            # TODO grupo virava "Usuário fora do grupo X": pendência inventada a
+            # partir de nada observado.
+            v_indeterminado "Não foi possível ler os grupos de '$USUARIO_LINUX'; a participação nos grupos não pôde ser observada."
+        else
+            for grupo_alvo in "$PLATAFORMA_LIBVIRT_GRUPO" "$PLATAFORMA_KVM_GRUPO"; do
+                if ! lista_contem_token "$grupos" "$grupo_alvo"; then
+                    v_falta "Usuário fora do grupo $grupo_alvo."
+                elif [ "$USUARIO_DIFERE_OPERADOR" -eq 0 ] && [ -z "$grupos_sessao" ]; then
+                    v_indeterminado "Grupo $grupo_alvo concedido no NSS, mas os grupos desta sessão não puderam ser lidos."
+                elif [ "$USUARIO_DIFERE_OPERADOR" -eq 0 ] \
+                     && ! lista_contem_token "$grupos_sessao" "$grupo_alvo"; then
+                    v_falta "Grupo $grupo_alvo concedido no NSS, mas ausente desta sessão: faça logout/login para ativá-lo."
+                else
+                    v_ok "Usuário no grupo $grupo_alvo."
+                fi
+            done
+        fi
     fi
-    if [ "$usuario_ok" -eq 1 ] && [ "$qemu_ok" -eq 1 ] \
-       && validar_modelo_diretorio_vm "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" "$VM_STORAGE_GROUP"; then
-        v_ok "/vm compartilhado por operador e QEMU via $VM_STORAGE_GROUP, 2770 e ACL padrão."
+    if [ "$usuario_ok" -eq 1 ] && [ "$qemu_ok" -eq 1 ]; then
+        modelo_rc=0
+        modelo_diretorio_vm_estado "$VM_DIR" "$USUARIO_LINUX" "$QEMU_USUARIO" \
+            "$VM_STORAGE_GROUP" || modelo_rc=$?
+        v_classificar "$modelo_rc" \
+            "/vm compartilhado por operador e QEMU via $VM_STORAGE_GROUP, 2770 e ACL padrão." \
+            "Modelo completo de /vm pendente: ${MODELO_VM_MOTIVO:-identidades ainda indisponíveis}." \
+            "Modelo completo de /vm não pôde ser observado: ${MODELO_VM_MOTIVO:-sem diagnóstico}." \
+            "Modelo completo de /vm inconsistente: ${MODELO_VM_MOTIVO:-sem diagnóstico}."
     else
-        v_falta "Modelo completo de /vm pendente: ${GRUPO_VM_ERRO:-identidades ainda indisponíveis}."
+        v_falta "Modelo completo de /vm pendente: identidades ainda indisponíveis."
     fi
     if ! command -v systemctl >/dev/null 2>&1; then
         v_indeterminado "systemctl indisponível para sondar libvirt."

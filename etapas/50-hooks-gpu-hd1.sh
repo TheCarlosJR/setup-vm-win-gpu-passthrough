@@ -39,6 +39,19 @@ NVIDIA_UDEV_FILTRO="/usr/local/sbin/vm-passthrough-nvidia-udev"
 NVIDIA_UDEV_REGRAS="/etc/udev/rules.d/71-nvidia.rules"
 MARCADOR_UDEV="# vm-passthrough-nvidia-udev-v1"
 MARCADOR_DISPATCHER="# vm-passthrough-qemu-dispatcher-v2"
+# I9.9 (REQ-VERIFY-FAILCLOSED): marcadores de conteúdo dos hooks gerados. Um
+# arquivo com apenas `#!/bin/bash` é executável e passa em `bash -n`, então
+# `[ -x ] && bash -n` aprovava hook vazio, truncado ou de outra geração. Cada
+# hook só é dado por provado quando o cabeçalho desta versão está legível nele.
+MARCADOR_HOOK_PREPARE='^# Hook prepare/begin: preflight fail-closed'
+MARCADOR_HOOK_START='^# Hook start/begin: confere o detach gerenciado'
+MARCADOR_HOOK_RELEASE='^# Hook release/end: valida reattach gerenciado'
+MARCADOR_GATE_REQUIRED='^vm-passthrough gate obrigatório para '
+# As regras da distro escrevem o modprobe em três grafias conhecidas
+# (`/sbin/modprobe`, `/usr/sbin/modprobe` e `modprobe` nu). Reconhecer só a
+# primeira fazia um host das outras duas ser relatado como "sem regras udev",
+# isto é, falso sucesso justamente no host em que o laço existe.
+NVIDIA_UDEV_PADRAO_MODPROBE='RUN[+]="[^"]*modprobe'
 STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 
 # Inspeção do XML de domínio vem do core Python pela ponte única: cardinalidade
@@ -94,14 +107,27 @@ estado_video_virtual() {
 
 nvidia_udev_origem() {
     # Caminho do arquivo de regras da distro que dispara modprobe direto.
-    # Ausência não é erro: um host sem esse pacote não tem laço a quebrar.
+    # I9.9 (REQ-VERIFY-FAILCLOSED): tri-estado, porque o retorno 1 único fundia
+    # "li os candidatos e nenhum dispara modprobe" com "não consegui ler", e o
+    # chamador transformava as duas coisas em `v_ok`.
+    #   0 = há regra que dispara modprobe (caminho no stdout);
+    #   1 = candidatos observados e nenhum dispara;
+    #   2 = não foi possível observar (grep ausente ou arquivo ilegível).
     local candidato
-    # Só o grep decide: um teste de arquivo embutido no shell leria o sistema
-    # real mesmo sob sandbox, e as duas leituras podiam discordar.
+    if ! command -v grep >/dev/null 2>&1; then
+        return 2
+    fi
+    # O grep continua sendo quem decide o CONTEÚDO: um teste de arquivo embutido
+    # no shell leria o sistema real mesmo sob sandbox, e as duas leituras podiam
+    # discordar. Os testes de arquivo abaixo só entram no ramo em que o grep já
+    # não casou, para separar "não tem regra" de "não deu para ler".
     for candidato in /usr/lib/udev/rules.d/71-nvidia.rules /lib/udev/rules.d/71-nvidia.rules; do
-        if grep -qF 'RUN+="/sbin/modprobe' "$candidato" 2>/dev/null; then
+        if LC_ALL=C grep -Eq "$NVIDIA_UDEV_PADRAO_MODPROBE" "$candidato" 2>/dev/null; then
             printf '%s\n' "$candidato"
             return 0
+        fi
+        if [ -e "$candidato" ] && [ ! -r "$candidato" ]; then
+            return 2
         fi
     done
     return 1
@@ -178,17 +204,20 @@ gerar_nvidia_udev_regras() {
     # ub-device-create, persistenced e runtime PM continuam valendo. Derivar do
     # arquivo da distro (em vez de fixar um conteúdo) faz uma atualização do
     # pacote NVIDIA aparecer como divergência em --verificar.
+    # As três grafias conhecidas do modprobe são tratadas juntas: reconhecer só
+    # `/sbin/modprobe` deixava a origem detectada e a conversão impossível nos
+    # hosts que usam `/usr/sbin/modprobe` ou `modprobe` nu.
     local origem="$1" destino="$2" corpo linhas_origem linhas_corpo trocas restantes
-    corpo="$(sed \
-        -e "s|RUN+=\"/sbin/modprobe -r \([A-Za-z0-9_-]\{1,\}\)\"|RUN+=\"$NVIDIA_UDEV_FILTRO unload \1\"|g" \
-        -e "s|RUN+=\"/sbin/modprobe \([A-Za-z0-9_-]\{1,\}\)\"|RUN+=\"$NVIDIA_UDEV_FILTRO load \1\"|g" \
+    corpo="$(sed -E \
+        -e "s|RUN[+]=\"(/usr)?(/s?bin/)?modprobe -r ([A-Za-z0-9_-]+)\"|RUN+=\"$NVIDIA_UDEV_FILTRO unload \3\"|g" \
+        -e "s|RUN[+]=\"(/usr)?(/s?bin/)?modprobe ([A-Za-z0-9_-]+)\"|RUN+=\"$NVIDIA_UDEV_FILTRO load \3\"|g" \
         -- "$origem")" || return 1
     linhas_origem="$(sed -n '$=' -- "$origem")" || return 1
     linhas_corpo="$(printf '%s\n' "$corpo" | sed -n '$=')" || return 1
     [ -n "$linhas_origem" ] && [ "$linhas_corpo" = "$linhas_origem" ] || return 1
     trocas="$(printf '%s\n' "$corpo" | grep -cF "$NVIDIA_UDEV_FILTRO " || true)"
     [ "${trocas:-0}" -ge 1 ] || return 1
-    restantes="$(printf '%s\n' "$corpo" | grep -cF 'RUN+="/sbin/modprobe' || true)"
+    restantes="$(printf '%s\n' "$corpo" | grep -cE "$NVIDIA_UDEV_PADRAO_MODPROBE" || true)"
     [ "${restantes:-0}" -eq 0 ] || return 1
     {
         printf '%s\n' "$MARCADOR_UDEV"
@@ -200,27 +229,38 @@ gerar_nvidia_udev_regras() {
 }
 
 verificar_hook() {
-    local arquivo="$1" descricao="$2"
-    if [ -x "$arquivo" ] && bash -n "$arquivo" 2>/dev/null; then
-        v_ok "$descricao presente e sintaticamente válido."
-    else
-        v_falta "$descricao ausente, não executável ou inválido: $arquivo"
+    # I9.9 (REQ-VERIFY-FAILCLOSED): `[ -x ] && bash -n` aprovava um arquivo que
+    # contém só `#!/bin/bash`. A prova agora é de conteúdo desta geração
+    # (v_prova_arquivo --exec --marcador); sintaxe quebrada em arquivo que TEM o
+    # cabeçalho é estado observado e errado, portanto erro, nunca pendência.
+    local arquivo="$1" descricao="$2" marcador="$3"
+    if [ -f "$arquivo" ] && [ -r "$arquivo" ] && ! bash -n "$arquivo" 2>/dev/null; then
+        v_erro "$descricao presente mas com sintaxe inválida ($arquivo); reexecute a etapa 14."
+        return 3
     fi
+    v_prova_arquivo "$arquivo" "$descricao" --exec --marcador "$marcador"
 }
 
 verificar_filtro_udev() {
     # D-GPU-UDEV-LOOP: sem este filtro o release "conclui com sucesso" e o
     # desktop congela segundos depois, porque os módulos nvidia continuam
     # recarregando em laço. A ausência é falta, não observação.
-    local origem="" esperado=""
-    if ! origem="$(nvidia_udev_origem)"; then
+    local origem="" esperado="" origem_rc=0
+    origem="$(nvidia_udev_origem)" || origem_rc=$?
+    if [ "$origem_rc" -eq 2 ]; then
+        # I9.9 (REQ-VERIFY-FAILCLOSED): antes, QUALQUER falha do grep (arquivo
+        # ilegível, grep ausente, outra grafia de modprobe) caía no mesmo ramo
+        # de "host sem regras" e virava v_ok. Não observar nunca é sucesso.
+        v_indeterminado "Regras udev da NVIDIA da distro não puderam ser lidas (arquivo presente e ilegível, ou grep indisponível); o laço de modprobe não pôde ser descartado."
+        return 0
+    fi
+    if [ "$origem_rc" -ne 0 ]; then
         v_ok "Host sem regras udev da NVIDIA que disparem modprobe; nenhum filtro é necessário."
         return 0
     fi
-    if [ -x "$NVIDIA_UDEV_FILTRO" ] && bash -n "$NVIDIA_UDEV_FILTRO" 2>/dev/null; then
-        v_ok "Filtro de modprobe das regras udev instalado: $NVIDIA_UDEV_FILTRO."
-    else
-        v_falta "Filtro de modprobe ausente ou inválido ($NVIDIA_UDEV_FILTRO): os módulos nvidia recarregam em laço na janela vfio e o desktop congela após desligar a VM."
+    if ! verificar_hook "$NVIDIA_UDEV_FILTRO" "Filtro de modprobe das regras udev" \
+            "$MARCADOR_UDEV"; then
+        info "Sem o filtro, os módulos nvidia recarregam em laço na janela vfio e o desktop congela após desligar a VM."
     fi
     esperado="$(mktemp)" || { v_indeterminado "Sem temporário para derivar as regras udev esperadas."; return 0; }
     if ! gerar_nvidia_udev_regras "$origem" "$esperado" 2>/dev/null; then
@@ -228,8 +268,14 @@ verificar_filtro_udev() {
         v_indeterminado "Não foi possível derivar as regras udev esperadas a partir de $origem."
         return 0
     fi
-    if [ ! -f "$NVIDIA_UDEV_REGRAS" ]; then
+    if [ ! -e "$NVIDIA_UDEV_REGRAS" ]; then
         v_falta "Override das regras udev da NVIDIA ausente: $NVIDIA_UDEV_REGRAS"
+    elif [ ! -f "$NVIDIA_UDEV_REGRAS" ]; then
+        v_erro "Override das regras udev da NVIDIA não é arquivo regular: $NVIDIA_UDEV_REGRAS"
+    elif [ ! -r "$NVIDIA_UDEV_REGRAS" ]; then
+        # `cmp -s` devolve 2 para arquivo ilegível, e o ramo `else` chamava isso
+        # de divergência: estado não observado sendo relatado como observado.
+        v_indeterminado "Override das regras udev existe mas não é legível; a convergência com $origem não pôde ser comprovada ($NVIDIA_UDEV_REGRAS)."
     elif cmp -s -- "$esperado" "$NVIDIA_UDEV_REGRAS"; then
         v_ok "Override das regras udev da NVIDIA em dia com $origem."
     else
@@ -250,27 +296,48 @@ verificar() {
     else
         v_falta "Dispatcher v2 ausente ou incompatível."
     fi
-    verificar_hook "$prep" "Hook prepare/begin"
-    verificar_hook "$inicio" "Hook start/begin"
-    verificar_hook "$release" "Hook release/end"
-    if [ -f "$release" ] && [ -r "$release" ]; then
-        if grep -q '^HOOK_LOG_DIR=' "$release" 2>/dev/null; then
-            v_ok "Hooks com log persistente de retomada em /var/log/vm-passthrough/hooks.log."
-        else
-            v_falta "Hooks instalados são de geração antiga (sem log persistente nem retomada reforçada do desktop); reexecute a etapa 14 para atualizá-los."
-        fi
+    verificar_hook "$prep" "Hook prepare/begin" "$MARCADOR_HOOK_PREPARE" || true
+    verificar_hook "$inicio" "Hook start/begin" "$MARCADOR_HOOK_START" || true
+    verificar_hook "$release" "Hook release/end" "$MARCADOR_HOOK_RELEASE" || true
+    # I9.9 (REQ-VERIFY-FAILCLOSED): o teste de geração ficava dentro de um
+    # `if [ -f ] && [ -r ]` SEM else, então release ilegível não emitia nada e
+    # sumia do relatório; e `grep -q '^HOOK_LOG_DIR='` aprovava qualquer valor,
+    # inclusive um diretório editado à mão. Agora a ausência continua sendo
+    # reportada só por verificar_hook, ilegível é indeterminado e o conteúdo é
+    # comparado com as linhas exatas que emitir_hook_log_fn gera.
+    if [ ! -e "$release" ]; then
+        :
+    elif [ ! -r "$release" ]; then
+        v_indeterminado "Hook release/end existe mas não é legível; a geração instalada não pôde ser comprovada ($release)."
+    elif LC_ALL=C grep -qxF 'HOOK_LOG_DIR=/var/log/vm-passthrough' "$release" 2>/dev/null \
+         && LC_ALL=C grep -qxF 'HOOK_LOG_ARQUIVO="$HOOK_LOG_DIR/hooks.log"' "$release" 2>/dev/null \
+         && LC_ALL=C grep -qE '^HOOK_VERSAO=' "$release" 2>/dev/null; then
+        v_ok "Hooks com log persistente de retomada em /var/log/vm-passthrough/hooks.log."
+    else
+        v_falta "Hooks instalados são de geração antiga (sem log persistente nem retomada reforçada do desktop); reexecute a etapa 14 para atualizá-los."
     fi
-    [ -f "$obrigatorio" ] \
-        && v_ok "Marcador fail-closed do gate presente." \
-        || v_falta "Marcador fail-closed do gate ausente: $obrigatorio"
-    if [ -e "/etc/libvirt/hooks/qemu.d/$VM_NAME/.vm-passthrough-installing" ]; then
+    # Um marcador que o hook não consegue ler não é fail-closed: legibilidade e
+    # conteúdo passaram a ser provados, no lugar do `[ -f ]` isolado.
+    v_prova_arquivo "$obrigatorio" "Marcador fail-closed do gate" \
+        --marcador "$MARCADOR_GATE_REQUIRED" || true
+    # A ausência do marcador de transação só prova alguma coisa se o diretório
+    # de hooks existir e for legível: sem isso, "não há marcador" era apenas o
+    # efeito de a etapa nunca ter rodado.
+    local dir_hooks="/etc/libvirt/hooks/qemu.d/$VM_NAME"
+    if [ -e "$dir_hooks/.vm-passthrough-installing" ]; then
         v_falta "Marcador de transação interrompida ainda existe; starts permanecem bloqueados."
+    elif [ ! -d "$dir_hooks" ]; then
+        v_falta "Diretório de hooks da VM ainda não existe ($dir_hooks); não há transação de instalação a avaliar."
+    elif [ ! -r "$dir_hooks" ] || [ ! -x "$dir_hooks" ]; then
+        v_indeterminado "Diretório de hooks $dir_hooks não é percorrível; a ausência do marcador de transação não pôde ser comprovada."
     else
         v_ok "Nenhuma transação de instalação pendente bloqueia a VM."
     fi
 
     verificar_filtro_udev
-    if vm_existe "$VM_NAME"; then
+    local vm_estado=0
+    vm_existe_estado "$VM_NAME" || vm_estado=$?
+    if [ "$vm_estado" -eq 0 ]; then
         local gpu_no_xml=0 video_estado=2
         if [ -n "${GPU_PCI_ID:-}" ] && hostdev_estado_xml "$GPU_PCI_ID" \
            && [ "$HOSTDEV_TOTAL" = 1 ] && [ "$HOSTDEV_EXATO" = 1 ]; then
@@ -296,7 +363,10 @@ verificar() {
             v_falta "Áudio da GPU ausente, duplicado ou sem managed='yes' no XML."
         fi
         if [ -n "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
-            v_falta "Configuração contraditória: HD1 definido e dispensado ao mesmo tempo."
+            # Alinhado a etapas/14-working-disk.sh e etapas/61-airlock.sh: a
+            # mesma classe de contradição de dispensa é erro (rc 3), não
+            # pendência. Reexecutar a etapa não resolve config contraditória.
+            v_erro "Configuração contraditória: HD1 definido e dispensado ao mesmo tempo."
         elif [ -z "${HD1_BY_ID_PATH:-}" ] && [ "${HD1_DISPENSADO:-}" = "sim" ]; then
             v_ok "Fluxo sem disco físico dedicado (opção 0 registrada)."
         elif [ -z "${HD1_BY_ID_PATH:-}" ]; then
@@ -315,8 +385,10 @@ verificar() {
         else
             v_falta "HD1 ausente, duplicado ou com atributos diferentes dos autorizados."
         fi
-    else
+    elif [ "$vm_estado" -eq 1 ]; then
         v_falta "VM '$VM_NAME' não existe."
+    else
+        v_indeterminado "Estado da VM '$VM_NAME' não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
     fi
     v_fim
 }
@@ -1040,10 +1112,17 @@ gerar_conjunto_hooks() {
     gerar_start "$diretorio/start.sh"
     gerar_release "$diretorio/release.sh"
     gerar_nvidia_udev_filtro "$diretorio/nvidia-udev-filtro.sh"
-    local udev_origem=""
-    if udev_origem="$(nvidia_udev_origem)"; then
+    local udev_origem="" udev_rc=0
+    udev_origem="$(nvidia_udev_origem)" || udev_rc=$?
+    if [ "$udev_rc" -eq 0 ]; then
         gerar_nvidia_udev_regras "$udev_origem" "$diretorio/nvidia.rules" || return 1
         chmod 0644 "$diretorio/nvidia.rules"
+    elif [ "$udev_rc" -ne 1 ]; then
+        # I9.9: rc 2 é "não consegui observar as regras da distro". Renderizar o
+        # conjunto assim mesmo instalaria hooks que podem deixar o laço de
+        # modprobe aberto, e a etapa reportaria sucesso por isso.
+        erro "Não foi possível ler as regras udev da NVIDIA da distro; a renderização dos hooks foi recusada."
+        return 1
     fi
     printf 'vm-passthrough gate obrigatório para %s\n' "$VM_NAME" > "$diretorio/required"
     printf 'transação de instalação em andamento para %s\n' "$VM_NAME" > "$diretorio/installing"

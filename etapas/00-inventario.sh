@@ -21,10 +21,47 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
 
 verificar() {
-    local inventario
-    if resolver_ultimo_inventario >/dev/null && inventario="$INVENTARIO_RESOLVIDO" \
-       && validar_inventario_principal "$inventario"; then
-        v_ok "Último inventário completo: $inventario"
+    # resolver_ultimo_inventario e validar_inventario_principal devolvem 1 para
+    # "nunca gerado", "ponteiro adulterado", "ilegível" e "core indisponível".
+    # O verificador não pode achatar os quatro em pendência: cada motivo manda o
+    # operador a um lugar diferente. Tudo aqui é leitura.
+    local inventario="" diretorio="" ponteiro="" alvo=""
+    diretorio="$(diretorio_inventario)" || diretorio=""
+    if [ -z "$diretorio" ]; then
+        v_indeterminado "Não foi possível resolver o diretório de inventários; o estado não pôde ser observado."
+        v_fim
+    fi
+    # Sem o core Python nada do schema é observável: o arquivo pode estar
+    # perfeito e ainda assim nenhuma prova é possível.
+    if ! python_core_disponivel; then
+        v_indeterminado "Core Python indisponível; o inventário não pôde ser validado: ${PYTHON_CORE_ERRO:-sem diagnóstico}."
+        v_fim
+    fi
+    if [ -d "$diretorio" ] && { [ ! -r "$diretorio" ] || [ ! -x "$diretorio" ]; }; then
+        v_indeterminado "Diretório de inventários sem permissão de leitura; o estado não pôde ser observado ($diretorio)."
+        v_fim
+    fi
+    ponteiro="$diretorio/ultimo-inventario.txt"
+    if [ -e "$ponteiro" ] && [ ! -L "$ponteiro" ]; then
+        v_erro "Ponteiro de inventário não é um link simbólico: $ponteiro"
+        v_fim
+    fi
+    if resolver_ultimo_inventario >/dev/null; then
+        inventario="$INVENTARIO_RESOLVIDO"
+        if validar_inventario_principal "$inventario"; then
+            v_ok "Último inventário completo: $inventario"
+        else
+            v_erro "Inventário publicado e ilegível ou fora do schema: ${INVENTARIO_ERRO:-sem diagnóstico}"
+        fi
+    elif [ -L "$ponteiro" ]; then
+        # Existe ponteiro publicado e ele NÃO resolve: o estado é contraditório,
+        # não é "a etapa ainda não rodou".
+        alvo="$(readlink -- "$ponteiro" 2>/dev/null)" || alvo=""
+        if [ -n "$alvo" ] && [ -e "$diretorio/$alvo" ] && [ ! -r "$diretorio/$alvo" ]; then
+            v_indeterminado "Inventário apontado por $ponteiro não é legível; o conteúdo não pôde ser comprovado."
+        else
+            v_erro "${INVENTARIO_ERRO:-Ponteiro de inventário inválido: $ponteiro}"
+        fi
     else
         v_falta "${INVENTARIO_ERRO:-Nenhum inventário válido gerado ainda.}"
     fi

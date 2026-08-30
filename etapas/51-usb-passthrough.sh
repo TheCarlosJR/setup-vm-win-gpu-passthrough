@@ -159,7 +159,31 @@ enumerar_controladoras() {
 pci_driver_atual() {
     local link="/sys/bus/pci/devices/$1/driver"
     [ -L "$link" ] || { printf 'sem_driver\n'; return 0; }
-    basename -- "$(readlink -f -- "$link")"
+    basename -- "$(readlink -f -- "$link" 2>/dev/null)" 2>/dev/null
+}
+
+# Drivers de controladora USB do HOST. Qualquer outro valor (pci-stub, um driver
+# novo, ou o vazio de um readlink que falhou) NÃO prova que as portas voltaram
+# para o host, então não pode virar v_ok.
+USB_DRIVERS_HOST=(xhci_hcd ehci-pci ohci-pci uhci_hcd)
+
+usb_driver_do_host() {
+    local alvo="${1:-}" conhecido
+    [ -n "$alvo" ] || return 1
+    for conhecido in "${USB_DRIVERS_HOST[@]}"; do
+        [ "$alvo" = "$conhecido" ] && return 0
+    done
+    return 1
+}
+
+# Estados que o `virsh domstate` publica. Qualquer outra coisa (string vazia de
+# um libvirt fora do ar, virsh ausente, permissão negada, rótulo novo) é
+# ausência de observação, nunca autorização para pular a prova em silêncio.
+vm_estado_conhecido() {
+    case "${1:-}" in
+        running|idle|paused|'in shutdown'|'shut off'|crashed|pmsuspended) return 0 ;;
+    esac
+    return 1
 }
 
 # Enumeração dos hostdevs USB do XML pelo core Python (também usada pelo
@@ -291,16 +315,37 @@ verificar() {
     # Etapa opcional: [ok] com pelo menos um dispositivo OU uma controladora
     # configurada e convergida. Sem nada, pendente-opcional, para não passar a
     # impressão de que teclado e mouse já estão garantidos dentro do Windows.
-    [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido."; v_fim; }
-    if ! vm_existe "$VM_NAME"; then
-        v_falta "VM '$VM_NAME' não existe."
+    # VM_NAME sintaticamente inválido passava direto; ausente é pendência,
+    # presente e fora da gramática do libvirt é erro de configuração.
+    v_var_definida VM_NAME nome_vm_valido || v_fim
+    local vm_rc=0
+    # vm_existe fundia "domínio não existe" com libvirtd fora do ar, virsh
+    # ausente e permissão negada; só o primeiro é pendência desta etapa.
+    vm_existe_estado "$VM_NAME" || vm_rc=$?
+    if [ "$vm_rc" -ne 0 ]; then
+        v_classificar "$vm_rc" "" \
+            "VM '$VM_NAME' não existe." \
+            "Estado da VM '$VM_NAME' no libvirt não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}." \
+            "Estado da VM '$VM_NAME' no libvirt não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
         v_fim
     fi
     local qtd=0 tem_algo=0 estado_vm="" usb_xml_lista=""
+    local estado_rc=0 vm_desligada=2 estado_avisado=0
     # Com a VM comprovadamente desligada, o verify também prova o RETORNO ao
     # host: dispositivos individuais reobservados por identidade estável e
     # controladora fora do vfio-pci. Com a VM ligada, o lado do host fica mudo.
-    estado_vm="$(LC_ALL=C $VIRSH domstate "$VM_NAME" 2>/dev/null || true)"
+    # Estado ILEGÍVEL não é nenhum dos dois: antes, um domstate mudo deixava
+    # estado_vm vazio, as duas provas de retorno eram puladas sem emitir nada e
+    # o v_ok de contagem fechava a etapa em 0 sozinho.
+    estado_vm="$(LC_ALL=C $VIRSH domstate "$VM_NAME" 2>/dev/null)" || estado_rc=$?
+    estado_vm="${estado_vm%%$'\n'*}"
+    if [ "$estado_rc" -ne 0 ] || ! vm_estado_conhecido "$estado_vm"; then
+        vm_desligada=2
+    elif [ "$estado_vm" = 'shut off' ]; then
+        vm_desligada=1
+    else
+        vm_desligada=0
+    fi
     if listar_usb_xml; then
         usb_xml_lista="$USB_XML_LISTA"
         qtd="$(printf '%s' "$usb_xml_lista" | sed '/^$/d' | wc -l)"
@@ -311,7 +356,12 @@ verificar() {
     if [ "${qtd:-0}" -ge 1 ]; then
         v_ok "Dispositivos USB em passthrough no XML: $qtd."
         tem_algo=1
-        if [ "$estado_vm" = "shut off" ]; then
+        if [ "$vm_desligada" -eq 2 ]; then
+            if [ "$estado_avisado" -eq 0 ]; then
+                estado_avisado=1
+                v_indeterminado "Estado da VM '$VM_NAME' não pôde ser lido (${estado_vm:-virsh domstate sem resposta}); o retorno dos dispositivos USB ao host não foi comprovado."
+            fi
+        elif [ "$vm_desligada" -eq 1 ]; then
             local par par_vendor par_produto par_kind par_digest par_bus par_device par_alias linha
             local usb_xml_lista usb_captura=""
             usb_xml_lista="$USB_XML_LISTA"
@@ -358,11 +408,21 @@ verificar() {
                 continue
             fi
             atual="$(pci_vendor_device_sysfs "$bdf" || true)"
+            if [ -z "$atual" ]; then
+                # Vendor/device ilegível não é prova de que a identidade mudou.
+                v_indeterminado "Vendor/device da controladora $bdf não pôde ser lido; a identidade dela não foi comprovada."
+                continue
+            fi
             if [ -n "${ids[$i]:-}" ] && [ "$atual" != "${ids[$i]}" ]; then
                 v_erro "Identidade da controladora $bdf mudou: esperado ${ids[$i]}, atual ${atual:-ilegível}."
                 continue
             fi
             grupo="$(pci_grupo_iommu "$bdf" || true)"
+            if [ -z "$grupo" ]; then
+                # Grupo ilegível também não prova mudança nem contaminação.
+                v_indeterminado "Grupo IOMMU da controladora $bdf não pôde ser lido; a exclusividade USB do grupo não foi comprovada."
+                continue
+            fi
             if [ -n "${USB_CTRL_IOMMU_GROUP:-}" ] && [ "$grupo" != "$USB_CTRL_IOMMU_GROUP" ]; then
                 v_erro "Grupo IOMMU da controladora $bdf mudou: esperado $USB_CTRL_IOMMU_GROUP, atual ${grupo:-ilegível}."
                 continue
@@ -376,14 +436,28 @@ verificar() {
                 1) v_falta "Controladora $bdf configurada, mas ausente do XML; rode --controladora de novo." ;;
                 *) v_indeterminado "Não foi possível ler o XML para conferir a controladora $bdf." ;;
             esac
-            if [ "$estado_vm" = "shut off" ]; then
+            if [ "$vm_desligada" -eq 2 ]; then
+                if [ "$estado_avisado" -eq 0 ]; then
+                    estado_avisado=1
+                    v_indeterminado "Estado da VM '$VM_NAME' não pôde ser lido (${estado_vm:-virsh domstate sem resposta}); o retorno da controladora ao host não foi comprovado."
+                fi
+            elif [ "$vm_desligada" -eq 1 ]; then
                 local driver
-                driver="$(pci_driver_atual "$bdf")"
-                case "$driver" in
-                    vfio-pci) v_falta "Controladora $bdf continua no vfio-pci com a VM desligada: as portas USB dela NÃO retornaram ao host." ;;
-                    sem_driver) v_falta "Controladora $bdf está sem driver com a VM desligada: as portas USB dela NÃO retornaram ao host." ;;
-                    *) v_ok "Controladora $bdf devolvida ao host (driver $driver) com a VM desligada." ;;
-                esac
+                driver="$(pci_driver_atual "$bdf" || true)"
+                # O ramo `*)` antigo aprovava QUALQUER coisa como devolução ao
+                # host, inclusive driver vazio (readlink que falhou) e drivers
+                # que não devolvem porta alguma, como pci-stub.
+                if [ "$driver" = vfio-pci ]; then
+                    v_falta "Controladora $bdf continua no vfio-pci com a VM desligada: as portas USB dela NÃO retornaram ao host."
+                elif [ "$driver" = sem_driver ]; then
+                    v_falta "Controladora $bdf está sem driver com a VM desligada: as portas USB dela NÃO retornaram ao host."
+                elif usb_driver_do_host "$driver"; then
+                    v_ok "Controladora $bdf devolvida ao host (driver $driver) com a VM desligada."
+                elif [ -z "$driver" ]; then
+                    v_indeterminado "Driver atual da controladora $bdf não pôde ser lido; o retorno dela ao host não foi comprovado."
+                else
+                    v_indeterminado "Controladora $bdf está no driver '$driver', que não é driver USB de host conhecido; o retorno dela ao host não foi comprovado."
+                fi
             fi
         done
     fi

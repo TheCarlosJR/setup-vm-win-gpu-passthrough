@@ -49,13 +49,21 @@ if resolver_destino_backups; then
 fi
 
 verificar() {
-    local tmp rc
-    [ -n "${VM_NAME:-}" ] || { v_falta "VM_NAME não definido."; v_fim; }
-    [ -n "${QCOW2_PATH:-}" ] || { v_falta "QCOW2_PATH não definido."; v_fim; }
+    local tmp rc vm_estado=0
+    # I9.9 (REQ-VERIFY-FAILCLOSED): `[ -n ]` aceitava qualquer literal. Ausente
+    # continua sendo pendência; valor presente e fora do formato é erro de
+    # configuração, porque reexecutar a etapa não conserta um literal inválido.
+    v_var_definida VM_NAME nome_vm_valido || v_fim
+    v_var_definida QCOW2_PATH caminho_absoluto_seguro || v_fim
+    # `vm_existe` fundia "domínio ausente" com "libvirt não respondeu, virsh
+    # ausente ou permissão negada", e os dois viravam pendência.
+    vm_existe_estado "$VM_NAME" || vm_estado=$?
     if ! command -v python3 >/dev/null 2>&1; then
         v_erro "python3 indisponível para validar cardinalidade do disco QCOW2."
-    elif ! vm_existe "$VM_NAME"; then
+    elif [ "$vm_estado" -eq 1 ]; then
         v_falta "VM '$VM_NAME' não existe."
+    elif [ "$vm_estado" -ne 0 ]; then
+        v_indeterminado "Estado da VM '$VM_NAME' não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
     else
         tmp="$(mktemp)" || { v_erro "Não foi possível criar temporário para o XML."; v_fim; }
         if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$tmp"; then
@@ -77,12 +85,57 @@ verificar() {
     elif [ "$BACKUP_DEPENDS_ON_WORKING_DISK" -eq 1 ] \
          && ! validar_working_disk_montado "$WORKING_DISK"; then
         v_falta "Backup protegido pelo workingDisk indisponível: $WORKING_DISK_ERRO"
-    elif [ -d "$DESTINO_BACKUPS" ]; then
-        v_ok "Backup: pasta de destino existe (isso não comprova que haja backup)."
-    else
+    elif [ ! -d "$DESTINO_BACKUPS" ]; then
         v_falta "Backup pendente: pasta $DESTINO_BACKUPS ausente."
+    else
+        # I9.9 (REQ-VERIFY-FAILCLOSED): o ramo anterior fechava em rc 0 com a
+        # mensagem "isso não comprova que haja backup", ou seja, admitia por
+        # escrito que estava aprovando sem prova. A pasta pronta é condição
+        # necessária e nunca suficiente: sem um conjunto de backup com data (e
+        # tamanho, quando o conjunto é arquivo) legíveis, o estado não foi
+        # observado e o resultado é indeterminado.
+        provar_backup_existente
     fi
     v_fim
+}
+
+provar_backup_existente() {
+    local entrada nome alvo="" alvo_mtime=0 mtime tamanho data descricao
+    if [ ! -r "$DESTINO_BACKUPS" ] || [ ! -x "$DESTINO_BACKUPS" ]; then
+        v_indeterminado "Backup não comprovado: a pasta $DESTINO_BACKUPS existe mas não pôde ser lida."
+        return 0
+    fi
+    v_exigir_comando stat || return 0
+    for entrada in "$DESTINO_BACKUPS"/*; do
+        [ -e "$entrada" ] || continue
+        mtime="$(LC_ALL=C stat -c '%Y' -- "$entrada" 2>/dev/null)" || mtime=""
+        [ -n "$mtime" ] || continue
+        case "$mtime" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$mtime" -gt "$alvo_mtime" ]; then
+            alvo="$entrada"
+            alvo_mtime="$mtime"
+        fi
+    done
+    if [ -z "$alvo" ]; then
+        v_indeterminado "Backup não comprovado: a pasta $DESTINO_BACKUPS existe, mas nenhum conjunto de backup com data legível foi encontrado (esta etapa só prepara a pasta; o backup em si é feito por util/backup-vm.sh)."
+        return 0
+    fi
+    nome="${alvo##*/}"
+    data="$(LC_ALL=C date -d "@$alvo_mtime" '+%F %T' 2>/dev/null)" || data=""
+    [ -n "$data" ] || data="epoch $alvo_mtime"
+    if [ -d "$alvo" ]; then
+        descricao="conjunto em diretório, modificado em $data"
+    else
+        tamanho="$(LC_ALL=C stat -c '%s' -- "$alvo" 2>/dev/null)" || tamanho=""
+        if [ -z "$tamanho" ]; then
+            v_indeterminado "Backup não comprovado: '$nome' existe em $DESTINO_BACKUPS, mas o tamanho não pôde ser lido."
+            return 0
+        fi
+        descricao="$tamanho bytes, modificado em $data"
+    fi
+    v_ok "Backup: conjunto mais recente em $DESTINO_BACKUPS é '$nome' ($descricao)."
 }
 [ "${1:-}" = "--verificar" ] && verificar
 

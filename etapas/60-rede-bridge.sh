@@ -1669,10 +1669,14 @@ inspecionar_colisao_rede() {
 }
 
 nic_vm_contagem() {
+    # I9.9 (REQ-VERIFY-FAILCLOSED): dump que falha e inspeção que falha
+    # imprimiam "0" com rc 0, e o chamador relatava isso como "o XML não contém
+    # exatamente uma NIC" — uma afirmação sobre um XML que nunca foi lido.
+    # Agora o rc é separado do valor: 0 = contagem observada no stdout;
+    # 2 = não foi possível observar.
     local xml
-    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || { printf '0\n'; return 0; }
-    inspecionar_nic_dominio "$xml" NICVM_ nic_mac "${VM_NIC_MAC,,}" \
-        || { printf '0\n'; return 0; }
+    xml="$($VIRSH dumpxml --inactive "$VM_NAME" 2>/dev/null)" || return 2
+    inspecionar_nic_dominio "$xml" NICVM_ nic_mac "${VM_NIC_MAC,,}" || return 2
     printf '%s\n' "$NICVM_MAC_COUNT"
 }
 
@@ -1778,7 +1782,11 @@ rede_gerenciada() {
 }
 
 rede_nat_xml_confere() {
-    # Retornos: 0=confere, 1=diverge/estado ausente, 2=erro operacional.
+    # Retornos: 0=confere, 1=diverge/estado ausente, 2=erro operacional
+    # (o estado não pôde ser OBSERVADO), 3=XML obtido porém não analisável
+    # (estado observado e inválido). A separação 2/3 existe porque o
+    # `--verificar` chamava v_falta para os dois, e "não consegui consultar o
+    # libvirt" virava pendência como se a etapa não tivesse rodado.
     local estado="${1:-}" xml status
     REDE_XML_ERRO=""
     derivar_parametros_nat || return 1
@@ -1813,7 +1821,7 @@ rede_nat_xml_confere() {
     if ! inspecionar_rede_xml "$xml" NATX_ \
             marker "$REDE_MARCADOR" nic_mac "${VM_NIC_MAC,,}" vm_ip "$NAT_VM_IP"; then
         REDE_XML_ERRO="Falha ao analisar o XML $estado da rede '$REDE_LIBVIRT'."
-        return 2
+        return 3
     fi
     # Um único bloco <ip> é o contrato desta etapa: zero ou vários significam
     # configuração fora do modelo gerenciado e devem divergir, não ser aceitos
@@ -1835,7 +1843,8 @@ rede_nat_xml_confere() {
 }
 
 verificar() {
-    local status
+    local status vm_estado=0 nic_rc=0 nic_contagem=""
+    local base_virtual="" flags_virtual="" operstate_virtual=""
     if ! validar_config_rede; then
         v_falta "$REDE_CONFIG_ERRO"
         v_fim
@@ -1854,11 +1863,21 @@ verificar() {
         v_falta "VM_NIC_MAC inválido: $VM_NIC_MAC"
         v_fim
     fi
-    if ! vm_existe "$VM_NAME"; then
+    # `vm_existe` chamava de "a VM não existe" também virsh ausente, libvirtd
+    # fora do ar e permissão negada: pendência no lugar de indeterminado.
+    vm_existe_estado "$VM_NAME" || vm_estado=$?
+    if [ "$vm_estado" -eq 1 ]; then
         v_falta "VM '$VM_NAME' não existe."
         v_fim
     fi
-    if [ "$(nic_vm_contagem)" = "1" ]; then
+    if [ "$vm_estado" -ne 0 ]; then
+        v_indeterminado "Estado da VM '$VM_NAME' não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
+        v_fim
+    fi
+    nic_contagem="$(nic_vm_contagem)" || nic_rc=$?
+    if [ "$nic_rc" -ne 0 ]; then
+        v_indeterminado "Não foi possível ler o XML inativo de '$VM_NAME' para contar as NICs com MAC $VM_NIC_MAC."
+    elif [ "$nic_contagem" = "1" ]; then
         v_ok "NIC identificada pelo MAC persistido $VM_NIC_MAC."
     else
         v_falta "O XML da VM não contém exatamente uma NIC com MAC $VM_NIC_MAC."
@@ -1945,12 +1964,16 @@ verificar() {
         else
             v_falta "$ESTADO_REDE_ERRO"
         fi
+        # rc 2 (não observado) e rc 1 (divergente) caíam ambos em v_falta, e a
+        # etapa não tinha nenhuma classe de erro: agora cada retorno tem a sua.
         if rede_nat_xml_confere persistente; then
             v_ok "Definição persistente NAT corresponde a uplink/bridge/sub-rede/reserva."
         else
             status=$?
-            if [ "$status" -eq 2 ]; then
-                v_falta "$REDE_XML_ERRO"
+            if [ "$status" -eq 3 ]; then
+                v_erro "$REDE_XML_ERRO"
+            elif [ "$status" -eq 2 ]; then
+                v_indeterminado "$REDE_XML_ERRO"
             else
                 v_falta "Definição persistente da rede NAT não corresponde à configuração."
             fi
@@ -1959,16 +1982,37 @@ verificar() {
             v_ok "Backend NAT ativo corresponde à definição persistente selecionada."
         else
             status=$?
-            if [ "$status" -eq 2 ]; then
-                v_falta "$REDE_XML_ERRO"
+            if [ "$status" -eq 3 ]; then
+                v_erro "$REDE_XML_ERRO"
+            elif [ "$status" -eq 2 ]; then
+                v_indeterminado "$REDE_XML_ERRO"
             else
                 v_falta "Backend NAT ativo diverge da configuração persistente (reinício da rede pendente)."
             fi
         fi
-        if ip link show "$REDE_BRIDGE_LIBVIRT" 2>/dev/null | grep -q '<[^>]*UP'; then
-            v_ok "Bridge virtual $REDE_BRIDGE_LIBVIRT ativa."
+        # `ip link show | grep '<[^>]*UP'` casava a palavra UP em qualquer lugar
+        # das flags, não separava UP administrativo de estado operacional e
+        # transformava `ip` ausente em pendência. A leitura passa a ser do
+        # sysfs por caminho_sistema, com o bit IFF_UP (0x1) explícito: para uma
+        # bridge NAT sem VM ligada, operstate é `down` por falta de carrier e
+        # isso nunca significou que a bridge não está ativa.
+        base_virtual="$(caminho_sistema "/sys/class/net/$REDE_BRIDGE_LIBVIRT")" || base_virtual=""
+        if [ -z "$base_virtual" ]; then
+            v_indeterminado "Caminho de sysfs da bridge virtual $REDE_BRIDGE_LIBVIRT não pôde ser resolvido."
+        elif [ ! -d "$base_virtual" ]; then
+            v_falta "Bridge virtual $REDE_BRIDGE_LIBVIRT inexistente."
+        elif [ ! -r "$base_virtual/flags" ]; then
+            v_indeterminado "Bridge virtual $REDE_BRIDGE_LIBVIRT existe, mas $base_virtual/flags não é legível; o estado administrativo não pôde ser observado."
         else
-            v_falta "Bridge virtual $REDE_BRIDGE_LIBVIRT inexistente ou down."
+            IFS= read -r flags_virtual < "$base_virtual/flags" || flags_virtual=""
+            IFS= read -r operstate_virtual < "$base_virtual/operstate" 2>/dev/null || operstate_virtual=""
+            if [[ ! "$flags_virtual" =~ ^0[xX][0-9a-fA-F]{1,8}$ ]]; then
+                v_indeterminado "Flags de $REDE_BRIDGE_LIBVIRT em formato inesperado ('$flags_virtual'); o estado administrativo não pôde ser observado."
+            elif (( (16#${flags_virtual#0[xX]}) & 1 )); then
+                v_ok "Bridge virtual $REDE_BRIDGE_LIBVIRT ativa."
+            else
+                v_falta "Bridge virtual $REDE_BRIDGE_LIBVIRT existe mas está administrativamente down (operstate=${operstate_virtual:-desconhecido})."
+            fi
         fi
         if nic_vm_confere_fonte network network "$REDE_LIBVIRT"; then
             v_ok "VM usando network=$REDE_LIBVIRT."

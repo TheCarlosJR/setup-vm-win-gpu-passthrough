@@ -948,6 +948,10 @@ cat > "$BIN_EP/virsh" <<'SCRIPT'
 #!/bin/bash
 printf 'virsh|%s\n' "$*" >> "$ENTRYPOINT_LOG"
 case "$*" in
+    # I9.9: a etapa 9 passou a provar a instalação com `--version`, que é
+    # somente leitura. Sem este ramo o mock registra escape e sai 126, e o
+    # verificador classifica a instalação como quebrada (rc 3).
+    '--version') printf 'virsh 10.0.0\n'; exit 0 ;;
     '--connect qemu:///system list --all')
         [ "${MOCK_VIRSH_RC:-0}" -eq 0 ] && printf ' Id   Name      State\n -    fixture   shut off\n'
         exit "${MOCK_VIRSH_RC:-0}"
@@ -995,6 +999,8 @@ cat > "$BIN_EP/qemu-img" <<'SCRIPT'
 #!/bin/bash
 printf 'qemu-img|%s\n' "$*" >> "$ENTRYPOINT_LOG"
 case "${1:-}" in
+    # I9.9: sonda somente leitura da etapa 9.
+    --version) printf 'qemu-img 8.2.2\n'; exit 0 ;;
     create)
         alvo="${4:-}"
         if [ "${MOCK_QCOW2_CREATE_ALLOWED:-0}" = 1 ] && [ "$#" -eq 5 ] \
@@ -1087,6 +1093,17 @@ case "$*" in
     *) exit 1 ;;
 esac
 SCRIPT
+# I9.9: `dpkg -s` devolve 0 para pacote removido com config-files, então a
+# prova de instalação passou a usar `dpkg-query -W -f='${Status}'`. Sem este
+# shim o sandbox não tem a ferramenta e todo pacote vira indeterminado.
+cat > "$BIN_EP/dpkg-query" <<'SCRIPT'
+#!/bin/bash
+printf 'dpkg-query|%s\n' "$*" >> "$ENTRYPOINT_LOG"
+case "$*" in
+    '-W -f=${Status} -- '*) printf 'install ok installed' ;;
+    *) exit 1 ;;
+esac
+SCRIPT
 cat > "$BIN_EP/uname" <<'SCRIPT'
 #!/bin/bash
 printf 'uname|%s\n' "$*" >> "$ENTRYPOINT_LOG"
@@ -1125,6 +1142,13 @@ exit 126
 SCRIPT
 cat > "$BIN_EP/virt-install" <<'SCRIPT'
 #!/bin/bash
+# I9.9: `--version` é sonda somente leitura da etapa 9 e precisa responder
+# antes da exigência de selo, que só vale para a criação real da VM.
+if [ "$*" = --version ]; then
+    printf 'virt-install|--version\n' >> "$ENTRYPOINT_LOG"
+    printf 'virt-install 4.1.0\n'
+    exit 0
+fi
 estado="$(cat "$PASSTHROUGH_TEST_ROOT/selo-vm.estado" 2>/dev/null || printf ausente)"
 printf 'virt-install|selo=%s|%s\n' "$estado" "$*" >> "$ENTRYPOINT_LOG"
 if [ "$estado" != selado ]; then

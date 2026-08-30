@@ -117,16 +117,27 @@ validar_pinning_vm() {
     rm -f -- "$tmp"
 }
 
+# I9.9 (REQ-VERIFY-FAILCLOSED): validadores de uma variável para v_var_definida,
+# com as mesmas faixas do schema canônico de configuração do core.
+_v_inteiro_vm_vcpus()   { inteiro_na_faixa "${1:-}" 1 65535; }
+_v_inteiro_vm_cores()   { inteiro_na_faixa "${1:-}" 1 65535; }
+_v_inteiro_vm_threads() { inteiro_na_faixa "${1:-}" 1 65535; }
+_v_inteiro_vm_ram_mb()  { inteiro_na_faixa "${1:-}" 1024 1048576; }
+_v_bootloader_valido()  { case "${1:-}" in grub|kernelstub) return 0 ;; *) return 1 ;; esac; }
+
 verificar() {
-    local var faltando=0 params=""
-    for var in VM_NAME CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB BOOTLOADER; do
-        if [ -n "${!var:-}" ]; then
-            v_ok "$var=${!var}"
-        else
-            v_falta "$var ausente."
-            faltando=1
-        fi
-    done
+    local faltando=0 params="" vm_estado=0
+    # `[ -n ]` aprovava qualquer literal, e o isolamento é escrito na cmdline a
+    # partir de CPUS_VM: uma lista malformada aprovada aqui vira parâmetro de
+    # boot inválido. Ausente é pendência; presente e fora do formato é erro.
+    v_var_definida VM_NAME nome_vm_valido || faltando=1
+    v_var_definida CPUS_VM lista_cpus_valida || faltando=1
+    v_var_definida CPUS_HOST lista_cpus_valida || faltando=1
+    v_var_definida VM_VCPUS _v_inteiro_vm_vcpus || faltando=1
+    v_var_definida VM_CORES _v_inteiro_vm_cores || faltando=1
+    v_var_definida VM_THREADS _v_inteiro_vm_threads || faltando=1
+    v_var_definida VM_RAM_MB _v_inteiro_vm_ram_mb || faltando=1
+    v_var_definida BOOTLOADER _v_bootloader_valido || faltando=1
     if [ "$faltando" -eq 0 ]; then
         params="$(param_isolamento)"
         if validar_layout_configurado; then
@@ -139,13 +150,24 @@ verificar() {
         else
             v_falta "$SUPORTE_ISOLAMENTO_ERRO"
         fi
-        if command -v python3 >/dev/null 2>&1 \
-           && command -v virsh >/dev/null 2>&1 \
-           && command -v virt-xml-validate >/dev/null 2>&1 \
-           && validar_pinning_vm; then
-            v_ok "O XML inativo está pinado exatamente em CPUS_VM/CPUS_HOST."
+        # A guarda de ferramenta virou uma chamada própria: antes, as três
+        # ausências e a divergência real colapsavam na MESMA v_falta, com a
+        # mensagem "dependência indisponível" servindo para os dois casos.
+        if ! v_exigir_comando python3 virsh virt-xml-validate; then
+            :
         else
-            v_falta "Pinning exato da VM não comprovado: ${XML_CPU_ERRO:-dependência indisponível}."
+            vm_existe_estado "$VM_NAME" || vm_estado=$?
+            if [ "$vm_estado" -eq 1 ]; then
+                v_falta "A VM '$VM_NAME' não existe."
+            elif [ "$vm_estado" -ne 0 ]; then
+                # `vm_existe` dizia "não existe" também com virsh mudo,
+                # libvirtd fora do ar ou permissão negada.
+                v_indeterminado "Estado da VM '$VM_NAME' não pôde ser observado: ${VM_EXISTE_MOTIVO:-sem diagnóstico}."
+            elif validar_pinning_vm; then
+                v_ok "O XML inativo está pinado exatamente em CPUS_VM/CPUS_HOST."
+            else
+                v_falta "Pinning exato da VM não comprovado: ${XML_CPU_ERRO:-sem diagnóstico}."
+            fi
         fi
         if cmdline_parametros_exatos "$params"; then
             v_ok "isolcpus, nohz_full e rcu_nocbs estão ativos uma única vez e com valores exatos."
