@@ -73,7 +73,7 @@ guard_mutation inventory.write || exit 1
 exigir_nao_root
 exigir_sudo
 
-# O caminho literal dos relatórios existe em UM lugar só (`lib/common.sh`); aqui
+# O caminho literal dos relatórios existe em UM lugar só (`lib/shell/base.sh`); aqui
 # ele vem do acessor, para que o inventário caia na mesma raiz de estado do log
 # de ações e das listagens de grupos IOMMU.
 DIRETORIO_INVENTARIO="$(diretorio_inventario)"

@@ -878,7 +878,7 @@ modo_dispositivos() {
         mapfile -t LINHAS < <(LC_ALL=C lsusb)
         [ "${#LINHAS[@]}" -gt 0 ] || falhar "lsusb não listou nenhum dispositivo."
         # Os rótulos só decoram a lista; a identidade continua saindo de $LINHAS.
-        # A cor sai das constantes de lib/common.sh, que ficam VAZIAS quando não
+        # A cor sai das constantes de lib/shell/ui.sh, que ficam VAZIAS quando não
         # há terminal. Por isso cada marca também é texto: em captura, log e
         # pipe a informação continua legível sem depender de escape ANSI.
         # Uma única leitura do XML por rodada serve às marcas da lista e à

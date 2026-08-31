@@ -44,13 +44,6 @@ fi
 [ -n "${LIBVIRT_SH_CARREGADO:-}" ] && return 0
 LIBVIRT_SH_CARREGADO=1
 
-# --- Bootloader e parâmetros de kernel (etapas 3 e 11) -----------------------
-# I5.6: toda a implementação vive em lib/shell/boot.sh, carregado logo no topo
-# desta fachada. Nenhuma cópia mutante permanece aqui: os nomes públicos
-# (detectar_bootloader, validar_bootloader_configurado, cmdline_*,
-# kernel_param_add/del, kernel_parametros_*) continuam disponíveis porque o
-# módulo é sourceado, não duplicado.
-
 # Comando único de acesso ao libvirt do sistema. Toda etapa passa por ele; não
 # existe segundo cliente nem conexão de sessão.
 VIRSH="virsh --connect qemu:///system"
@@ -116,6 +109,15 @@ libvirt_backend_reiniciar() {
     fi
     return 0
 }
+
+# --- Acesso do operador a qemu:///system --------------------------------------
+# REQ-VERIFY-FAILCLOSED aplicado à conexão libvirt: falha de conexão não é
+# sinônimo de runtime quebrado. A concessão de grupo só entra na sessão depois
+# de logout/login, e quem concede é a etapa 10. Sem classificar a causa, uma
+# pendência conhecida e resolvível vira erro, e o operador perde a ação certa.
+
+LIBVIRT_ACESSO_ERRO=""
+LIBVIRT_ACESSO_MOTIVO=""
 
 libvirt_acesso_operador() {
     # Prova o acesso desta sessão a qemu:///system e classifica a falha.

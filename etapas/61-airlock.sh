@@ -288,7 +288,7 @@ classificar_airlock_working_disk() {
 # chave não prova que a chave é válida, é única e está fora do alcance da
 # conta de transferência.
 #
-# Contrato de retorno, igual ao dos helpers de lib/common.sh:
+# Contrato de retorno, igual ao dos helpers de lib/shell/status.sh:
 #   0 provado | 1 pendente | 2 indeterminado | 3 erro
 # Cada avaliador publica AIRLOCK_AVAL_TIPO (ok|pendente|indeterminado|erro),
 # AIRLOCK_AVAL_ERRO (mensagem acionável quando não provado) e
@@ -296,7 +296,7 @@ classificar_airlock_working_disk() {
 #
 # Os avaliadores NÃO imprimem: quem imprime é o --verificar (via v_classificar)
 # ou o apply (via falhar). A exceção é o avaliador que delega a um helper de
-# lib/common.sh que já emite a própria mensagem; nesse caso ele marca
+# lib/shell/status.sh que já emite a própria mensagem; nesse caso ele marca
 # AIRLOCK_AVAL_RELATADO=1 para o chamador não duplicar a linha.
 declare -A SSHD_EFETIVO=()
 AIRLOCK_AVAL_TIPO=""
@@ -329,7 +329,7 @@ airlock_aval_pendente()      { AIRLOCK_AVAL_TIPO=pendente;      AIRLOCK_AVAL_ERR
 airlock_aval_indeterminado() { AIRLOCK_AVAL_TIPO=indeterminado; AIRLOCK_AVAL_ERRO="$1";    return 2; }
 airlock_aval_erro()          { AIRLOCK_AVAL_TIPO=erro;          AIRLOCK_AVAL_ERRO="$1";    return 3; }
 airlock_aval_delegado() {
-    # O helper de lib/common.sh já emitiu a mensagem e já contabilizou a
+    # O helper de lib/shell/status.sh já emitiu a mensagem e já contabilizou a
     # classe; aqui só traduzimos o código para o vocabulário do avaliador.
     local rc="${1:-3}"
     AIRLOCK_AVAL_RELATADO=1

@@ -3044,7 +3044,8 @@ provar_fonte_nic() {
 
 provar_dominio_restaurado() {
     # O define não é prova: o XML é relido e comparado pelo core, que já
-    # devolve EQUAL/FINGERPRINT_LEFT/FINGERPRINT_RIGHT (lib/common.sh:2996).
+    # devolve EQUAL/FINGERPRINT_LEFT/FINGERPRINT_RIGHT (xml_dominio_equivalente,
+    # em lib/shell/libvirt.sh).
     local escopo="$1" nome="$2" observado status
     observado="$TMP_DIR/vm-restaurada.xml"
     if ! $VIRSH dumpxml --inactive "$VM_NAME" > "$observado"; then

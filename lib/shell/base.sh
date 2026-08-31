@@ -211,7 +211,7 @@ lista_cpus_valida() {
     done
 }
 
-# --- Rede: validação compartilhada -------------------------------------------
+# --- Predicados de nome e de endereço (sintaxe, nunca host) ------------------
 # Nomes e valores abaixo são interpolados em XML, YAML, caminhos e comandos.
 # Aceitar somente formatos estritos evita ambiguidades e injeção por um conf
 # editado à mão, sem recorrer a eval.
@@ -317,15 +317,10 @@ cidr_privado_24_valido() {
     (( 10#$a == 192 && 10#$b == 168 ))
 }
 
-# --- Acesso do operador a qemu:///system --------------------------------------
-# REQ-VERIFY-FAILCLOSED aplicado à conexão libvirt: falha de conexão não é
-# sinônimo de runtime quebrado. A concessão de grupo só entra na sessão depois
-# de logout/login, e quem concede é a etapa 10. Sem classificar a causa, uma
-# pendência conhecida e resolvível vira erro, e o operador perde a ação certa.
-
-LIBVIRT_ACESSO_ERRO=""
-LIBVIRT_ACESSO_MOTIVO=""
-
+# --- Pertinência em lista separada por espaço --------------------------------
+# Usada por quem compara conjuntos publicados pelo provider de plataforma
+# (serviços, grupos, backends). É comparação de token, não de substring: um
+# `grep` cru casaria `libvirtd` dentro de `libvirtd-ro`.
 lista_contem_token() {
     local lista="$1" alvo="$2" item
     [ -n "$alvo" ] || return 1

@@ -32,8 +32,13 @@ popos-win11-passthrough/
 ├── passthrough.conf             (gerado pela etapa 3; valores do SEU hardware)
 ├── menu.sh                      orquestrador com status ao vivo das etapas
 ├── lib/
-│   ├── common.sh                    funções compartilhadas
-│   └── platform.sh                  detecção e perfil da plataforma
+│   ├── common.sh                    fachada: agrega os módulos abaixo
+│   ├── platform.sh                  detecção e perfil da plataforma
+│   ├── python-core.sh               ponte única para o core Python
+│   ├── policy/waivers.tsv           matriz de dispensas operacionais
+│   └── shell/                       módulos de efeito (base, ui, privilege,
+│                                    status, probes, storage, libvirt, boot,
+│                                    network-effects, config, waivers)
 ├── backups/                     (gerado) backups locais de XML/configuração
 ├── etapas/                      uma etapa = uma fase do fluxo (nº = etapa do menu)
 │   ├── 00-inventario.sh             1  inventário de hardware

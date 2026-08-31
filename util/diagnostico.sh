@@ -16,7 +16,7 @@ exigir_nao_root
 exigir_sudo
 
 # Mesma raiz única de estado do inventário, do log de ações e da listagem de
-# grupos IOMMU: o caminho literal vive só em `lib/common.sh` e chega pelo acessor.
+# grupos IOMMU: o caminho literal vive só em `lib/shell/base.sh` e chega pelo acessor.
 DIRETORIO_RELATORIOS="$(diretorio_inventario)"
 mkdir -p "$DIRETORIO_RELATORIOS"
 ARQUIVO="$DIRETORIO_RELATORIOS/diagnostico-$(date +%Y%m%d-%H%M).txt"

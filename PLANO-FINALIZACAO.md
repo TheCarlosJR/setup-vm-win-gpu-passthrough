@@ -278,7 +278,7 @@ lib/
 ├── platform.sh                  # fachada compatível durante o cutover
 ├── python-core.sh               # única ponte Bash para Python
 └── shell/
-    ├── base.sh
+    ├── base.sh                  # primitivas e predicados puros; sem pré-requisito
     ├── ui.sh
     ├── privilege.sh
     ├── status.sh
@@ -287,7 +287,10 @@ lib/
     ├── libvirt.sh
     ├── boot.sh
     ├── network-effects.sh
-    └── hooks.sh
+    ├── config.sh                # acrescentado por I9-D1 (schema de passthrough.conf)
+    └── waivers.sh               # política de dispensas (REQ-WAIVERS)
+    # hooks.sh não existe: ver I9-D8. Hook libvirt é gerado autossuficiente
+    # pela etapa 14 e não pode depender do checkout.
 libexec/
 ├── passthrough_core_cli.py      # único entrypoint interno
 └── passthrough_core/
@@ -1172,18 +1175,75 @@ não podem ser re-derivadas depois, porque mudam o desenho e não só o código.
   público hoje verde para amarelo e quebraria os oráculos de `tests/i0` sem
   descrever melhor o host.
 
+### Decisões tomadas durante a extração (registradas em 2026-08-30, com o código na mão)
+
+As cinco decisões abaixo não estavam nas sete de entrada porque só aparecem
+quando o grafo real de chamadas é medido. Todas foram tomadas para manter o
+grafo acíclico, e cada uma cita o ciclo concreto que evita.
+
+- **I9-D8 (`lib/shell/hooks.sh` não é criado):** a seção 2.3 prevê o módulo,
+  mas não existe uma linha de lógica de hook em `lib/common.sh` para extrair.
+  Os hooks são gerados por `etapas/50-hooks-gpu-hd1.sh` com todo o estado
+  literal dentro deles, e a seção 2.1 exige que sejam autossuficientes. Um
+  módulo compartilhado de hooks criaria exatamente a dependência do checkout
+  que o contrato proíbe. I9.5 passa a ser cumprido por prova, não por
+  arquivo: `tests/test-i9-hooks-isolados.sh` renderiza os hooks, apaga o
+  projeto que os gerou e só então os executa.
+- **I9-D9 (predicados puros em `base.sh`):** `nome_*_valido`, `pci_*_valido`,
+  `inteiro_na_faixa`, `lista_cpus_valida`, `caminho_absoluto_seguro`,
+  `mac_valido`, `ipv4_*` e `cidr_*` decidem sobre TEXTO e são consumidos por
+  configuração, armazenamento, sondas e rede ao mesmo tempo. Distribuí-los
+  pelos módulos de domínio criava dois ciclos medidos: `config <-> storage`
+  (o validador de grupo dedicado) e `probes <-> storage`
+  (`caminho_absoluto_seguro`). Em `base.sh` a direção fica única.
+- **I9-D10 (leitura do inventário publicado é de `storage.sh`):** completa a
+  decisão I9-D2. `comparar_inventario_com_hardware` e
+  `inventario_revalidar_papeis_disco_configurados` leem o arquivo publicado,
+  então moram em `storage.sh` e chamam `probes.sh` para observar o host. A
+  regra que sobra é simples e verificável: `probes.sh` nunca lê o arquivo de
+  inventário.
+- **I9-D11 (constantes de domínio saem da fachada):** `CONF_ARQUIVO` vai para
+  `config.sh`, `FSTAB` para `storage.sh` e `VIRSH` para `libvirt.sh`. A
+  fachada mantém apenas o que é do projeto (`COMMON_DIR`, `PROJETO_DIR`,
+  `BACKUPS_DIR`, `LIB_COMMON_VERSION`). Um agregador que ainda declara o
+  caminho de um domínio continua sendo dono desse domínio pela porta dos
+  fundos.
+- **I9-D12 (a fachada resolve os caminhos de boot uma vez):** além da
+  resolução preguiçosa exigida por I9-D6, `lib/common.sh` chama
+  `boot_caminhos_resolver` depois de `inicializar_raiz_teste`. Consumidores
+  fora do módulo (a etapa 11, por exemplo) leem `VFIO_MODULES_ARQUIVO`
+  diretamente em mensagens, e sob `set -u` uma variável não resolvida
+  abortaria a etapa. O módulo continua sem efeito no source: a função é
+  idempotente e respeita valor já definido pelo chamador, que é o que permite
+  às fixtures de teste apontarem os quatro caminhos para a raiz hermética.
+
 ### Tarefas
 
-- [ ] **I9.1:** mapear grafo de `source`; criar guards; impedir ciclos e efeitos em carregamento.
-- [ ] **I9.2:** extrair base/UI/privilégio/status preservando wrappers e mensagens.
-- [ ] **I9.3:** separar probes de storage/libvirt/rede/hooks sem esconder pós-condições; consolidar e revisar `lib/shell/boot.sh` já criado em I5, sem recriá-lo nem introduzir segundo caminho mutante.
-- [ ] **I9.4:** transformar `common.sh` em agregador determinístico, sem algoritmos de domínio.
-- [ ] **I9.5:** garantir hooks Bash puros e independentes, com `bash -n` e testes isolados.
-- [ ] **I9.6:** testar source isolado, ordem errada com diagnóstico e duplo source idempotente.
-- [ ] **I9.7:** implementar integralmente REQ-WINDOWS-STATE.
-- [ ] **I9.8:** implementar integralmente REQ-AIRLOCK-VERIFY, reutilizando a mesma avaliação efetiva usada no apply.
-- [ ] **I9.9:** concluir REQ-VERIFY-FAILCLOSED em todos os verificadores.
-- [ ] **I9.10:** concluir integração de REQ-WAIVERS em menu, pré-requisitos, execução direta, status e resumo.
+- [x] **I9.1:** mapear grafo de `source`; criar guards; impedir ciclos e efeitos em carregamento.
+- [x] **I9.2:** extrair base/UI/privilégio/status preservando wrappers e mensagens.
+- [x] **I9.3:** separar probes de storage/libvirt/rede/hooks sem esconder pós-condições; consolidar e revisar `lib/shell/boot.sh` já criado em I5, sem recriá-lo nem introduzir segundo caminho mutante.
+- [x] **I9.4:** transformar `common.sh` em agregador determinístico, sem algoritmos de domínio.
+- [x] **I9.5:** garantir hooks Bash puros e independentes, com `bash -n` e testes isolados.
+- [x] **I9.6:** testar source isolado, ordem errada com diagnóstico e duplo source idempotente.
+- [x] **I9.7:** implementar integralmente REQ-WINDOWS-STATE.
+- [x] **I9.8:** implementar integralmente REQ-AIRLOCK-VERIFY, reutilizando a mesma avaliação efetiva usada no apply.
+- [x] **I9.9:** concluir REQ-VERIFY-FAILCLOSED em todos os verificadores.
+- [x] **I9.10:** concluir integração de REQ-WAIVERS em menu, pré-requisitos, execução direta, status e resumo.
+
+**Como cada tarefa foi comprovada:**
+
+| Tarefa | Entrega | Prova |
+|---|---|---|
+| I9.1 | grafo medido (180 funções), guarda e pré-requisito nominal em cada módulo, resolução preguiçosa em `lib/shell/boot.sh` | `tests/test-i9-modulos.sh` casos 1 a 3 |
+| I9.2 | `lib/shell/{base,ui,privilege,status}.sh` | corpo de função idêntico byte a byte ao de `58e8482`; superfície pública sem perda |
+| I9.3 | `lib/shell/{probes,storage,network-effects,libvirt,config}.sh`; `boot.sh` consolidado, não recriado | grafo sem ciclo; `tests/test-i5-cpu-boot.sh` continua provando definição única de boot |
+| I9.4 | `lib/common.sh` de 4145 para 80 linhas, só agregação | `tests/test-i9-modulos.sh` caso 8 |
+| I9.5 | hook de instalação passa a declarar PATH próprio; prova de independência | `tests/test-i9-hooks-isolados.sh` (6 hooks, projeto apagado antes da execução) |
+| I9.6 | source isolado, ordem errada, duplo source e carga sem efeito | `tests/test-i9-modulos.sh` (37 casos) |
+| I9.7 | eixos independentes de instalação, power state e agent | `tests/test-i9-windows-state.sh`, commit `c7e4e8f` |
+| I9.8 | prova da política Airlock em efeito, não do texto | `tests/test-i9-airlock-verify.sh`, commit `54327bf` |
+| I9.9 | provas compartilhadas dos verificadores | `tests/test-i9-verify-helpers.sh`, commits `8bf5fd6` e `57af49f` |
+| I9.10 | matriz de dispensas versionada e símbolo `[disp]` no menu | `tests/test-i9-waivers.sh`, `tests/check-waivers-matrix.py`, commits `7febdd2` e `da7df55` |
 
 ### Gate I9
 
