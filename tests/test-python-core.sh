@@ -499,7 +499,7 @@ PY
 # o que I2 proíbe é qualquer segunda rota até este core.
 if grep -nE 'passthrough_core|libexec' \
     "$ROOT/menu.sh" "$ROOT/etapas/"*.sh "$ROOT/util/"*.sh "$ROOT/lib/common.sh" \
-    "$ROOT/lib/platform.sh"; then
+    "$ROOT/lib/platform.sh" "$ROOT/lib/shell/"*.sh; then
     fail 'referência ao core fora da ponte lib/python-core.sh'
 fi
 if [[ ! -d $ROOT/libexec/passthrough_core ]] \

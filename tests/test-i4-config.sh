@@ -504,7 +504,7 @@ rm -rf -- "$COPIA_RAIZ"
 # uma delas não é observável: é defesa em profundidade deliberada. A mutação
 # abaixo ataca o que a bateria realmente prova, a persistência.
 executar_mutacao 'gravação não persiste' \
-    lib/common.sh \
+    lib/shell/config.sh \
     'falhar "Falha ao publicar a configuração: $(_core_diagnostico '"'"'persistência recusada'"'"')"' \
     'return 0'
 
@@ -537,7 +537,7 @@ executar_mutacao 'classificação legada nunca acha pendência' \
 # observável. A mutação abaixo ataca o alvo do descritor de diretório, que é
 # justamente o que substituiu o caminho em argv.
 executar_mutacao 'descritor aponta para o diretório errado' \
-    lib/common.sh \
+    lib/shell/config.sh \
     '            CONF_DIRETORIO_ALVO="${caminho%/*}"' \
     '            CONF_DIRETORIO_ALVO="$(pwd -P)"'
 passo

@@ -522,7 +522,7 @@ bash "$RAIZ/etapas/00-inventario.sh" --verificar >/dev/null \
     || falha "recusar a migração removeu a pasta legada"
 
 # Nenhum consumidor pode voltar a montar o caminho legado por conta própria: o
-# literal vive só em lib/common.sh, para a migração poder nomeá-lo.
+# literal vive só em lib/shell/base.sh (I9), para a migração poder nomeá-lo.
 for CONSUMIDOR in etapas/00-inventario.sh util/diagnostico.sh; do
     if grep -q 'inventario-hardware' "$RAIZ/$CONSUMIDOR"; then
         falha "$CONSUMIDOR voltou a citar o caminho legado em vez do acessor"

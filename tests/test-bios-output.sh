@@ -12,12 +12,12 @@ mkdir -p "$PROJETO_TESTE/lib" "$PROJETO_TESTE/etapas" "$BIN"
 cp "$RAIZ/lib/common.sh" "$PROJETO_TESTE/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_TESTE/lib/platform.sh"
 cp "$RAIZ/lib/python-core.sh" "$PROJETO_TESTE/lib/python-core.sh"
-# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+# I9: a fachada carrega TODOS os módulos de lib/shell/ de forma
+# incondicional, então o projeto mínimo copia o diretório inteiro em vez
+# de uma lista nominal que envelhece a cada módulo novo.
 mkdir -p "$PROJETO_TESTE/lib/shell"
-cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_TESTE/lib/shell/boot.sh"
-# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
-# incondicional, e o módulo lê a matriz de política em lib/policy/.
-cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO_TESTE/lib/shell/waivers.sh"
+cp "$RAIZ/lib/shell/"*.sh "$PROJETO_TESTE/lib/shell/"
+# O módulo de dispensas lê a matriz de política em lib/policy/.
 mkdir -p "$PROJETO_TESTE/lib/policy"
 cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO_TESTE/lib/policy/waivers.tsv"
 # A fachada carrega a ponte e os consumidores de produção usam o core

@@ -466,8 +466,12 @@ DUPLICADAS=$(grep -rlc '^ativar_unidade_systemd()' \
     "$RAIZ/lib" "$RAIZ/etapas" "$RAIZ/util" "$RAIZ/menu.sh" 2>/dev/null | wc -l)
 [[ $DUPLICADAS -eq 1 ]] \
     || falha "ativar_unidade_systemd está definida em $DUPLICADAS arquivos; esperado 1"
-grep -q '^ativar_unidade_systemd()' "$RAIZ/lib/common.sh" \
-    || falha 'ativar_unidade_systemd não está na fachada'
+declare -F ativar_unidade_systemd > /dev/null 2>&1 \
+    || falha 'ativar_unidade_systemd não está acessível pela fachada'
+# I9: a fachada agrega; a definição mora no módulo de privilégio, que é quem
+# executa systemctl com sudo.
+grep -q '^ativar_unidade_systemd()' "$RAIZ/lib/shell/privilege.sh" \
+    || falha 'ativar_unidade_systemd saiu de lib/shell/privilege.sh'
 for arquivo in "$RAIZ/etapas/20-virtualizacao.sh" "$RAIZ/etapas/50-hooks-gpu-hd1.sh"; do
     grep -q 'libvirt_backend_resolver' "$arquivo" \
         || falha "$arquivo não usa a resolução autoritativa do backend"
@@ -489,7 +493,7 @@ CONSUMIDORES=$(grep -rlE '(^|[^[:alnum:]_])xmlstarlet[[:space:]]' \
 # válidas.
 HEREDOCS=$(grep -rnE 'python3[[:space:]]+-([[:space:]]|$)' \
     "$RAIZ/menu.sh" "$RAIZ/lib/common.sh" "$RAIZ/lib/platform.sh" \
-    "$RAIZ/etapas" "$RAIZ/util" 2>/dev/null || true)
+    "$RAIZ/lib/shell" "$RAIZ/etapas" "$RAIZ/util" 2>/dev/null || true)
 [[ -z $HEREDOCS ]] || falha "heredoc Python de produção restante: $HEREDOCS"
 MARCADORES=$(grep -rn "<<'PY'" \
     "$RAIZ/menu.sh" "$RAIZ/lib" "$RAIZ/etapas" "$RAIZ/util" 2>/dev/null || true)
@@ -498,7 +502,7 @@ MARCADORES=$(grep -rn "<<'PY'" \
 # A ponte continua sendo a única rota até o core.
 ROTAS=$(grep -rn 'passthrough_core\|libexec' \
     "$RAIZ/menu.sh" "$RAIZ/lib/common.sh" "$RAIZ/lib/platform.sh" \
-    "$RAIZ/etapas" "$RAIZ/util" 2>/dev/null || true)
+    "$RAIZ/lib/shell" "$RAIZ/etapas" "$RAIZ/util" 2>/dev/null || true)
 [[ -z $ROTAS ]] || falha "referência ao core fora da ponte: $ROTAS"
 passo
 
@@ -636,7 +640,7 @@ executar_mutacao 'allowlist de pares vira permissiva' \
     'PYTHON_CORE_ERRO=""'
 
 executar_mutacao 'leitura aceita snapshot simbólico' \
-    lib/common.sh \
+    lib/shell/libvirt.sh \
     '[ -n "$arquivo" ] && [ -f "$arquivo" ] && [ ! -L "$arquivo" ] || return 1' \
     '[ -n "$arquivo" ] && [ -f "$arquivo" ] || return 1'
 

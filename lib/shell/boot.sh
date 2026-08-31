@@ -17,24 +17,53 @@
 # Sourcing deste arquivo não produz efeito: apenas define variáveis e funções.
 # ============================================================================
 
+if ! declare -F caminho_sistema > /dev/null 2>&1; then
+    printf 'ERRO: lib/shell/boot.sh exige %s carregado antes.\n' 'lib/shell/base.sh' >&2
+    return 1 2>/dev/null || exit 1
+fi
+if ! declare -F falhar > /dev/null 2>&1; then
+    printf 'ERRO: lib/shell/boot.sh exige %s carregado antes.\n' 'lib/shell/ui.sh' >&2
+    return 1 2>/dev/null || exit 1
+fi
+if ! declare -F v_falta > /dev/null 2>&1; then
+    printf 'ERRO: lib/shell/boot.sh exige %s carregado antes.\n' 'lib/shell/status.sh' >&2
+    return 1 2>/dev/null || exit 1
+fi
+if ! declare -F plataforma_carregar > /dev/null 2>&1; then
+    printf 'ERRO: lib/shell/boot.sh exige %s carregado antes.\n' 'lib/platform.sh' >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 [ -n "${BOOT_SH_CARREGADO:-}" ] && return 0
 BOOT_SH_CARREGADO=1
 
 # Os recursos persistentes de boot passam pela raiz hermética opcional, para
 # que a transação real possa ser exercitada por teste sem tocar o host. Em
 # produção SISTEMA_RAIZ_TESTE está vazio e caminho_sistema é identidade.
-GRUB_DEFAULT_ARQUIVO="$(caminho_sistema /etc/default/grub)" \
-    || falhar "Não foi possível resolver /etc/default/grub."
-GRUB_CFG_ARQUIVO="$(caminho_sistema /boot/grub/grub.cfg)" \
-    || falhar "Não foi possível resolver /boot/grub/grub.cfg."
-KERNELSTUB_ENTRIES_DIR="$(caminho_sistema /boot/efi/loader/entries)" \
-    || falhar "Não foi possível resolver o diretório de loader entries."
-VFIO_MODULES_ARQUIVO="$(caminho_sistema /etc/modules-load.d/vfio.conf)" \
-    || falhar "Não foi possível resolver /etc/modules-load.d/vfio.conf."
+#
+# A resolução é PREGUIÇOSA (decisão I9-D6 do plano): carregar este módulo não
+# executa nada, então a ordem de source deixa de importar. Quem precisa dos
+# caminhos chama boot_caminhos_resolver, que é idempotente e memoizado. Um
+# valor já definido pelo chamador (fixture de teste, por exemplo) é respeitado
+# e nunca sobrescrito.
+BOOT_CAMINHOS_RESOLVIDOS=0
+boot_caminhos_resolver() {
+    [ "${BOOT_CAMINHOS_RESOLVIDOS:-0}" -eq 1 ] && return 0
+    [ -n "${GRUB_DEFAULT_ARQUIVO:-}" ] || GRUB_DEFAULT_ARQUIVO="$(caminho_sistema /etc/default/grub)" \
+        || falhar "Não foi possível resolver /etc/default/grub."
+    [ -n "${GRUB_CFG_ARQUIVO:-}" ] || GRUB_CFG_ARQUIVO="$(caminho_sistema /boot/grub/grub.cfg)" \
+        || falhar "Não foi possível resolver /boot/grub/grub.cfg."
+    [ -n "${KERNELSTUB_ENTRIES_DIR:-}" ] || KERNELSTUB_ENTRIES_DIR="$(caminho_sistema /boot/efi/loader/entries)" \
+        || falhar "Não foi possível resolver o diretório de loader entries."
+    [ -n "${VFIO_MODULES_ARQUIVO:-}" ] || VFIO_MODULES_ARQUIVO="$(caminho_sistema /etc/modules-load.d/vfio.conf)" \
+        || falhar "Não foi possível resolver /etc/modules-load.d/vfio.conf."
+    BOOT_CAMINHOS_RESOLVIDOS=1
+}
 
 BOOTLOADER_VALIDACAO_ERRO=""
 BOOTLOADER_ATIVO=""
 detectar_bootloader() {
+    boot_caminhos_resolver
     # Prefere evidência do loader que iniciou a sessão. A simples presença do
     # binário kernelstub não basta: ele pode coexistir com um GRUB ativo. O
     # argumento opcional injeta a evidência apenas em chamadas unitárias.
@@ -90,6 +119,7 @@ validar_bootloader_configurado() {
 }
 
 _kernelstub_entries_diretas_legiveis() {
+    boot_caminhos_resolver
     local entrada restaurar_nullglob=0
     local -a entradas=()
     [ -d "$KERNELSTUB_ENTRIES_DIR" ] || return 1
@@ -103,6 +133,7 @@ _kernelstub_entries_diretas_legiveis() {
 }
 
 boot_backend_observavel() {
+    boot_caminhos_resolver
     # Retornos: 0=observável, 1=backend inválido/ausente, 2=leitura
     # privilegiada indisponível. Nunca solicita senha.
     validar_bootloader_configurado "${1:-${BOOTLOADER:-}}" || return 1
@@ -269,6 +300,7 @@ _cmdline_sem_chaves() {
 }
 
 _kernelstub_linhas_opcoes() {
+    boot_caminhos_resolver
     # Prefere leitura direta; somente usa sudo não interativo quando os entries
     # existem mas não são legíveis pelo operador. O diretório é argumento de
     # bash -c, nunca interpolado como código.
@@ -410,6 +442,7 @@ _kernelstub_aplicar_estado() {
 }
 
 _grub_cmdline_atual() {
+    boot_caminhos_resolver
     local linha
     local -a linhas=()
     mapfile -t linhas < <(grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_DEFAULT_ARQUIVO" 2>/dev/null)
@@ -501,6 +534,7 @@ kernel_param_chaves_persistentes_ausentes() {
 }
 
 _grub_cfg_linhas_linux() {
+    boot_caminhos_resolver
     if [ -r "$GRUB_CFG_ARQUIVO" ]; then
         awk '/^[[:space:]]*(linux|linuxefi)[[:space:]]/ {print}' "$GRUB_CFG_ARQUIVO"
         return
@@ -540,6 +574,7 @@ _grub_cfg_chaves_ausentes() {
 }
 
 _grub_aplicar_cmdline() {
+    boot_caminhos_resolver
     # Instala /etc/default/grub e regenera o grub.cfg numa única transação.
     # EXIT/INT/TERM após o primeiro mv restauram a fonte e regeneram o cfg.
     local novo="$1" verificacao="$2" modo="$3" arq="$GRUB_DEFAULT_ARQUIVO"
@@ -768,6 +803,7 @@ _vfio_bloco_gerenciado() {
 }
 
 _vfio_marcadores_validos() {
+    boot_caminhos_resolver
     # Valida o par de marcadores no shell atual, e não dentro de uma
     # substituição de comando: uma verificação feita em subshell perderia
     # VFIO_MODULES_ERRO e o operador receberia recusa sem diagnóstico.
@@ -851,6 +887,7 @@ _vfio_candidato_de() {
 }
 
 vfio_modules_estado() {
+    boot_caminhos_resolver
     # Retornos: 0=convergido; 1=divergente ou ausente; 2=erro de leitura ou de
     # formato. Publica o conteúdo atual e o candidato, sem tocar o arquivo.
     VFIO_MODULES_ERRO=""
@@ -881,6 +918,7 @@ vfio_modules_estado() {
 }
 
 _vfio_staged_path() {
+    boot_caminhos_resolver
     printf '%s\n' "${VFIO_MODULES_ARQUIVO}.vm-passthrough-novo-$$"
 }
 
@@ -892,6 +930,7 @@ _vfio_descartar_staged() {
 }
 
 _vfio_publicar() {
+    boot_caminhos_resolver
     # Publicação atômica no mesmo diretório, preservando metadados quando o
     # arquivo já existe. O temporário nunca fica com nome *.conf, para que o
     # systemd-modules-load não o leia num estado intermediário.
@@ -937,6 +976,7 @@ IOMMU_TX_ALTEROU_BOOT=0
 IOMMU_TX_ALTEROU_VFIO=0
 
 _iommu_tx_backup_vfio() {
+    boot_caminhos_resolver
     IOMMU_TX_VFIO_BACKUP="${VFIO_MODULES_ARQUIVO}.vm-passthrough-anterior-$$"
     if [ "$IOMMU_TX_VFIO_EXISTIA" -eq 1 ]; then
         sudo cp -a -- "$VFIO_MODULES_ARQUIVO" "$IOMMU_TX_VFIO_BACKUP" \
@@ -967,6 +1007,7 @@ _iommu_tx_restaurar_boot() {
 }
 
 _iommu_tx_restaurar_vfio() {
+    boot_caminhos_resolver
     if [ "$IOMMU_TX_VFIO_EXISTIA" -eq 1 ]; then
         [ -n "$IOMMU_TX_VFIO_BACKUP" ] && [ -f "$IOMMU_TX_VFIO_BACKUP" ] || return 1
         sudo mv -f -- "$IOMMU_TX_VFIO_BACKUP" "$VFIO_MODULES_ARQUIVO" || return 1
@@ -981,6 +1022,7 @@ _iommu_tx_restaurar_vfio() {
 }
 
 iommu_vfio_rollback() {
+    boot_caminhos_resolver
     # Desfaz na ordem inversa e comprova cada recurso por releitura. O
     # initramfs é regenerado ao final sempre que algum recurso que ele embute
     # chegou a mudar: sem isso o host ficaria com initramfs e configuração em
@@ -1021,6 +1063,7 @@ iommu_vfio_rollback() {
 }
 
 iommu_vfio_transacao() {
+    boot_caminhos_resolver
     # Aplica a convergência persistente de IOMMU/VFIO como uma transação só.
     # Pré-condição: o chamador já armou os traps que chamam iommu_vfio_rollback
     # e já obteve o ticket de sudo. Retornos: 0=convergido (com ou sem
@@ -1117,4 +1160,17 @@ iommu_vfio_transacao() {
     _iommu_tx_descartar_backup_vfio
     IOMMU_TX_ESTADO=COMMITTED
     return 0
+}
+
+# --- Classificação de status da persistência de kernel (decisão I9-D5) -------
+# Esta é a única função do protocolo --verificar que lê estado de boot
+# (KERNEL_PERSISTENCIA_TIPO, definido acima). Mantê-la em status.sh faria o
+# módulo de status depender do de boot sem necessidade; aqui a direção
+# continua única: boot conhece status, status não conhece boot.
+v_kernel_persistencia_falhou() {
+    case "${KERNEL_PERSISTENCIA_TIPO:-erro}" in
+        pendente) v_falta "$*" ;;
+        indeterminado) v_indeterminado "$*" ;;
+        *) v_erro "$*" ;;
+    esac
 }

@@ -468,9 +468,11 @@ nome_grupo_vm_dedicado_valido vm-passthrough-lab \
 if nome_grupo_vm_dedicado_valido disk || validar_valor_conf VM_STORAGE_GROUP disk; then
     falha 'grupo privilegiado disk foi aceito como armazenamento dedicado'
 fi
-grep -Fq 'sudo chmod 2770 "$diretorio"' "$RAIZ/lib/common.sh" \
+# I9: a convergência do diretório da VM mora no módulo de storage; a fachada
+# apenas agrega.
+grep -Fq 'sudo chmod 2770 "$diretorio"' "$RAIZ/lib/shell/storage.sh" \
     || falha 'convergência /vm não fixa setgid 2770'
-grep -Fq "d:u::rwx,d:g::rwx,d:m::rwx,d:o::---" "$RAIZ/lib/common.sh" \
+grep -Fq "d:u::rwx,d:g::rwx,d:m::rwx,d:o::---" "$RAIZ/lib/shell/storage.sh" \
     || falha 'ACL default de /vm não está explícita'
 grep -Fq 'acesso_identidade "$USUARIO_LINUX" rw "$TESTE_QEMU"' \
     "$RAIZ/etapas/21-usuario-grupos.sh" \
@@ -478,8 +480,8 @@ grep -Fq 'acesso_identidade "$USUARIO_LINUX" rw "$TESTE_QEMU"' \
 grep -Fq 'acesso_identidade "$QEMU_USUARIO" rw "$TESTE_OPERADOR"' \
     "$RAIZ/etapas/21-usuario-grupos.sh" \
     || falha 'etapa 21 não testa leitura/escrita cruzada pela identidade QEMU'
-if grep -E 'chmod[[:space:]]+(-R[[:space:]]+)?777' \
-    "$RAIZ/lib/common.sh" "$RAIZ/etapas/13-diretorios.sh" \
+if grep -rE 'chmod[[:space:]]+(-R[[:space:]]+)?777' \
+    "$RAIZ/lib" "$RAIZ/etapas/13-diretorios.sh" \
     "$RAIZ/etapas/21-usuario-grupos.sh" "$RAIZ/etapas/40-criar-vm.sh"; then
     falha 'modelo /vm ainda contém chmod 777'
 fi
@@ -536,7 +538,7 @@ if [ "$(id -u)" -ne 0 ]; then
     set -e
     igual "$RC_ACESSO" 1 'prova de acesso não reprovou caminho sem permissão'
 fi
-grep -Fq 'command -v "["' "$RAIZ/lib/common.sh" \
+grep -Fq 'command -v "["' "$RAIZ/lib/shell/privilege.sh" \
     || falha 'prova de acesso não confirma mais que o test é embutido do shell'
 
 # --- Discard somente no QCOW2 alvo e com cardinalidade -----------------------
@@ -601,12 +603,12 @@ mkdir -p "$PROJETO_MENU/lib" "$PROJETO_MENU/etapas"
 cp "$RAIZ/lib/common.sh" "$PROJETO_MENU/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_MENU/lib/platform.sh"
 cp "$RAIZ/lib/python-core.sh" "$PROJETO_MENU/lib/python-core.sh"
-# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+# I9: a fachada carrega TODOS os módulos de lib/shell/ de forma
+# incondicional, então o projeto mínimo copia o diretório inteiro em vez
+# de uma lista nominal que envelhece a cada módulo novo.
 mkdir -p "$PROJETO_MENU/lib/shell"
-cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_MENU/lib/shell/boot.sh"
-# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
-# incondicional, e o módulo lê a matriz de política em lib/policy/.
-cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO_MENU/lib/shell/waivers.sh"
+cp "$RAIZ/lib/shell/"*.sh "$PROJETO_MENU/lib/shell/"
+# O módulo de dispensas lê a matriz de política em lib/policy/.
 mkdir -p "$PROJETO_MENU/lib/policy"
 cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO_MENU/lib/policy/waivers.tsv"
 cp -a "$RAIZ/libexec" "$PROJETO_MENU/libexec"
@@ -675,12 +677,12 @@ mkdir -p "$PROJETO_EP/lib" "$PROJETO_EP/etapas" \
 cp "$RAIZ/lib/common.sh" "$PROJETO_EP/lib/common.sh"
 cp "$RAIZ/lib/platform.sh" "$PROJETO_EP/lib/platform.sh"
 cp "$RAIZ/lib/python-core.sh" "$PROJETO_EP/lib/python-core.sh"
-# I5: a fachada carrega lib/shell/boot.sh de forma incondicional.
+# I9: a fachada carrega TODOS os módulos de lib/shell/ de forma
+# incondicional, então o projeto mínimo copia o diretório inteiro em vez
+# de uma lista nominal que envelhece a cada módulo novo.
 mkdir -p "$PROJETO_EP/lib/shell"
-cp "$RAIZ/lib/shell/boot.sh" "$PROJETO_EP/lib/shell/boot.sh"
-# I9.10: a fachada também carrega lib/shell/waivers.sh de forma
-# incondicional, e o módulo lê a matriz de política em lib/policy/.
-cp "$RAIZ/lib/shell/waivers.sh" "$PROJETO_EP/lib/shell/waivers.sh"
+cp "$RAIZ/lib/shell/"*.sh "$PROJETO_EP/lib/shell/"
+# O módulo de dispensas lê a matriz de política em lib/policy/.
 mkdir -p "$PROJETO_EP/lib/policy"
 cp "$RAIZ/lib/policy/waivers.tsv" "$PROJETO_EP/lib/policy/waivers.tsv"
 cp -a "$RAIZ/libexec" "$PROJETO_EP/libexec"
