@@ -1126,8 +1126,14 @@ gerar_conjunto_hooks() {
     fi
     printf 'vm-passthrough gate obrigatório para %s\n' "$VM_NAME" > "$diretorio/required"
     printf 'transação de instalação em andamento para %s\n' "$VM_NAME" > "$diretorio/installing"
+    # I9.5: mesmo o hook mais curto declara o próprio PATH. Ele só usa
+    # builtins hoje, mas um hook libvirt herda o ambiente do daemon, e um PATH
+    # herdado é a porta pela qual um comando inesperado entraria amanhã.
     cat > "$diretorio/installing.sh" <<'BLOQUEIO'
 #!/bin/bash
+# Hook prepare/begin: bloqueia eventos enquanto a instalação está em transação.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 echo "[hook install] configuração de passthrough em transação; evento bloqueado" >&2
 exit 75
 BLOQUEIO
