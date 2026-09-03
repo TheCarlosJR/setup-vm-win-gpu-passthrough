@@ -149,8 +149,9 @@ imprimir_lista() {
         # separado (a flag validada de passthrough.conf, resolvida contra a
         # matriz de política versionada), nunca por parsing do texto que a
         # etapa imprimiu, e nunca entra no sentinel V1. O motivo de não dizer
-        # "concluída": com a escolha de modo registrada, a etapa não foi
-        # executada; o recurso é que não se aplica a este fluxo.
+        # "concluída": o --verificar devolve 0 porque o estado do host casa a
+        # escolha de modo registrada, e não porque o recurso dispensado exista.
+        # Chamar isso de concluído afirmaria a existência do recurso.
         waiver_rc=0
         waiver_estado "$arquivo" || waiver_rc=$?
         # Matriz ilegível não pode degradar em silêncio: sem ela o menu voltaria
@@ -194,7 +195,7 @@ imprimir_lista() {
         u=$((u+1))
     done
     echo
-    echo " Legenda: [ok] concluída  [disp] dispensada por escolha de modo (não executada)  [  ] pendente  [--] opcional pendente  [??] indeterminada  [!!] erro (diagnóstico abaixo)  <reboot>/<logout> exigidos ao final"
+    echo " Legenda: [ok] concluída  [disp] escolha de modo ativa (recurso dispensado não comprovado)  [  ] pendente  [--] opcional pendente  [??] indeterminada  [!!] erro (diagnóstico abaixo)  <reboot>/<logout> exigidos ao final"
 }
 
 if [ "${1:-}" = "--status" ]; then
@@ -241,7 +242,15 @@ executar_no_menu() {
     case "$rc" in
         0)
             if [ "$dispensa_ativa" -eq 1 ]; then
-                ok "Nada a executar: a escolha de modo registrada em $WAIVER_CHAVE dispensa o pré-requisito \"$WAIVER_PREREQ\". A etapa não foi executada."
+                # I9.11: a mensagem anterior afirmava "A etapa não foi
+                # executada", e isso era falso em todos os casos que chegam
+                # aqui: a única etapa da matriz que recusa sem efeito é a 8, e
+                # ela sai por cancelar_etapa (código $CODIGO_VOLTAR_MENU), que
+                # é tratado no ramo seguinte. Com status 0 e dispensa ativa, a
+                # etapa rodou até o fim e pode ter mutado o host. O que a
+                # dispensa autoriza a UI a negar é a CONCLUSÃO do recurso
+                # dispensado, não a execução.
+                ok "Status 0 com o pré-requisito \"$WAIVER_PREREQ\" conscientemente dispensado por $WAIVER_CHAVE=sim. A saída acima é o que a etapa fez sob essa escolha; o recurso dispensado continua sem comprovação."
             else
                 ok "Execução concluída."
             fi

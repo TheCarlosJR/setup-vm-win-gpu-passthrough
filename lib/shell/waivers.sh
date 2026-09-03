@@ -58,6 +58,34 @@ _waiver_campo_aceito() {
     return 1
 }
 
+_waiver_flag_nome_valido() {
+    # A flag é lida por expansão indireta (${!nome}). Um nome que casa o
+    # sufixo mas NÃO é identificador válido do bash ('1_DISPENSADO', por
+    # exemplo) faz a expansão abortar o corpo da função, e corpo abortado por
+    # erro de expansão não devolve o código de recusa: o leitor passava a
+    # publicar "dispensa ativa" (0) com todos os campos vazios, que é o
+    # fail-closed exatamente invertido. Por isso o nome é validado ANTES de
+    # qualquer expansão, pelo mesmo padrão que o gate exige
+    # (tests/check-waivers-matrix.py, FLAG_RE = ^[A-Z][A-Z0-9_]*_DISPENSADO$).
+    local nome="${1:-}" restante primeiro
+    [ -n "$nome" ] || return 1
+    case "$nome" in
+        *_DISPENSADO) ;;
+        *) return 1 ;;
+    esac
+    # Enumeração explícita em vez da faixa [A-Z]: faixa em padrão do bash
+    # depende da collation do locale e, sob UTF-8, aceitaria letra acentuada,
+    # que não é caractere de identificador. O menu roda no locale do operador,
+    # não no LC_ALL=C do gate, então a validação não pode depender dele.
+    restante="${nome//[ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]/}"
+    [ -z "$restante" ] || return 1
+    primeiro="${nome:0:1}"
+    case "$primeiro" in
+        [ABCDEFGHIJKLMNOPQRSTUVWXYZ]) return 0 ;;
+    esac
+    return 1
+}
+
 waiver_matriz_carregar() {
     # Carrega uma vez por processo. Recusa a matriz inteira ao primeiro defeito:
     # aceitar as linhas boas e ignorar as ruins deixaria o menu decidir sobre um
@@ -98,13 +126,10 @@ waiver_matriz_carregar() {
                 return 2
                 ;;
         esac
-        case "$flag" in
-            *_DISPENSADO) ;;
-            *)
-                WAIVERS_MATRIZ_ERRO="linha $numero da matriz nomeia flag fora do padrão *_DISPENSADO"
-                return 2
-                ;;
-        esac
+        if ! _waiver_flag_nome_valido "$flag"; then
+            WAIVERS_MATRIZ_ERRO="linha $numero da matriz nomeia flag fora do padrão [A-Z][A-Z0-9_]*_DISPENSADO"
+            return 2
+        fi
         if ! _waiver_campo_aceito "$WAIVERS_TIPOS_ACEITOS" "$tipo" \
             || ! _waiver_campo_aceito "$WAIVERS_SIMBOLOS_ACEITOS" "$simbolo" \
             || ! _waiver_campo_aceito "$WAIVERS_CONFLITOS_ACEITOS" "$conflito" \
@@ -153,6 +178,15 @@ waiver_estado() {
     for registro in ${WAIVERS_LINHAS[@]+"${WAIVERS_LINHAS[@]}"}; do
         IFS='|' read -r r_etapa r_flag r_tipo r_prereq r_simbolo r_conflito <<< "$registro"
         [ "$r_etapa" = "$etapa" ] || continue
+        # Segunda camada, deliberada: a carga já recusa nome inválido, mas
+        # WAIVERS_LINHAS é estado de processo e a expansão indireta abaixo é o
+        # único ponto do módulo que pode abortar o corpo da função. Recusar
+        # aqui mantém o leitor fail-closed mesmo se alguém popular o array por
+        # outro caminho.
+        if ! _waiver_flag_nome_valido "$r_flag"; then
+            WAIVER_ERRO="matriz de dispensas nomeia flag inválida ($r_flag)"
+            return 2
+        fi
         if [ "${!r_flag:-}" = "sim" ]; then
             WAIVER_ATIVA=1
             WAIVER_CHAVE="$r_flag"

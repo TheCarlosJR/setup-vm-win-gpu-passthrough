@@ -14,6 +14,7 @@ tests/manifests/i9-files.txt
 tests/test-i9-airlock-verify.sh
 tests/test-i9-hooks-isolados.sh
 tests/test-i9-modulos.sh
+tests/test-i9-revisao-semantica.sh
 tests/test-i9-verify-helpers.sh
 tests/test-i9-waivers.sh
 tests/test-i9-windows-state.sh

@@ -54,7 +54,10 @@ verificar() {
     else
         v_falta "${INVENTARIO_ERRO:-Inventário de referência indisponível.}"
     fi
-    [ -f "$CONF_ARQUIVO" ] && v_ok "passthrough.conf existe." || v_falta "passthrough.conf não existe."
+    # I9.11 / REQ-VERIFY-FAILCLOSED: `[ -f x ] && v_ok` era o último resquício
+    # do padrão que aprova arquivo ilegível, diretório ou link quebrado como
+    # existente. v_prova_arquivo separa ausente (1) de não comprovável (2).
+    v_prova_arquivo "$CONF_ARQUIVO" "passthrough.conf" || true
     local var tipo rota caminho iface tipo_lista ipv4 marca encontrou=0 topologia ram_max
     local cpu_completa=1 memoria_completa=1
     if [ -z "${USUARIO_LINUX:-}" ]; then
