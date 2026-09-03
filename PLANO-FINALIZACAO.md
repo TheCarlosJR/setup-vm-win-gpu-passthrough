@@ -61,7 +61,7 @@ A ordem de execução **não é a ordem numérica**. Siga a coluna "ordem".
 | 8 | I6 | Inventário e identidades físicas | `CONCLUÍDA` 2026-08-23 | `inventory.py`, REQ-DISK-IDENTITY, REQ-USB-IDENTITY |
 | 9 | I7 | Rede transacional e planner backend-neutral | `CONCLUÍDA` 2026-08-28 (`I7.1` a `I7.8`) | `network.py`, REQ-NET-TX |
 | 10 | I8 | Plataforma, capabilities e **eixos de hardware** | `CONCLUÍDA` 2026-08-28 | `platform.py`, eixos distro/CPU/GPU |
-| 11 | I9 | Modularização Bash e requisitos P1 restantes | `PRÓXIMA` | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY |
+| 11 | I9 | Modularização Bash e requisitos P1 restantes | `REABERTA` por I9.12 | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY, REQ-VM-RESOURCE-LIFECYCLE |
 | 12 | **I9B** | **Internacionalização (en, pt-BR, es)** | **ABERTA (nova)** | `lang/*.msg`, `lib/shell/i18n.sh`, `messages.py` |
 | 13 | I10 | Convergência, remoção de legado e CI completa | `ABERTA` | gates estáticos, `check-python-boundary.py` |
 | 14 | I11 | Documentação, specs e recuperação | `ABERTA` | docs + `check-plan-traceability.py` |
@@ -797,7 +797,7 @@ Diferenças estruturais que o eixo precisa absorver:
 
 ### REQ-BOOT-POSCONDICAO: aplicador de bootloader precisa provar que regenerou (P1)
 
-**Fases:** correção em I9 (auditoria de REQ-VERIFY-FAILCLOSED); reforço por perfil em I14. Estado: `PARCIAL`, **defeito ativo no código atual**.
+**Fases:** correção em **I9.13** (2026-09-03); reforço por perfil em I14. Estado: `CONFORME` para GRUB, e já era para kernelstub, que valida entry por entry. O reforço por perfil de distro continua em I14.
 
 Encontrado na auditoria de 23/08/2026: o rollback do GRUB em `lib/shell/boot.sh:581-585` restaura a fonte, executa `sudo update-grub` e então valida com `sudo cmp -s -- "$backup" "$arq"`, que compara **a fonte com o backup da fonte**. O `grub.cfg` regenerado **nunca é verificado**. Se o aplicador devolver zero sem produzir efeito, a mensagem `"Rollback da fonte GRUB e regeneração do grub.cfg concluídos"` é emitida com o `grub.cfg` ainda contendo os parâmetros novos. Isso é falso sucesso, exatamente o que REQ-VERIFY-FAILCLOSED proíbe.
 
@@ -808,6 +808,22 @@ Exigência: em **ambos** os caminhos, apply e rollback, capturar a identidade do
 **Testes:** aplicador que devolve zero sem efeito; aplicador ausente; fonte restaurada com artefato divergente; artefato idêntico após restauração; falha antes e depois da regeneração; sinal durante a janela.
 
 **Aceite:** nenhuma mensagem de conclusão de boot é emitida sem prova de que o artefato efetivamente consumido pelo firmware foi regenerado a partir da fonte corrente.
+
+### REQ-VM-RESOURCE-LIFECYCLE: recursos dedicados voltam ao host quando a VM para (P0)
+
+**Fases:** contrato e implementação em **I9.12** (fase I9 reaberta por este requisito em 02/09/2026); baterias simuladas em I10 e I12; aceite operacional em I13. Estado: `AUSENTE`.
+
+O contrato completo, com as nove cláusulas normativas, está na tarefa **I9.12** da fase I9, e é lá que ele é mantido; esta entrada existe para que o requisito apareça no catálogo, na rastreabilidade e nos critérios de conclusão, sem criar uma segunda fonte de verdade.
+
+**Estado medido no host de desenvolvimento em 03/09/2026, que é a razão do requisito:** `/proc/cmdline` traz `default_hugepagesz=1G hugepagesz=1G hugepages=22`, e o resultado com a **VM desligada** é `HugePages_Total=22`, `HugePages_Free=22`, `Hugetlb=23068672 kB`. Ou seja, 22 GiB de 30,3 GiB (`MemTotal=31722704 kB`) estão fora da RAM comum sem nenhuma VM rodando, e o host fica com `MemAvailable=4143904 kB`. As páginas estão livres para o hugetlb e **inacessíveis** para todo o resto: reserva no boot não é devolvível. THP está em `[madvise]` e nenhum `isolcpus`/`nohz_full`/`rcu_nocbs` foi aplicado ainda, o que reduz o escopo de migração da etapa 18 a "recusar entrar nesse estado" em vez de "sair dele".
+
+**A inversão que o requisito impõe:** hoje a etapa 17 trata reserva estática de 1 GiB como o contrato, e o `--verificar` dela exige `HugePages_Total` exatamente igual a `HUGEPAGES_1G` — ou seja, **o estado que este requisito considera defeito é hoje a pós-condição de sucesso**. A migração, portanto, não é acrescentar um modo: é substituir o contrato da etapa, transacionalmente e sem manter dois caminhos mutantes, preservando os 21 itens do menu, os entrypoints e os status públicos `0/1/2/3`.
+
+**Ordem de preferência dos modos, decidida em I9.12 e não negociável por conveniência:** memória normal com THP oportunístico é o baseline; hugetlb de 2 MiB em runtime é o modo hugetlb preferencial; 1 GiB em runtime é `best-effort` fail-closed, porque cada página exige 1 GiB fisicamente contíguo e 22 delas não podem ser garantidas após uptime, pressão ou fragmentação; 1 GiB no boot sobrevive apenas como perfil legado opt-in, declaradamente **não retornável** e fora da base qualificada. Nenhum fallback silencioso entre modos.
+
+**Testes:** sysfs, cgroup, libvirt e QEMU simulados, sem tocar o host; memória normal/THP; 2 MiB em runtime; 1 GiB em runtime parcial e indisponível; pool preexistente de terceiro; NUMA divergente; falha e sinal em cada janela; start recusado; release com múltiplas falhas; crash do QEMU; daemon indisponível; state órfão; dois ciclos completos; segunda execução no-op.
+
+**Aceite:** com a VM parada, toda a RAM e toda a CPU geridas pelo perfil retornável estão novamente elegíveis ao host, comprovado por `total/free/reserved/surplus` iguais ao baseline legítimo anterior; falha de aquisição **não inicia** a VM; falha de devolução permanece erro recuperável com evidência e não abandona a restauração de GPU, display e CPU; e pool ou isolamento pertencente a terceiro nunca é zerado.
 
 ---
 
@@ -1229,6 +1245,8 @@ grafo acíclico, e cada uma cita o ciclo concreto que evita.
 - [x] **I9.8:** implementar integralmente REQ-AIRLOCK-VERIFY, reutilizando a mesma avaliação efetiva usada no apply.
 - [x] **I9.9:** concluir REQ-VERIFY-FAILCLOSED em todos os verificadores.
 - [x] **I9.10:** concluir integração de REQ-WAIVERS em menu, pré-requisitos, execução direta, status e resumo.
+- [x] **I9.11:** revisão semântica do checkpoint (regra 15), com os defeitos encontrados corrigidos e cada um coberto por regressão que falha na árvore anterior.
+- [x] **I9.13:** fechar **REQ-BOOT-POSCONDICAO** provando o ARTEFATO regenerado, e não a fonte contra o backup da fonte, nos caminhos de apply e de rollback do GRUB. É pré-requisito de I9.12: a migração de I9.12 remove parâmetros de boot, e fazer isso sobre um rollback que anuncia sucesso sem provar o `grub.cfg` seria construir sobre falso sucesso.
 - [ ] **I9.12:** implementar **REQ-VM-RESOURCE-LIFECYCLE**, garantindo que recursos computacionais dedicados à VM sejam adquiridos somente para o ciclo da VM e devolvidos ao host depois que ela parar. **I9 fica reaberta por este requisito, registrado em 02/09/2026 após observar 22 GiB de HugePages de 1 GiB livres, porém permanentemente retirados da RAM comum com a VM desligada.** O contrato é:
   - **Decisão de viabilidade:** HugePages explícitas são otimização, não requisito funcional para a VM. Memória normal, com THP apenas oportunístico, é o baseline mais confiável e volta naturalmente ao host quando o QEMU termina. HugePages de 2 MiB alocadas em runtime são o modo hugetlb preferencial a avaliar. HugePages de 1 GiB em runtime são viáveis somente como modo `best-effort` fail-closed: cada página exige 1 GiB fisicamente contíguo e a alocação exata de 22 páginas não pode ser garantida após uptime, pressão ou fragmentação. Reserva de 1 GiB no boot pode continuar apenas como perfil legado/opt-in de desempenho, explicitamente incompatível com este requisito e fora da base qualificada retornável; nunca como padrão silencioso.
   - **RAM no start:** em `prepare/begin`, antes de desligar display ou destacar GPU, capturar baseline, boot ID, fingerprint de topologia/NUMA, política, tamanho do pool, páginas livres/reservadas/surplus e ownership; tomar lock global por pool; e, somente quando a política exigir hugetlb, adquirir exatamente o delta necessário. Alocação parcial, NUMA divergente, memória insuficiente, consumidor externo ou pós-condição não comprovada abortam o start, restauram o baseline e impedem o QEMU. Não fazer fallback silencioso entre 1 GiB, 2 MiB, THP e memória normal.
@@ -1238,6 +1256,53 @@ grafo acíclico, e cada uma cita o ciclo concreto que evita.
   - **Estado e recuperação:** hooks instalados permanecem Bash puro, autossuficientes e independentes do checkout; Python apenas calcula/valida plano, contagem, diff e fingerprints. Registrar estados `PREPARED/ACQUIRED/VERIFIED/RELEASING/RELEASED/RECOVERY_REQUIRED`, operação/VM/boot ID/baseline/delta, com lock, permissões privadas, idempotência, proteção contra double-acquire/double-release, duas VMs, daemon indisponível, crash do QEMU e state órfão. Power loss/reboot não depende de `release/end`: o boot seguinte deve reconciliar o baseline declarativo antes de permitir novo start.
   - **Testes e gates:** I10/I12 devem usar sysfs, cgroup, libvirt e QEMU simulados, sem alterar o host, cobrindo memória normal/THP, 2 MiB runtime, 1 GiB runtime parcial/indisponível, pool externo, NUMA, falha/sinal em cada janela, start recusado, release com múltiplas falhas, crash, daemon indisponível, recuperação órfã, dois ciclos completos e no-op. O Gate I9 exige baseline restaurado e recursos externos preservados; nenhum modo entra como qualificado por fixture.
   - **Aceite operacional I13:** em hardware autorizado, registrar métricas antes/durante/depois e repetir start/stop/crash: com VM parada, toda RAM e toda CPU gerenciadas pelo perfil retornável estão novamente elegíveis ao host; com VM ativa, QEMU consumiu exatamente a política escolhida; falha de aquisição não inicia a VM; falha de release permanece erro recuperável com evidência. Medir sucesso após uptime/fragmentação e benefício de cada modo. Se 1 GiB runtime não for confiável, qualificar memória normal/THP ou 2 MiB runtime e manter 1 GiB estática somente como exceção opt-in não retornável.
+
+### Sequência de migração deste host, medida em 03/09/2026 (entrada de I9.12)
+
+A auditoria de I9.12 encontrou algo que muda o tamanho da tarefa: **a etapa 17
+já implementa a ordem segura de remoção**, e a impõe estruturalmente, não por
+instrução ao operador. `--desfazer` detecta se o XML ainda exige HugePages e,
+se exigir, executa **somente** a fase 1/2 (retira a exigência do XML, prova a
+remoção no XML persistido, prova que nada não gerenciado mudou) e retorna
+pedindo uma segunda invocação. Só na segunda, com o XML já independente, ele
+retira `default_hugepagesz`, `hugepagesz` e `hugepages` **juntas** do boot,
+prova a ausência persistente e pede reboot. Pelo caminho suportado é impossível
+retirar o parâmetro de boot antes do XML.
+
+A assimetria que justifica essa ordem é mecânica, e vale registrar porque é o
+que torna a inversão perigosa: **XML exigindo 1 GiB com o pool ausente** faz o
+QEMU não conseguir mapear o backing store e o domínio não inicia — e a falha
+acontece **depois** do `prepare/begin`, isto é depois de o hook já ter parado o
+display manager e descarregado os módulos da NVIDIA, deixando o operador sem
+desktop e sem VM. **XML sem 1 GiB com o pool presente** apenas desperdiça as
+páginas. A migração tem de atravessar o desperdício, nunca a indisponibilidade.
+
+Estado medido antes da migração: `HUGEPAGES_1G=22`, `VM_RAM_MB=22528`, XML com
+`memoryBacking/hugepages` de 1 GiB, as três chaves ativas no GRUB, pool com 22
+páginas, e o `--verificar` da etapa 17 devolvendo `[ok] Pool ativo: 22 páginas
+de 1 GiB` — ou seja, o estado que este requisito trata como defeito é hoje
+relatado como sucesso.
+
+Sequência, na ordem, com a VM desligada e provada desligada:
+
+1. `bash etapas/52-cpu-pinning-hugepages.sh --desfazer` (1ª vez) retira o
+   `memoryBacking/hugepages` do XML, com backup em `BACKUPS_DIR` e rollback
+   provado por releitura semântica.
+2. Iniciar a VM uma vez e confirmar que ela sobe com memória comum. Esta é a
+   **única** janela em que "XML sem HugePages inicia" pode ser provado enquanto
+   o pool ainda existe; provar depois do reboot não distingue as duas causas.
+3. `bash etapas/52-cpu-pinning-hugepages.sh --desfazer` (2ª vez) retira as três
+   chaves do boot, juntas, pela transação de `lib/shell/boot.sh` — que só é
+   confiável **depois** de I9.13, porque até `43ec863` o rollback dela anunciava
+   regeneração do `grub.cfg` sem nunca conferir o artefato.
+4. Reiniciar uma vez e provar o baseline sem VM: `HugePages_Total=0`,
+   `Hugetlb=0` e `MemAvailable` de volta à ordem de 26 GiB, contra os
+   4,1 GiB medidos com o pool reservado.
+5. Só então declarar `MEMORIA_MODO` e habilitar o ciclo de vida dinâmico.
+
+A etapa 18 **não entra** nesta sequência neste host: não há `isolcpus`,
+`nohz_full` nem `rcu_nocbs` no `/proc/cmdline`, então o trabalho dela em I9.12 é
+recusar entrar nesse estado, não sair dele.
 
 **Como cada tarefa foi comprovada:**
 
@@ -1253,10 +1318,14 @@ grafo acíclico, e cada uma cita o ciclo concreto que evita.
 | I9.8 | prova da política Airlock em efeito, não do texto | `tests/test-i9-airlock-verify.sh`, commit `54327bf` |
 | I9.9 | provas compartilhadas dos verificadores | `tests/test-i9-verify-helpers.sh`, commits `8bf5fd6` e `57af49f` |
 | I9.10 | matriz de dispensas versionada e símbolo `[disp]` no menu | `tests/test-i9-waivers.sh`, `tests/check-waivers-matrix.py`, commits `7febdd2` e `da7df55` |
+| I9.11 | três defeitos da revisão semântica corrigidos: leitor de dispensa fail-closed, menu sem afirmação que ele não pode sustentar e o último `[ -f ] && v_ok` eliminado | `tests/test-i9-revisao-semantica.sh` (24 casos), commit `43ec863`; cada defeito reprova isoladamente na árvore de `91cd349` |
+| I9.12 (parcial) | núcleo puro `libexec/passthrough_core/resources.py` (plano, prova de pós-condição, plano de devolução, máquina de estados com reconciliação por boot ID), fotografia `recursos_fotografar` em `probes.sh`, chave `MEMORIA_MODO` no schema/allowlist/exemplo/rastreabilidade, e correção de collation em `tests/check-phase-manifest.sh` | `tests/python/test_resources.py`: 1146 casos no runner (135 métodos novos), **20 mutações aplicadas ao módulo e 20 pegas**; a suíte adversarial encontrou 6 defeitos no núcleo (`ValueError` escapando de `int('²')`, diagnóstico redigindo o próprio rótulo do módulo, resposta mudando de forma entre aceite e recusa em `plan` e em `verify`, recusa descartando `fingerprint`/`node_count` já calculados, e rótulo de `meminfo` sem teto), todos corrigidos e cobertos. O checker de manifesto afirmava ordem C sem fixar `LC_ALL=C`: sob a collation de `pt_BR.UTF-8` ele acusava erro FALSO num manifesto correto, porque a pontuação é ignorada no nível primário e `libexec/` vinha antes de `lib/shell/` |
+| I9.12 (parcial) | o dispatcher de `release` deixou de abandonar GPU e display por estado que ele não entendeu: chave desconhecida e valor inválido passaram a ACUMULAR falha e aplicar o padrão mais seguro (na dúvida o desktop volta), em vez de `exit 1` antes de qualquer restauração | `tests/test-i9-hooks-isolados.sh` casos 4b: invariante estática de que não sobra saída fatal entre ler o estado e restaurar, mais a exigência de que a chave desconhecida conte como falha. Na árvore de `43ec863` a invariante acusa a linha exata (`AUDIO_DRIVER ... exit 1`). A verificação é estática por limitação declarada: rodar o `release` de verdade exige root, porque antes de chegar ao estado ele cria o lock com dono root e recusa lock inseguro, e simular isso sem privilégio faria o teste passar pelos mocks, não pelo hook |
+| I9.13 | `_grub_cfg_copia` captura o artefato ANTES da janela; o rollback só anuncia sucesso quando o `grub.cfg` volta byte a byte ao estado anterior, e o apply recusa aplicador que devolveu zero sem regenerar | `tests/test-i5-cpu-boot.sh` caso 3e-bis: com a chamada 1 do `update-grub` regenerando divergente (o que um snippet de `/etc/default/grub.d` faz de verdade) e a chamada 2, a da restauração, devolvendo zero sem escrever, a árvore de `43ec863` imprime **"Rollback da fonte GRUB e regeneração do grub.cfg concluídos"** com o artefato ainda divergente; a árvore corrigida recusa a prova e nomeia a causa |
 
 ### Gate I9
 
-`common.sh` não é monolítico; sem ciclos/efeitos no source; mesmos entrypoints e superfície de privilégio; hooks independentes; estados Windows corretos; Airlock semântico; nenhum verifier com falso sucesso; revisão semântica sem bloqueador.
+`common.sh` não é monolítico; sem ciclos/efeitos no source; mesmos entrypoints e superfície de privilégio; hooks independentes; estados Windows corretos; Airlock semântico; nenhum verifier com falso sucesso; revisão semântica sem bloqueador; e, por I9.12, **baseline de recursos restaurado com a VM parada e recursos externos preservados**, com nenhum modo qualificado por fixture.
 
 ## I9B: Internacionalização (en, pt-BR, es)
 
@@ -1943,8 +2012,7 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | Unificação de estado | 2026-08-28 | `4590231` + working tree | `lib/common.sh` (trabalho do usuário, preservado e ligado), `etapas/00-inventario.sh`, `etapas/30-iommu-vfio.sh`, `util/diagnostico.sh`, `tests/test-inventario-redetectar.sh` (+251 linhas), `Guia-QEMU-Passthrough.md`, `troubleshooting.md`, este plano | `bash tests/test-inventario-redetectar.sh` duas vezes, idêntico; `bash tests/test-i6-inventory.sh`; 9 regressões injetadas em cópias, 9 pegas; `find` de `~/inventario-hardware` e da raiz de estado antes/depois idênticos (host intacto); coberto pelo gate canônico de I7.8 | **APROVADO (rc=0)** | fora das fases do plano, pedido do usuário: os relatórios (inventário, diagnóstico e grupos IOMMU) passaram a viver na MESMA raiz de estado de `LOG_ACOES_DIR`, com o caminho literal existindo em um lugar só e migração conferida oferecida pela etapa 1. A migração é transação: copia preservando metadados, prova conjunto de caminhos, contagem, tipo, modo, mtime, alvo de link e digest, e só então remove a origem; qualquer divergência desfaz a cópia e mantém a origem. Recusar é seguro e não bloqueia a etapa. `--verificar` não alcança a pergunta, então o verificador continua read-only | seção 12 | — |
 | I7 | 2026-08-28 | `4590231` + working tree | fases `I7.1` a `I7.8` | ver linhas acima | **CONCLUÍDA; Gate I7 APROVADO** | qualificação real de rede continua sendo I13, com hardware e autorização do usuário | seção 12 | executar I8 |
 | I8 | 2026-08-28 | `4590231` + working tree | novos `libexec/passthrough_core/platform.py`, `tests/python/test_platform.py`, `tests/test-i8-platform.sh`, `tests/manifests/i8-files.txt`; alterados `lib/platform.sh`, `libexec/passthrough_core/cli.py`, `tests/check-python-boundary.py`, `tests/run-gate-i1.sh`, `etapas/11-driver-nvidia.sh`, `menu.sh`, `tests/i1/mutators.tsv`, este plano | oráculo diferencial do rascunho (55 casos, 12 variáveis, zero divergência) antes de pousar; diferencial de 43 cenários ANTES/DEPOIS para a resolução de unidade systemd, diff limpo; 8 regressões injetadas no teste das 11 fixtures, 8 pegas; fumaça no host real (ubuntu 26.04 `supported`, `AuthenticAMD` suportado, GPU `10de`/nvidia suportada); **gate canônico reexecutado por mim**: `bash tests/run-gate-i1.sh` rc 0, manifesto de 140 arquivos, campanha I0 `full` de 49 grupos, **992** casos no core, `bash -n` em 57 arquivos | **APROVADO (rc=0)** | os classificadores em Bash foram REMOVIDOS, não duplicados: saíram `_plataforma_ler_os_release`, `_plataforma_decodificar_valor`, `_plataforma_detectar_imutabilidade`, `_plataforma_classificar_suporte`, `_plataforma_id_like_contem`, `_plataforma_sondar_unidade_fixture` e `_plataforma_classificar_unidade`. `guard_mutation` não mudou em nenhum byte e nenhum eixo entrou nela. **Limites declarados:** a fachada ainda captura só `lscpu` no eixo de CPU (ligar `/proc/cpuinfo` quebraria o perfil `intel` do envelope I1, porque os harnesses trocam comando por `PATH` e não conseguem redirecionar arquivo — fica para I14B); `plataforma_detectar_gpu_vendor` existe e publica, mas nenhum consumidor ainda decide por ela, porque a interseção dos eixos é I14C; cinco divergências fail-closed em entrada degenerada da resolução de unidade (controle/NUL na fixture, teto de 60 KiB e 4096 linhas, TAB em valor de `systemctl show`, nome de unidade fora do padrão, e um processo `python3` a mais por chamada) estão nominadas em I8.6. Medição que vale registrar: o teste de I8.5 é **estritamente mais forte** que o oráculo do gate I1 num ponto — tirar o ponto final de `MSG_BLOCKED` passa pelo `grep -Eiq` do envelope e é reprovado por ele. ShellCheck ausente localmente | seção 12, `scratchpad/gate-i8-final.log` | executar I9 |
-| I9 | | | | | não iniciado | | | aguarda revisão do usuário |
-| I9 | | | | | não iniciado | | | aguarda I8 |
+| I9 (I9.1 a I9.11) | 2026-08-30 a 2026-09-02 | `91cd349` a `43ec863` | novos `lib/shell/{base,ui,privilege,status,probes,storage,network-effects,libvirt,config,waivers}.sh`, `lib/policy/waivers.tsv`, `tests/check-waivers-matrix.py`, `tests/test-i9-{modulos,hooks-isolados,windows-state,airlock-verify,verify-helpers,waivers,revisao-semantica}.sh`, `tests/manifests/i9-files.txt`; alterados `lib/common.sh` (4145 para 80 linhas), `lib/shell/boot.sh`, `menu.sh`, `etapas/02-detectar-config.sh` | suítes dirigidas de I9.1 a I9.11 (37+9+50+59+41+24 casos); `GATE_FASE=I9 bash tests/run-gate-i1.sh` executado em 02/09/2026 com `MUTATOR_HARNESS_TMP_PARENT` e `TMPDIR` fora de `/tmp`: manifesto de **160** arquivos, envelope I1 com 30 mutadores diretos e 23 seleções de menu em 6 perfis duas vezes, `atualizar-host --validar` em 29 cenários, **campanha I0 `full` aprovada nos 49 grupos em 61 min**, e o laço histórico aprovado até `test-i9-airlock-verify.sh` | **PARCIAL: veredito final do gate NÃO observado** | O log do gate foi perdido antes de eu ler as linhas finais, e a notificação de "exit code 0" era do `awk` do wrapper, não do gate (a armadilha que a própria seção 12 já registra). Portanto o gate **não** conta como aprovado: nenhuma linha `OK: Gate I9 concluído` foi vista. Independentemente disso, **I9.12 reabriu a fase**, então o gate precisa ser reexecutado no fechamento dela. ShellCheck ausente neste host (a CI versionada o exige). Artefatos de I9B construídos nesta mesma sessão foram perdidos com o scratchpad e precisam ser reconstruídos | commit `43ec863`; `tests/test-i9-revisao-semantica.sh` (24 casos) no repositório | implementar I9.12 e reexecutar o Gate I9 |
 | I10 | | | | | não iniciado | | | aguarda I9 |
 | I11 | | | | | não iniciado | | | aguarda I10 |
 | I12 | | | | | não iniciado | | | aguarda I11 |
