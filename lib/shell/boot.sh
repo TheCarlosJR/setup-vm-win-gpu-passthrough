@@ -573,6 +573,43 @@ _grub_cfg_chaves_ausentes() {
     [ "$encontrou" -eq 1 ]
 }
 
+_grub_cfg_copia() {
+    # Copia o ARTEFATO que o firmware consome para um temporário do operador e
+    # imprime o caminho. É a referência que prova regeneração.
+    #
+    # REQ-BOOT-POSCONDICAO existe porque o rollback provava a fonte contra o
+    # backup da própria fonte (`cmp -s "$backup" "$arq"`) e nunca olhava o
+    # grub.cfg: um `update-grub` que devolvesse zero sem efeito emitia
+    # "regeneração concluída" com os parâmetros novos ainda no artefato.
+    #
+    # Cópia em vez de hash porque `sha256sum` não está no PATH restrito das
+    # suítes herméticas, e uma prova que depende de ferramenta ausente degrada
+    # para "não pôde ser lida" em todo cenário de teste. `cat`, `cmp` e
+    # `mktemp` já são exigidos por esta transação.
+    #
+    # A redireção acontece como o operador, então o temporário é dele mesmo
+    # quando o artefato só é legível por root, e a comparação depois não
+    # precisa de sudo.
+    local destino
+    [ -n "${GRUB_CFG_ARQUIVO:-}" ] || return 1
+    destino="$(mktemp)" || return 1
+    if [ -r "$GRUB_CFG_ARQUIVO" ]; then
+        cat -- "$GRUB_CFG_ARQUIVO" > "$destino" 2>/dev/null || {
+            rm -f -- "$destino"
+            return 1
+        }
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo cat -- "$GRUB_CFG_ARQUIVO" > "$destino" 2>/dev/null || {
+            rm -f -- "$destino"
+            return 1
+        }
+    else
+        rm -f -- "$destino"
+        return 1
+    fi
+    printf '%s\n' "$destino"
+}
+
 _grub_aplicar_cmdline() {
     boot_caminhos_resolver
     # Instala /etc/default/grub e regenera o grub.cfg numa única transação.
@@ -598,6 +635,12 @@ _grub_aplicar_cmdline() {
 
     backup="${arq}.bak-$(date +%Y%m%d-%H%M%S)-$$"
     staged="${arq}.vm-passthrough-$$"
+    # Identidade do grub.cfg ANTES de qualquer escrita. É a referência que o
+    # rollback tem de reproduzir para poder afirmar que regenerou
+    # (REQ-BOOT-POSCONDICAO). Capturada fora da subshell, porque subshell não
+    # propaga variável de volta.
+    local cfg_ref=""
+    cfg_ref="$(_grub_cfg_copia)" || cfg_ref=""
     sudo cp -a -- "$arq" "$backup" \
         || { rm -f -- "$tmp"; falhar "Falha ao criar backup do GRUB em $backup."; }
 
@@ -608,18 +651,34 @@ _grub_aplicar_cmdline() {
     (
         alterado=0
         concluido=0
+        cfg_pos=""
         rollback_grub() {
             local status="$1"
             trap - EXIT INT TERM
             sudo rm -f -- "$staged" >/dev/null 2>&1 || true
+            [ -z "$cfg_pos" ] || rm -f -- "$cfg_pos"
             if [ "$alterado" -eq 1 ] && [ "$concluido" -eq 0 ]; then
                 erro "Transação GRUB interrompida ou inválida; restaurando $backup."
+                cfg_pos=""
                 if sudo cp -a -- "$backup" "$arq" \
-                   && sudo update-grub \
-                   && sudo cmp -s -- "$backup" "$arq"; then
-                    aviso "Rollback da fonte GRUB e regeneração do grub.cfg concluídos."
+                   && sudo cmp -s -- "$backup" "$arq" \
+                   && sudo update-grub; then
+                    # A fonte voltou. Agora a prova que faltava: o artefato
+                    # consumido pelo firmware tem de voltar à identidade de
+                    # antes da janela. Um `update-grub` que devolve zero sem
+                    # efeito deixa os parâmetros novos no grub.cfg, e antes
+                    # desta verificação isso era anunciado como sucesso.
+                    cfg_pos="$(_grub_cfg_copia)" || cfg_pos=""
+                    if [ -n "$cfg_ref" ] && [ -n "$cfg_pos" ] \
+                       && cmp -s -- "$cfg_ref" "$cfg_pos"; then
+                        aviso "Rollback da fonte GRUB e regeneração do grub.cfg comprovados pela identidade do artefato."
+                    elif [ -z "$cfg_ref" ] || [ -z "$cfg_pos" ]; then
+                        erro "ROLLBACK GRUB NÃO COMPROVADO: a identidade de $GRUB_CFG_ARQUIVO não pôde ser lida. Não reinicie antes de revisar $arq e $GRUB_CFG_ARQUIVO."
+                    else
+                        erro "ROLLBACK GRUB NÃO COMPROVADO: a fonte voltou, mas $GRUB_CFG_ARQUIVO continua divergente do estado anterior à transação; o aplicador devolveu zero sem regenerar. Não reinicie antes de revisar $arq e $GRUB_CFG_ARQUIVO."
+                    fi
                 else
-                    erro "ROLLBACK GRUB NÃO COMPROVADO. Não reinicie antes de revisar $arq e /boot/grub/grub.cfg."
+                    erro "ROLLBACK GRUB NÃO COMPROVADO. Não reinicie antes de revisar $arq e $GRUB_CFG_ARQUIVO."
                 fi
             fi
             exit "$status"
@@ -634,6 +693,19 @@ _grub_aplicar_cmdline() {
         alterado=1
         sudo mv -f -- "$staged" "$arq" || exit 1
         sudo update-grub || exit 1
+        # A fonte mudou (o awk acima reescreveu a linha), então o artefato tem
+        # de ter sido regenerado. A verificação semântica logo abaixo cobre o
+        # caso normal; este teste fecha o resíduo em que o grub.cfg JÁ tinha o
+        # alvo enquanto a fonte não tinha, em que a checagem semântica passaria
+        # sem o aplicador ter feito nada.
+        cfg_pos="$(_grub_cfg_copia)" || cfg_pos=""
+        if [ -n "$cfg_ref" ] && [ -n "$cfg_pos" ] && cmp -s -- "$cfg_ref" "$cfg_pos"; then
+            rm -f -- "$cfg_pos"
+            erro "O aplicador do GRUB devolveu zero sem regenerar $GRUB_CFG_ARQUIVO: o artefato não mudou apesar de a fonte ter mudado."
+            exit 1
+        fi
+        rm -f -- "$cfg_pos"
+        cfg_pos=""
         if [ "$modo" = exato ]; then
             _grub_cfg_parametros_exatos "$verificacao" || exit 1
         elif [ "$modo" = ausente ]; then
@@ -644,6 +716,7 @@ _grub_aplicar_cmdline() {
         concluido=1
     ) || rc_tx=$?
     rm -f -- "$tmp"
+    [ -z "$cfg_ref" ] || rm -f -- "$cfg_ref"
     if [ "$rc_tx" -ne 0 ]; then
         erro "Alteração do GRUB não concluída; consulte as mensagens de rollback."
         # 130/143 precisam sobreviver: o chamador (e a transação de IOMMU acima

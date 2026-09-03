@@ -78,6 +78,29 @@ if [ -s "$ESTADO/falhar-update-grub-a-partir-de" ] \
    && [ "$CHAMADA" -ge "$(cat "$ESTADO/falhar-update-grub-a-partir-de")" ]; then
     exit 1
 fi
+if [ -s "$ESTADO/update-grub-errado-na-chamada" ] \
+   && [ "$CHAMADA" -eq "$(cat "$ESTADO/update-grub-errado-na-chamada")" ]; then
+    # Regenera de verdade (o artefato MUDA), mas com um cmdline que não é o
+    # que a fonte pediu: é o que um snippet de /etc/default/grub.d ou o
+    # GRUB_CMDLINE_LINUX fazem na prática. Faz a verificação semântica do
+    # apply reprovar COM o artefato já alterado, que é a única porta de
+    # entrada real do rollback interno do GRUB.
+    {
+        printf 'menuentry normal {\n linux /vmlinuz root=/dev/fixture quiet splash sobreposto=1\n}\n'
+        printf 'menuentry recovery {\n linux /vmlinuz root=/dev/fixture recovery nomodeset\n}\n'
+    } > "$PASSTHROUGH_TEST_ROOT/boot/grub/grub.cfg"
+    printf 'update-grub-errado\n' >> "$ESTADO/chamadas.log"
+    exit 0
+fi
+# Aplicador INERTE: devolve zero sem regenerar o artefato. É o comportamento
+# que REQ-BOOT-POSCONDICAO nomeia como "aplicador devolveu zero sem efeito", e
+# o `update-bootloader --config` do openSUSE faz exatamente isso quando
+# LOADER_TYPE está vazio. Sem este modo no mock, o defeito não é testável.
+if [ -s "$ESTADO/update-grub-inerte-a-partir-de" ] \
+   && [ "$CHAMADA" -ge "$(cat "$ESTADO/update-grub-inerte-a-partir-de")" ]; then
+    printf 'update-grub-inerte\n' >> "$ESTADO/chamadas.log"
+    exit 0
+fi
 PARAMS="$(awk -F'"' '/^GRUB_CMDLINE_LINUX_DEFAULT=/ {print $2}' \
     "$PASSTHROUGH_TEST_ROOT/etc/default/grub")"
 {
@@ -156,6 +179,8 @@ GRUB
         "$ROOT/estado/update-grub.contagem" \
         "$ROOT/estado/falhar-update-grub-a-partir-de" \
         "$ROOT/estado/falhar-update-grub.sticky" "$ROOT/estado/falhar-initramfs" \
+        "$ROOT/estado/update-grub-inerte-a-partir-de" \
+        "$ROOT/estado/update-grub-errado-na-chamada" \
         "$ROOT/estado/falhar-mv-vfio"
     : > "$ROOT/estado/chamadas.log"
 }
@@ -350,6 +375,40 @@ contem "$(cat "$TMPDIR_TESTE/tx5.log")" 'ROLLBACK DE BOOT NÃO COMPROVADO' \
     'rollback de boot não comprovado foi anunciado como sucesso'
 contem "$(cat "$TMPDIR_TESTE/tx5.log")" 'NÃO REINICIE' \
     'rollback não comprovado não instruiu a não reiniciar'
+passou
+
+# 3e-bis. REQ-BOOT-POSCONDICAO: aplicador que devolve zero SEM regenerar.
+#     Este é o defeito que a auditoria de 23/08/2026 registrou e que sobreviveu
+#     até 03/09/2026: o rollback restaurava a fonte, chamava update-grub e
+#     validava com `cmp "$backup" "$arq"` — a fonte contra o backup DA FONTE.
+#     O artefato que o firmware realmente lê nunca era conferido, então um
+#     aplicador inerte anunciava sucesso com o grub.cfg ainda divergente.
+#
+#     A porta de entrada do rollback interno é a verificação semântica falhando
+#     COM o artefato já alterado: chamada 1 regenera com um cmdline que não é o
+#     que a fonte pediu (o que um snippet de /etc/default/grub.d faz de
+#     verdade), e a chamada 2, a da restauração, devolve zero sem escrever.
+semear_boot
+printf '1\n' > "$ROOT/estado/update-grub-errado-na-chamada"
+printf '2\n' > "$ROOT/estado/update-grub-inerte-a-partir-de"
+if ( kernel_param_add 'vfio-pci.ids=10de:2504' ) > "$TMPDIR_TESTE/tx5b.log" 2>&1; then
+    falha 'apply com artefato divergente não falhou'
+fi
+contem "$(cat "$TMPDIR_TESTE/tx5b.log")" 'ROLLBACK GRUB NÃO COMPROVADO' \
+    'rollback com aplicador inerte foi anunciado como comprovado'
+contem "$(cat "$TMPDIR_TESTE/tx5b.log")" 'devolveu zero sem regenerar' \
+    'o diagnóstico não nomeou a causa (aplicador inerte na restauração)'
+# A fonte VOLTOU — é o que o `cmp` antigo provava — e é exatamente por isso que
+# provar a fonte não bastava: o artefato continua com o estado divergente.
+contem "$(awk -F'"' '/^GRUB_CMDLINE_LINUX_DEFAULT=/ {print $2}' "$ROOT/etc/default/grub")" \
+    'quiet' 'a fonte do GRUB não foi restaurada'
+if grep -q 'vfio-pci.ids' "$ROOT/etc/default/grub"; then
+    falha 'a fonte do GRUB ficou com o parâmetro novo apesar do rollback'
+fi
+contem "$(cat "$ROOT/boot/grub/grub.cfg")" 'sobreposto=1' \
+    'o cenário não deixou artefato divergente; o teste perdeu o alvo'
+rm -f -- "$ROOT/estado/update-grub-errado-na-chamada" \
+    "$ROOT/estado/update-grub-inerte-a-partir-de"
 passou
 
 # 3f. Conteúdo de terceiros sobrevive a uma transação completa.
