@@ -25,7 +25,10 @@ DYNAMIC_NAMES = {"eval", "exec", "compile", "__import__"}
 # só para `inventory.py`, por nome de arquivo. `platform.py` faz a mesma
 # promessa — recebe capturas do Bash e nunca abre `/etc/os-release` —, e sem
 # entrar aqui essa promessa ficaria apenas nos testes, fora do gate.
-PURE_DOMAIN_FILES = {"inventory.py", "platform.py"}
+# I9.12: `resources.py` entra pelo mesmo motivo. Ele recebe a fotografia do
+# host como texto e nunca lê sysfs, `/proc` ou arquivo de estado: quem observa
+# e quem escreve é o Bash, e é isso que mantém o hook autossuficiente.
+PURE_DOMAIN_FILES = {"inventory.py", "platform.py", "resources.py"}
 PURE_DOMAIN_FORBIDDEN_NAMES = {"open", "input"}
 PURE_DOMAIN_FORBIDDEN_MODULES = {"os", "pathlib", "shutil", "sys", "tempfile"}
 

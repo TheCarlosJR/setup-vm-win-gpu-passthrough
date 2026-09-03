@@ -31,6 +31,7 @@ from . import (
     network,
     network_xml,
     nvidia_lookup,
+    resources,
     platform,
     protocol,
     qemu_image,
@@ -70,7 +71,9 @@ USAGE = (
     "  platform-gpu-vendor, platform-service-resolve,\n"
     "  cpu-topology, cpu-layout, cpu-plan, cpu-memory,\n"
     "  inventory-parse, inventory-diff, inventory-disk-plan,\n"
-    "  inventory-usb-resolve, inventory-normalize\n"
+    "  inventory-usb-resolve, inventory-normalize,\n"
+    "  resources-plan, resources-verify, resources-release-plan,\n"
+    "  resources-state\n"
     "  passthrough_core_cli.py [--traceback] SUBCOMANDO-DE-CONFIG\n"
     "      --dir-fd=N (--stdin | --input-file=CAMINHO) [--format=json|pairs]\n"
     "  Subcomandos de configuração: config-load, config-publish,\n"
@@ -724,6 +727,13 @@ _PURE_COMMANDS: dict[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] = {
     "nvidia-product-match": nvidia_lookup.product_match,
     "platform-cpu-vendor": platform.cpu_vendor_fact,
     "platform-detect": platform.support_state,
+    # REQ-VM-RESOURCE-LIFECYCLE (I9.12): cálculo puro do ciclo de aquisição e
+    # devolução. A fotografia do host viaja como TEXTO no payload, como em
+    # config-load: quem lê sysfs é o Bash, nunca o core.
+    "resources-plan": resources.plan_command,
+    "resources-release-plan": resources.release_plan_command,
+    "resources-state": resources.state_command,
+    "resources-verify": resources.verify_command,
     "platform-gpu-vendor": platform.gpu_vendor_fact,
     "platform-os-release": platform.os_release_facts,
     "platform-service-resolve": platform.service_unit_choice,

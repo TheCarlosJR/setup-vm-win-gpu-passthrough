@@ -9,8 +9,10 @@ lib/shell/status.sh
 lib/shell/storage.sh
 lib/shell/ui.sh
 lib/shell/waivers.sh
+libexec/passthrough_core/resources.py
 tests/check-waivers-matrix.py
 tests/manifests/i9-files.txt
+tests/python/test_resources.py
 tests/test-i9-airlock-verify.sh
 tests/test-i9-hooks-isolados.sh
 tests/test-i9-modulos.sh
