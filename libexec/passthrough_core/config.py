@@ -281,6 +281,18 @@ SCHEMA: dict[str, tuple[Callable[[str], bool], str, str]] = {
     "AIRLOCK_DIR": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
     "AIRLOCK_BIND": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
     "BACKUPS_VM_DIR": (_safe_absolute_path, LOCAL_IDENTIFIER, "caminho absoluto"),
+    # I9.12 (REQ-VM-RESOURCE-LIFECYCLE): política de memória da VM. PUBLIC
+    # porque é escolha de perfil, não identidade do host. Vazio significa
+    # "ainda não decidido" e NÃO é sinônimo de nenhum modo: o requisito proíbe
+    # padrão silencioso, então a etapa 17 exige a decisão explícita antes de
+    # mutar qualquer coisa. Os valores estão em ordem de confiabilidade de
+    # devolução, e `hugetlb-1g-boot` é o perfil legado, declaradamente não
+    # retornável.
+    "MEMORIA_MODO": (
+        _enum("normal", "hugetlb-2m", "hugetlb-1g", "hugetlb-1g-boot"),
+        PUBLIC,
+        "normal, hugetlb-2m, hugetlb-1g ou hugetlb-1g-boot",
+    ),
 }
 
 KEYS = tuple(SCHEMA)

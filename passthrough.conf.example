@@ -121,3 +121,19 @@ BACKUPS_VM_DIR=""                # destino explícito, com prioridade.
 # BACKUP_DISPENSADO foi removida pelo mesmo motivo de AIRLOCK_DISPENSADO: a
 # etapa 70 e util/backup-vm.sh sempre decidiram pelo destino configurado, então
 # a flag não dispensava nada. A etapa 02 remove a linha de configurações antigas.
+
+# --- Política de memória da VM (REQ-VM-RESOURCE-LIFECYCLE, I9.12) -------------
+# Decide COMO a RAM da VM é obtida e, principalmente, se ela volta ao host
+# quando a VM para. Vazio = ainda não decidido; a etapa 17 exige a escolha
+# explícita e não assume nenhum modo por padrão.
+#
+#   normal           memória comum, THP oportunístico. Volta ao host quando o
+#                    QEMU termina. É o baseline recomendado.
+#   hugetlb-2m       páginas de 2 MiB adquiridas no start e devolvidas no stop.
+#   hugetlb-1g       páginas de 1 GiB adquiridas no start (best-effort
+#                    fail-closed: cada página exige 1 GiB contíguo) e
+#                    devolvidas no stop.
+#   hugetlb-1g-boot  perfil LEGADO: as páginas vêm de default_hugepagesz,
+#                    hugepagesz e hugepages no boot e NÃO voltam ao host com a
+#                    VM desligada. Opt-in, fora da base qualificada retornável.
+MEMORIA_MODO=""

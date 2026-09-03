@@ -952,3 +952,132 @@ plano_memoria_vm() {
         return 1
     fi
 }
+
+# --- Fotografia de recursos dedicados (REQ-VM-RESOURCE-LIFECYCLE, I9.12) ------
+# Observação pura do host, no formato fechado que libexec/passthrough_core/
+# resources.py interpreta: um fato por linha, campos separados por TAB. A
+# captura passa por caminho_sistema, então a suíte encena sysfs e /proc numa
+# raiz temporária e o mesmo código roda contra host real e contra fixture.
+#
+# Por que a fotografia é TEXTO e não um punhado de variáveis: o número de pools
+# e de nós NUMA varia por máquina, e transportar isso pelo canal de pares
+# exigiria chave indexada para cada combinação. O core recebe o texto, valida o
+# formato inteiro e recusa o que não reconhece.
+
+recursos_fotografar() {
+    # recursos_fotografar -> escreve a fotografia em stdout. Não muta nada.
+    local base_pools node_dir tamanho campo arquivo valor node_id
+    local meminfo boot_id_arq thp_dir
+
+    base_pools="$(caminho_sistema /sys/kernel/mm/hugepages 2>/dev/null || true)"
+    meminfo="$(caminho_sistema /proc/meminfo 2>/dev/null || true)"
+    boot_id_arq="$(caminho_sistema /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    thp_dir="$(caminho_sistema /sys/kernel/mm/transparent_hugepage 2>/dev/null || true)"
+    node_dir="$(caminho_sistema /sys/devices/system/node 2>/dev/null || true)"
+
+    if [ -n "$boot_id_arq" ] && [ -r "$boot_id_arq" ]; then
+        IFS= read -r valor < "$boot_id_arq" || valor=""
+        # O boot ID é identidade de máquina ligada, não segredo, mas também não
+        # é texto livre: só o formato UUID entra na fotografia.
+        case "$valor" in
+            [0-9a-f]*-*-*-*-*) printf 'boot_id\t%s\n' "$valor" ;;
+        esac
+    fi
+
+    # Pools de página grande, um bloco por tamanho.
+    if [ -n "$base_pools" ] && [ -d "$base_pools" ]; then
+        for arquivo in "$base_pools"/hugepages-*; do
+            [ -d "$arquivo" ] || continue
+            tamanho="${arquivo##*/hugepages-}"
+            tamanho="${tamanho%kB}"
+            case "$tamanho" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            for campo in nr_hugepages free_hugepages resv_hugepages surplus_hugepages; do
+                [ -r "$arquivo/$campo" ] || continue
+                IFS= read -r valor < "$arquivo/$campo" || continue
+                case "$valor" in
+                    ''|*[!0-9]*) continue ;;
+                esac
+                printf 'pool\t%s\t%s\t%s\n' "$tamanho" "${campo%%_*}" "$valor"
+            done
+        done
+    fi
+
+    # Contadores por nó NUMA. Sem eles o core recusa planejar em host de mais de
+    # um nó, que é o comportamento exigido pelo requisito.
+    local nodes=0
+    if [ -n "$node_dir" ] && [ -d "$node_dir" ]; then
+        for arquivo in "$node_dir"/node[0-9]*; do
+            [ -d "$arquivo" ] || continue
+            node_id="${arquivo##*/node}"
+            case "$node_id" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            nodes=$((nodes + 1))
+            local pool_node
+            for pool_node in "$arquivo"/hugepages/hugepages-*; do
+                [ -d "$pool_node" ] || continue
+                tamanho="${pool_node##*/hugepages-}"
+                tamanho="${tamanho%kB}"
+                case "$tamanho" in
+                    ''|*[!0-9]*) continue ;;
+                esac
+                for campo in nr_hugepages free_hugepages; do
+                    [ -r "$pool_node/$campo" ] || continue
+                    IFS= read -r valor < "$pool_node/$campo" || continue
+                    case "$valor" in
+                        ''|*[!0-9]*) continue ;;
+                    esac
+                    printf 'node\t%s\t%s\t%s\t%s\n' \
+                        "$node_id" "$tamanho" "${campo%%_*}" "$valor"
+                done
+            done
+        done
+    fi
+    [ "$nodes" -gt 0 ] && printf 'nodes\t%s\n' "$nodes"
+
+    # Só os campos de /proc/meminfo que o plano usa. Copiar o arquivo inteiro
+    # colocaria dado do host que ninguém valida dentro do payload do core.
+    if [ -n "$meminfo" ] && [ -r "$meminfo" ]; then
+        local linha nome unidade
+        while IFS= read -r linha; do
+            case "$linha" in
+                'MemTotal:'*|'MemFree:'*|'MemAvailable:'*|'Hugetlb:'*|'AnonHugePages:'*)
+                    # A separação é por espaço em branco, com `read`, e não por
+                    # expansão de parâmetro: /proc/meminfo alinha o valor com
+                    # uma quantidade variável de espaços, e `${v## }` remove
+                    # apenas UM (o padrão casa um caractere), o que fazia todo
+                    # o bloco ser descartado pela checagem de dígito.
+                    read -r nome valor unidade <<< "$linha"
+                    nome="${nome%:}"
+                    case "$valor" in
+                        ''|*[!0-9]*) continue ;;
+                    esac
+                    [ "$unidade" = kB ] || continue
+                    printf 'meminfo\t%s\t%s\n' "$nome" "$valor"
+                    ;;
+            esac
+        done < "$meminfo"
+    fi
+
+    if [ -n "$thp_dir" ] && [ -d "$thp_dir" ]; then
+        for campo in enabled defrag; do
+            [ -r "$thp_dir/$campo" ] || continue
+            IFS= read -r valor < "$thp_dir/$campo" || continue
+            # O kernel publica "always [madvise] never"; o valor efetivo é o que
+            # está entre colchetes, e é ele que interessa ao plano.
+            case "$valor" in
+                *'['*']'*)
+                    valor="${valor#*[}"
+                    valor="${valor%%]*}"
+                    ;;
+            esac
+            case "$valor" in
+                ''|*[!a-z_-]*) continue ;;
+            esac
+            printf 'thp\t%s\t%s\n' "$campo" "$valor"
+        done
+    fi
+    return 0
+}

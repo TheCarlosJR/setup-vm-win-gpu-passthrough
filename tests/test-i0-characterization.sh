@@ -183,7 +183,7 @@ EXAMPLE_HASH_AFTER=$(sha256sum "$ROOT/passthrough.conf.example")
 # Baseline atualizado em I6: o exemplo ganhou os fingerprints físicos de
 # sistema, workingDisk e HD1, todos vazios até a redetecção explícita. O hash
 # anterior era 16dba90bf8513ddccf9ba59ea2e0c80514aea427514dac605240b66c07bc63ff.
-[[ $EXAMPLE_HASH_BEFORE == e9ca7aef879147bffe2fe2044035c2c224c79df105bd87a064ceb8178bfa50db ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
+[[ $EXAMPLE_HASH_BEFORE == 77323888c1e12cdfed6bd60a9d169b3d8a9f073000493df3fb30e9fec669ec8e ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
 [[ $ROUNDTRIP_BEFORE != "$(sha256sum "$TMP/batch-before" | cut -d' ' -f1)" ]] || : # mudança anterior foi intencional
 
 # A matriz de I0 deve cobrir cada chave pública individualmente, inclusive as
