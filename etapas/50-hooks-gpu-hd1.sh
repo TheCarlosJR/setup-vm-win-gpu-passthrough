@@ -20,7 +20,7 @@
 # Recuperar a GPU no host não desfaz a configuração persistente; após sucesso,
 # a reversão exige restaurar os backups de XML/hooks em janela de manutenção.
 # ============================================================================
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
@@ -311,10 +311,11 @@ verificar() {
         v_indeterminado "Hook release/end existe mas não é legível; a geração instalada não pôde ser comprovada ($release)."
     elif LC_ALL=C grep -qxF 'HOOK_LOG_DIR=/var/log/vm-passthrough' "$release" 2>/dev/null \
          && LC_ALL=C grep -qxF 'HOOK_LOG_ARQUIVO="$HOOK_LOG_DIR/hooks.log"' "$release" 2>/dev/null \
-         && LC_ALL=C grep -qE '^HOOK_VERSAO=' "$release" 2>/dev/null; then
+         && LC_ALL=C grep -qxF "$(printf 'HOOK_VERSAO=%q' "$SCRIPT_VERSION")" \
+              "$release" 2>/dev/null; then
         v_ok "Hooks com log persistente de retomada em /var/log/vm-passthrough/hooks.log."
     else
-        v_falta "Hooks instalados são de geração antiga (sem log persistente nem retomada reforçada do desktop); reexecute a etapa 14 para atualizá-los."
+        v_falta "Hooks instalados são de geração antiga (versão diferente de $SCRIPT_VERSION, ou sem log persistente e retomada reforçada do desktop); reexecute a etapa 14 para atualizá-los."
     fi
     # Um marcador que o hook não consegue ler não é fail-closed: legibilidade e
     # conteúdo passaram a ser provados, no lugar do `[ -f ]` isolado.
@@ -1010,20 +1011,52 @@ fi
 DM_WAS_ACTIVE=""
 GPU_DRIVER=""
 AUDIO_DRIVER=""
+# O acumulador nasce ANTES da leitura do estado, e isso é o ponto.
+#
+# Até 03/09/2026 uma chave desconhecida ou um valor inválido faziam `exit 1`
+# AQUI, antes de qualquer restauração: a GPU não voltava ao host e o display
+# manager não subia, deixando o operador com tela preta porque a limpeza
+# anterior não foi ENTENDIDA. O contrato de REQ-VM-RESOURCE-LIFECYCLE proíbe
+# isso em letra ("o dispatcher de release não pode abandonar GPU/display/CPU
+# porque uma limpeza anterior falhou"), e I9.12 vai acrescentar chaves neste
+# mesmo arquivo — um hook antigo lendo estado novo cairia exatamente aqui.
+#
+# Agora tudo nesta seção ACUMULA falha, aplica o padrão mais seguro e segue
+# para a restauração. O código de saída no fim continua denunciando que algo
+# não foi entendido, e o estado continua preservado para diagnóstico.
+FALHAS=0
 while IFS='=' read -r chave valor; do
     case "$chave" in
         DM_WAS_ACTIVE) DM_WAS_ACTIVE="$valor" ;;
         GPU_DRIVER) GPU_DRIVER="$valor" ;;
         AUDIO_DRIVER) AUDIO_DRIVER="$valor" ;;
         HD1_ALVO|HD1_DEVNO|HD1_IDENTIDADE|HD1_FINGERPRINT) : ;;
-        *) dizer_erro "chave de estado desconhecida: $chave"; exit 1 ;;
+        '') : ;;
+        *)
+            dizer_erro "chave de estado desconhecida: $chave; a restauração segue mesmo assim"
+            FALHAS=$((FALHAS + 1))
+            ;;
     esac
 done < "$STATE_FILE"
-[[ "$DM_WAS_ACTIVE" =~ ^[01]$ ]] || { dizer_erro "estado DM inválido"; exit 1; }
-[ "$GPU_DRIVER" = nvidia ] || { dizer_erro "driver GPU de estado inválido"; exit 1; }
-[[ "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]] || { dizer_erro "driver de áudio inválido"; exit 1; }
+# Padrão seguro para o desktop: na dúvida, devolver a tela ao operador. Não
+# iniciar o DM quando ele estava ativo é tela preta; iniciá-lo quando não
+# estava é recuperável com um comando.
+if [[ ! "$DM_WAS_ACTIVE" =~ ^[01]$ ]]; then
+    dizer_erro "estado DM inválido; assumindo que estava ativo para não deixar tela preta"
+    DM_WAS_ACTIVE=1
+    FALHAS=$((FALHAS + 1))
+fi
+if [ "$GPU_DRIVER" != nvidia ]; then
+    dizer_erro "driver GPU de estado inválido; assumindo nvidia, que é o único suportado"
+    GPU_DRIVER=nvidia
+    FALHAS=$((FALHAS + 1))
+fi
+if [[ ! "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]]; then
+    dizer_erro "driver de áudio inválido; nenhum será carregado"
+    AUDIO_DRIVER=""
+    FALHAS=$((FALHAS + 1))
+fi
 
-FALHAS=0
 GPU_PRONTA=1
 GPU_ESTAVEL=1
 for modulo in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do

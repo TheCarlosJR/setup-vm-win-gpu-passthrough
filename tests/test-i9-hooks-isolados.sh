@@ -139,6 +139,48 @@ for hook in prepare.sh release.sh; do
     passo
 done
 
+# --- 4b. O release não abandona GPU e display por estado não entendido ------
+# Até 03/09/2026 uma chave desconhecida no arquivo de estado fazia `exit 1`
+# ANTES de qualquer restauração: a GPU não voltava ao host e o display manager
+# não subia, e o operador ficava com tela preta porque a limpeza anterior não
+# foi ENTENDIDA. O contrato de REQ-VM-RESOURCE-LIFECYCLE proíbe isso em letra,
+# e I9.12 vai acrescentar chaves neste mesmo arquivo — um hook antigo lendo
+# estado novo cairia exatamente aqui.
+#
+# A verificação é ESTÁTICA, e a limitação é declarada: rodar o release de
+# verdade exigiria root, porque antes de chegar ao estado ele cria o diretório
+# de lock com dono root e RECUSA lock que não seja seguro. Simular tudo isso
+# sem privilégio produziria um teste que passa por causa dos mocks, não por
+# causa do hook. O que dá para provar sem root, e é o que importa aqui, é que
+# entre a leitura do estado e a restauração não sobrou nenhuma saída fatal.
+RELEASE_FONTE="$EXEC/release.sh"
+LINHA_ESTADO=$(grep -n 'done < "\$STATE_FILE"' "$RELEASE_FONTE" | head -1 | cut -d: -f1)
+[ -n "$LINHA_ESTADO" ] \
+    || fail 'não encontrei a leitura do arquivo de estado no hook release'
+LINHA_RESTAURA=$(awk -v ini="$LINHA_ESTADO" 'NR > ini && /modprobe "\$modulo"/ { print NR; exit }' \
+    "$RELEASE_FONTE")
+[ -n "$LINHA_RESTAURA" ] \
+    || fail 'não encontrei o laço de modprobe que restaura a GPU no hook release'
+JANELA=$(sed -n "${LINHA_ESTADO},${LINHA_RESTAURA}p" "$RELEASE_FONTE")
+if printf '%s\n' "$JANELA" | grep -qE '(^|[^_[:alnum:]])exit[[:space:]]+[1-9]'; then
+    printf '%s\n' "$JANELA" | grep -nE '(^|[^_[:alnum:]])exit[[:space:]]+[1-9]' >&2
+    fail 'o release voltou a abandonar GPU/display entre ler o estado e restaurar'
+fi
+passo
+
+# E a chave desconhecida precisa CONTAR como falha, não passar batida: sem
+# isto, tolerar viraria ignorar, e o hook sairia 0 com estado que ele não
+# entendeu.
+ARM_DESCONHECIDA=$(awk -v ini="$LINHA_ESTADO" '
+    NR < ini && /chave de estado desconhecida/ { achou = NR }
+    END { print achou }' "$RELEASE_FONTE")
+[ -n "$ARM_DESCONHECIDA" ] \
+    || fail 'o release deixou de relatar chave de estado desconhecida'
+CONTEXTO=$(sed -n "${ARM_DESCONHECIDA},$((ARM_DESCONHECIDA + 2))p" "$RELEASE_FONTE")
+printf '%s\n' "$CONTEXTO" | grep -q 'FALHAS=' \
+    || fail 'chave desconhecida não incrementa o contador de falhas do release'
+passo
+
 # O filtro udev decide NÃO agir quando a ação não é dele; agir seria
 # justamente o laço que ele existe para cortar.
 executar_isolado nvidia-udev-filtro.sh evento-desconhecido nvidia-drm
