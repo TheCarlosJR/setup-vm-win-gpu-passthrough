@@ -2,6 +2,15 @@
 # Recusa arquivos novos/untracked ou adicionados ao index fora dos manifests.
 set -euo pipefail
 
+# Este checker AFIRMA ordem C, então ele não pode depender da collation de quem
+# o chama. Sob o gate isso não aparecia, porque tests/run-gate-i1.sh já exporta
+# LC_ALL=C; rodado direto pelo operador (que a regra 19 da seção 0.1 do plano
+# incentiva), a collation de pt_BR.UTF-8 ignora a pontuação no nível primário e
+# ordena "libexec/..." antes de "lib/shell/...", produzindo erro FALSO num
+# manifesto correto — e, na direção oposta, aceitando manifesto de fato fora de
+# ordem. Comparação de bytes é o contrato; o locale do operador não é.
+export LC_ALL=C
+
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
     || { printf 'ERRO: execute dentro de um checkout Git.\n' >&2; exit 2; }
 ROOT=$(realpath -- "$ROOT")
