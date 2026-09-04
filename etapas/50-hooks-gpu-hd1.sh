@@ -513,6 +513,16 @@ mem_adquirir() {
         mem_dizer "política de memória '$MEMORIA_MODO': o ciclo de vida não toca no pool"
         return 0
     }
+    # Num modo de runtime, zero página exigida é incoerente: ou a política foi
+    # recusada pelo planejador na renderização (e o hook recebeu 0), ou a
+    # configuração está inconsistente. Nos dois casos o start é recusado, em
+    # vez de a VM subir sem as páginas que o perfil promete.
+    case "$MEM_PAGES_NEEDED" in
+        ''|*[!0-9]*|0)
+            mem_erro "modo '$MEMORIA_MODO' exige páginas, mas o plano assado nos hooks pede $MEM_PAGES_NEEDED; reexecute a etapa 14 depois de corrigir a política"
+            return 1
+            ;;
+    esac
     [ -d "$MEM_POOL_DIR" ] \
         || { mem_erro "o host não expõe pool de ${MEM_PAGE_KB} kB"; return 1; }
     local nr livre resv surplus delta alvo livre_depois
@@ -597,9 +607,19 @@ mem_devolver() {
         esac
     done < "$MEM_STATE_FILE"
 
-    case "$delta$base_nr$page_kb" in
-        ''|*[!0-9]*) mem_erro "estado de memória ilegível ou incompleto; devolução impossível"; return 1 ;;
-    esac
+    # Cada campo é validado SOZINHO. Concatenar para validar em um só teste
+    # esconde campo vazio atrás do vizinho, e o campo que falta é justamente o
+    # que decide quantas páginas tirar do pool.
+    local campo_nome campo_valor
+    for campo_nome in delta base_nr page_kb base_free base_resv base_surplus; do
+        eval "campo_valor=\${$campo_nome}"
+        case "$campo_valor" in
+            ''|*[!0-9]*)
+                mem_erro "estado de memória sem o campo '$campo_nome' ou com valor não numérico; devolução impossível e o pool não será tocado"
+                return 1
+                ;;
+        esac
+    done
 
     boot_atual="$(mem_boot_id)" || { mem_erro "boot_id ilegível; devolução impossível"; return 1; }
     if [ -n "$boot_state" ] && [ "$boot_state" != "$boot_atual" ]; then
@@ -1432,7 +1452,7 @@ gerar_conjunto_hooks() {
     memoria_plano_resolver || true
     if [ -n "$MEM_PLANO_AVISO" ]; then
         aviso "Política de memória: $MEM_PLANO_AVISO"
-        info "Os hooks são renderizados assim mesmo; a decisão que vale é a do start, e é lá que o hook recusa se o pool não permitir."
+        info "Os hooks são renderizados assim mesmo. Recusa transitória (consumidor no pool agora, memória apertada agora) é reavaliada no start. Recusa estrutural faz o plano assar zero páginas, e nesse caso o hook RECUSA o start em vez de subir a VM sem as páginas que o perfil promete."
     fi
     gerar_dispatcher "$diretorio/qemu" "$legado"
     gerar_prepare "$diretorio/prepare.sh"

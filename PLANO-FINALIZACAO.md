@@ -2,7 +2,7 @@
 
 > **Data de consolidação:** 16 de agosto de 2026
 > **Executor-alvo:** Claude Code (Opus 5)
-> **Status:** fases I0 e I1 concluídas e reverificadas em 16 de agosto de 2026; fases I2, I3, I4 e I5 concluídas em 17 de agosto de 2026; I6 concluída em 23 de agosto de 2026; I7 concluída em 28 de agosto de 2026 (Gate I7 aprovado após a revisão semântica de rollback, `I7.8`); I8 concluída em 28 de agosto de 2026 (Gate I8 aprovado); fases I9 a I14 pendentes
+> **Status:** I0 e I1 concluídas e reverificadas em 16/08/2026; I2 a I5 em 17/08/2026; I6 em 23/08/2026; I7 e I8 em 28/08/2026 (Gates I7 e I8 aprovados). **I9 está REABERTA:** as tarefas I9.1 a I9.11 e I9.13 estão feitas e provadas, e o Gate I9 chegou a rodar em 02/09/2026 sem que o veredito final fosse observado; a fase foi reaberta por **I9.12 (REQ-VM-RESOURCE-LIFECYCLE)**, cuja migração deste host foi concluída em 03/09/2026 e cuja metade executora está implementada e coberta por bateria com sysfs simulado. Restam de I9.12 a etapa 18 e a qualificação em hardware (I13). Fases I9B a I14 pendentes
 > **Escopo:** correções funcionais e de segurança, migração arquitetural híbrida Bash/Python, testes/CI, documentação, qualificação real de Ubuntu/Pop!_OS e, por último, expansão multidistribuição
 > **Substitui integralmente:** `PLANO-CORRECOES-AUDITORIA.md` (blocos A, B e C registrados como executados; itens restantes absorvidos no código atual e nos deltas de I0) e `PLANO-INTEGRADO-MELHORIAS-MIGRACAO-PYTHON.md` (todo o conteúdo normativo foi transportado para cá). Nenhum dos dois é necessário para executar este documento.
 
@@ -63,6 +63,7 @@ A ordem de execução **não é a ordem numérica**. Siga a coluna "ordem".
 | 10 | I8 | Plataforma, capabilities e **eixos de hardware** | `CONCLUÍDA` 2026-08-28 | `platform.py`, eixos distro/CPU/GPU |
 | 11 | I9 | Modularização Bash e requisitos P1 restantes | `REABERTA` por I9.12 | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY, REQ-VM-RESOURCE-LIFECYCLE |
 | 12 | **I9B** | **Internacionalização (en, pt-BR, es)** | **ABERTA (nova)** | `lang/*.msg`, `lib/shell/i18n.sh`, `messages.py` |
+| — | nota | A infraestrutura de I9B chegou a ser construída e provada em 02/09/2026 e foi **perdida** com o diretório temporário da sessão, sem nunca ter sido commitada. O que sobreviveu são as decisões e as medições, registradas na própria fase I9B. Lição aplicada desde então: trabalho de valor nasce na árvore do repositório, não em diretório temporário. | | |
 | 13 | I10 | Convergência, remoção de legado e CI completa | `ABERTA` | gates estáticos, `check-python-boundary.py` |
 | 14 | I11 | Documentação, specs e recuperação | `ABERTA` | docs + `check-plan-traceability.py` |
 | 15 | I12 | Validação hermética final | `ABERTA` | release candidate de código |
@@ -811,11 +812,11 @@ Exigência: em **ambos** os caminhos, apply e rollback, capturar a identidade do
 
 ### REQ-VM-RESOURCE-LIFECYCLE: recursos dedicados voltam ao host quando a VM para (P0)
 
-**Fases:** contrato e implementação em **I9.12** (fase I9 reaberta por este requisito em 02/09/2026); baterias simuladas em I10 e I12; aceite operacional em I13. Estado: `AUSENTE`.
+**Fases:** contrato e implementação em **I9.12** (fase I9 reaberta por este requisito em 02/09/2026); baterias simuladas em I10 e I12; aceite operacional em I13. Estado: `PARCIAL` — migração deste host concluída e baseline retornável provado em 03/09/2026; ciclo de aquisição e devolução implementado nos hooks e coberto por bateria com sysfs simulado; **falta** a etapa 18 (isolamento de CPU) e a qualificação em hardware, que é de I13.
 
 O contrato completo, com as nove cláusulas normativas, está na tarefa **I9.12** da fase I9, e é lá que ele é mantido; esta entrada existe para que o requisito apareça no catálogo, na rastreabilidade e nos critérios de conclusão, sem criar uma segunda fonte de verdade.
 
-**Estado medido no host de desenvolvimento em 03/09/2026, que é a razão do requisito:** `/proc/cmdline` traz `default_hugepagesz=1G hugepagesz=1G hugepages=22`, e o resultado com a **VM desligada** é `HugePages_Total=22`, `HugePages_Free=22`, `Hugetlb=23068672 kB`. Ou seja, 22 GiB de 30,3 GiB (`MemTotal=31722704 kB`) estão fora da RAM comum sem nenhuma VM rodando, e o host fica com `MemAvailable=4143904 kB`. As páginas estão livres para o hugetlb e **inacessíveis** para todo o resto: reserva no boot não é devolvível. THP está em `[madvise]` e nenhum `isolcpus`/`nohz_full`/`rcu_nocbs` foi aplicado ainda, o que reduz o escopo de migração da etapa 18 a "recusar entrar nesse estado" em vez de "sair dele".
+**Estado medido no host de desenvolvimento em 03/09/2026, que é a razão do requisito:** `/proc/cmdline` traz `default_hugepagesz=1G hugepagesz=1G hugepages=22`, e o resultado com a **VM desligada** é `HugePages_Total=22`, `HugePages_Free=22`, `Hugetlb=23068672 kB`. Ou seja, 22 GiB de 30,3 GiB (`MemTotal=31722704 kB`) estão fora da RAM comum sem nenhuma VM rodando, e o host fica com `MemAvailable=4143904 kB`. As páginas estão livres para o hugetlb e **inacessíveis** para todo o resto. (Correção de fato registrada em 03/09/2026: a PÁGINA reservada no boot é devolvível em runtime neste kernel, `CONFIG_CONTIG_ALLOC=y`; o que a reserva no boot tem de irreversível é a POLÍTICA, que volta a valer no próximo boot enquanto os parâmetros estiverem lá.) THP está em `[madvise]` e nenhum `isolcpus`/`nohz_full`/`rcu_nocbs` foi aplicado ainda, o que reduz o escopo de migração da etapa 18 a "recusar entrar nesse estado" em vez de "sair dele".
 
 **A inversão que o requisito impõe:** hoje a etapa 17 trata reserva estática de 1 GiB como o contrato, e o `--verificar` dela exige `HugePages_Total` exatamente igual a `HUGEPAGES_1G` — ou seja, **o estado que este requisito considera defeito é hoje a pós-condição de sucesso**. A migração, portanto, não é acrescentar um modo: é substituir o contrato da etapa, transacionalmente e sem manter dois caminhos mutantes, preservando os 21 itens do menu, os entrypoints e os status públicos `0/1/2/3`.
 

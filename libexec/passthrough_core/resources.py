@@ -4,10 +4,17 @@ Por que este módulo existe: até I9.12 a etapa 17 tratava reserva estática de
 HugePages de 1 GiB no boot como o contrato, e o `--verificar` dela exigia
 `HugePages_Total` exatamente igual a `HUGEPAGES_1G`. Medido no host em
 03/09/2026, o efeito é 22 GiB de 30,3 GiB fora da RAM comum **com a VM
-desligada**, e `MemAvailable` em 4 GiB. Reserva no boot não é devolvível: as
-páginas ficam livres para o hugetlb e inacessíveis para todo o resto. O
-requisito inverte esse contrato — recurso dedicado é adquirido para o ciclo da
-VM e devolvido ao host quando ela para.
+desligada**, e `MemAvailable` em 4 GiB: as páginas ficam livres para o hugetlb
+e inacessíveis para todo o resto.
+
+Uma correção de fato, medida em 03/09/2026 e que vale registrar porque a
+intuição comum diz o contrário: reserva feita no boot **é** devolvível em
+runtime neste kernel (`CONFIG_CONTIG_ALLOC=y`), e escrever `0` em
+`nr_hugepages` devolveu 21,8 GiB sem reiniciar. O que a reserva no boot tem de
+irreversível não é a página, é a POLÍTICA: sem mexer nos parâmetros de boot ela
+volta a ser feita no próximo boot, esteja a VM ligada ou não. O requisito
+inverte esse contrato — recurso dedicado é adquirido para o ciclo da VM e
+devolvido ao host quando ela para.
 
 Fronteira (seções 2.2 e 2.4 do PLANO-FINALIZACAO.md): este módulo é PURO. Ele
 não lê sysfs, não escreve em lugar nenhum, não executa processo e não conhece

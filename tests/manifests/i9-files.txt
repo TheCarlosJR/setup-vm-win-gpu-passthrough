@@ -20,3 +20,4 @@ tests/test-i9-revisao-semantica.sh
 tests/test-i9-verify-helpers.sh
 tests/test-i9-waivers.sh
 tests/test-i9-windows-state.sh
+tests/test-i912-memoria-hooks.sh
