@@ -1283,22 +1283,40 @@ páginas, e o `--verificar` da etapa 17 devolvendo `[ok] Pool ativo: 22 páginas
 de 1 GiB` — ou seja, o estado que este requisito trata como defeito é hoje
 relatado como sucesso.
 
-Sequência, na ordem, com a VM desligada e provada desligada:
+Sequência, na ordem, com a VM desligada e provada desligada. Ela **corrige** a
+que a auditoria propôs, por causa de uma medição feita em 03/09/2026 no momento
+de executar: com o pool reservado, `MemAvailable` é de **3,26 GiB** e a VM pede
+**22 GiB de memória comum**. O passo "inicie a VM entre as duas reversões para
+provar que ela sobe com memória comum" era, portanto, **impossível** neste
+estado — não havia RAM comum para ela subir. O que destrava isso é uma segunda
+medição: este kernel (7.0.0-30-generic) traz `CONFIG_CONTIG_ALLOC=y`, o arquivo
+`demote` no pool de 1 GiB e `nr_hugepages` gravável por root, ou seja **página
+gigante reservada no boot pode ser devolvida em runtime**, sem reiniciar. A
+devolução em runtime toma o lugar do reboot como pré-condição da prova, e a
+prova fica mais forte do que a original, porque passa a acontecer com o pool
+já ausente em vez de ainda presente.
 
 1. `bash etapas/52-cpu-pinning-hugepages.sh --desfazer` (1ª vez) retira o
    `memoryBacking/hugepages` do XML, com backup em `BACKUPS_DIR` e rollback
-   provado por releitura semântica.
-2. Iniciar a VM uma vez e confirmar que ela sobe com memória comum. Esta é a
-   **única** janela em que "XML sem HugePages inicia" pode ser provado enquanto
-   o pool ainda existe; provar depois do reboot não distingue as duas causas.
-3. `bash etapas/52-cpu-pinning-hugepages.sh --desfazer` (2ª vez) retira as três
+   provado por releitura semântica. O XML deixa de exigir o pool ANTES de o
+   pool sumir, que é a assimetria que a auditoria estabeleceu e continua
+   valendo.
+2. Devolver o pool em runtime, escrevendo `0` em
+   `/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages`. Reversível
+   escrevendo `22` de volta, e seguro somente porque o pool está inteiramente
+   livre (`HugePages_Free` igual a `HugePages_Total`); com página em uso, esta
+   escrita não devolveria nada e o requisito manda recusar.
+3. Iniciar a VM uma vez e confirmar que ela sobe com memória comum, agora com
+   o pool já ausente. Em host de GPU única isto derruba a sessão gráfica pelos
+   hooks, então é uma janela escolhida pelo operador, não um passo automático.
+4. `bash etapas/52-cpu-pinning-hugepages.sh --desfazer` (2ª vez) retira as três
    chaves do boot, juntas, pela transação de `lib/shell/boot.sh` — que só é
-   confiável **depois** de I9.13, porque até `43ec863` o rollback dela anunciava
+   confiável depois de I9.13, porque até `43ec863` o rollback dela anunciava
    regeneração do `grub.cfg` sem nunca conferir o artefato.
-4. Reiniciar uma vez e provar o baseline sem VM: `HugePages_Total=0`,
-   `Hugetlb=0` e `MemAvailable` de volta à ordem de 26 GiB, contra os
-   4,1 GiB medidos com o pool reservado.
-5. Só então declarar `MEMORIA_MODO` e habilitar o ciclo de vida dinâmico.
+5. Reiniciar uma vez e provar que o baseline PERSISTE: `HugePages_Total=0`,
+   `Hugetlb=0` e `MemAvailable` na ordem de 26 GiB. O passo 2 já devolveu a RAM
+   neste boot; o reboot prova que ela não volta a ser reservada.
+6. Só então declarar `MEMORIA_MODO` e habilitar o ciclo de vida dinâmico.
 
 A etapa 18 **não entra** nesta sequência neste host: não há `isolcpus`,
 `nohz_full` nem `rcu_nocbs` no `/proc/cmdline`, então o trabalho dela em I9.12 é
