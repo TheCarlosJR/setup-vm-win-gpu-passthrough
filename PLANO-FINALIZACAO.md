@@ -1307,6 +1307,19 @@ Seis decisões que mudam o desenho e não se re-derivam lendo o código depois.
   antiga e manda rerenderizar. Consequência operacional registrada: **instalar
   esta correção exige reexecutar a etapa 14**; sem isso a decisão estrutural não
   viaja para dentro do hook instalado.
+- **I9.12-D7 (quem escolhe `MEMORIA_MODO` é a etapa 3, e ainda não escolhe):**
+  a chave existe no schema, na allowlist, no exemplo e na rastreabilidade, mas
+  **nenhuma etapa a pergunta**: hoje ela só pode ser definida editando o
+  `passthrough.conf` à mão. Isso é lacuna reconhecida, não desenho. O lugar da
+  escolha é a **etapa 3**, pela mesma razão registrada em I9-D7 para as
+  dispensas: escrever o conf a partir da etapa 17 ampliaria a superfície de
+  mutação para fazer o que a etapa 3 já faz de forma atômica, publicando
+  caminho, fingerprint e escolha num único rename. A etapa 17 continua sendo
+  quem APLICA e quem VERIFICA a política, e é por isso que ela relata
+  `MEMORIA_MODO` vazio como pendência em vez de assumir um modo — o requisito
+  proíbe padrão silencioso, e assumir seria pior do que ficar pendente.
+  Enquanto a pergunta não existir, a escolha é do operador no arquivo, validada
+  pelo schema fechado do core.
 - **I9.12-D5 (sair do perfil retornável se digita):** a etapa 18 recusa
   isolamento persistente por padrão e exige `ISOLAMENTO-NAO-RETORNAVEL`
   digitado. `isolcpus`, `nohz_full` e `rcu_nocbs` não devolvem CPU quando a VM
