@@ -355,6 +355,8 @@ estado_escrever() { # conteúdo vem do stdin
     mkdir -p -- "$ESTADO_DIR"
     cat > "$(estado_arquivo)"
     chmod 0600 "$(estado_arquivo)"
+    # Cópia para provar preservação byte a byte quando a devolução recusa.
+    cp -- "$(estado_arquivo)" "$TMP/estado-como-escrito"
 }
 
 estado_completo() { # estado_completo DELTA BASE_NR BASE_FREE [BOOT] [PAGE_KB]
@@ -428,6 +430,11 @@ exige_estado_campo() { # exige_estado_campo CHAVE VALOR CONTEXTO
     obtido=$(sed -n "s/^$1=//p" "$(estado_arquivo)" | head -1)
     [ "$obtido" = "$2" ] \
         || fail "$3: $1 no estado devia ser '$2' e é '${obtido:-vazio}'"
+}
+exige_estado_intacto() {
+    [ -e "$(estado_arquivo)" ] || fail "$1: o estado devia ter sido PRESERVADO e sumiu"
+    cmp -s "$(estado_arquivo)" "$TMP/estado-como-escrito" \
+        || fail "$1: o estado foi reescrito quando devia ter sido preservado byte a byte"
 }
 recusa_texto() { # recusa_texto TRECHO CONTEXTO
     [[ $SAIDA != *"$1"* ]] \
@@ -741,18 +748,39 @@ exige_pool '1096 1096 0 0' 'B8 chave desconhecida'
 exige_estado_ausente 'B8 chave desconhecida'
 passo
 
-# B9: estado ilegível ou vazio devolve 1 SEM escrever no pool.
-for variante in vazio ilegivel delta_nao_numerico; do
+# B9: estado ilegível, vazio ou com campo não numérico devolve 1 SEM escrever
+# no pool, e o diagnóstico NOMEIA o campo que faltou. Quem for recuperar o host
+# à mão precisa saber qual campo se perdeu; "ilegível ou incompleto" mandava o
+# operador abrir o arquivo e adivinhar.
+for caso_b9 in vazio:delta ilegivel:delta delta_nao_numerico:delta base_resv_ausente:base_resv; do
+    variante="${caso_b9%%:*}"
+    campo="${caso_b9#*:}"
     caso_padrao
     pool_montar 2048 4096 4096 0 0
     case "$variante" in
         vazio) estado_escrever < /dev/null ;;
         ilegivel) estado_completo 3000 1096 1096; chmod 000 "$(estado_arquivo)" ;;
         delta_nao_numerico) estado_completo 'tres mil' 1096 1096 ;;
+        base_resv_ausente)
+            # O campo que falta aqui é de BASELINE, não de aritmética: ele só
+            # entra na comparação final. Ainda assim decide o veredicto da
+            # devolução, então a guarda tem de cobri-lo como cobre o delta.
+            estado_escrever <<EOF
+ESTADO=VERIFIED
+BOOT_ID=$BOOT_ATUAL
+MODO=hugetlb-2m
+PAGE_KB=2048
+DELTA=3000
+BASE_NR=1096
+BASE_FREE=1096
+BASE_SURPLUS=0
+EOF
+            ;;
     esac
     rodar "$FRAG_RELEASE" mem_devolver marca_restauracao
     exige_rc mem_devolver 1 "B9 estado $variante"
-    exige_texto 'estado de memória ilegível ou incompleto; devolução impossível' "B9 estado $variante"
+    exige_texto "estado de memória sem o campo '$campo' ou com valor não numérico" "B9 estado $variante"
+    exige_texto 'o pool não será tocado' "B9 estado $variante"
     exige_pool '4096 4096 0 0' "B9 estado $variante"
     exige_sem_escrita "B9 estado $variante"
     exige_texto 'RESTAUROU_GPU_E_DISPLAY' "B9 estado $variante"
@@ -760,33 +788,37 @@ for variante in vazio ilegivel delta_nao_numerico; do
     passo
 done
 
-# B10 e B11: DEFEITO ABERTO, fixado aqui de propósito.
+# B10 e B11: REGRESSÃO de um defeito real, encontrado em 03/09/2026 pela
+# primeira execução desta suíte e corrigido no mesmo dia. Os dois casos existem
+# para que ele não volte, e é por isso que o mecanismo está escrito aqui.
 #
-# A guarda de completude concatena os três campos antes de olhar para eles:
+# A guarda de completude validava os campos EMENDADOS num teste só:
 #
 #     case "$delta$base_nr$page_kb" in ''|*[!0-9]*) ... return 1 ;; esac
 #
-# A concatenação ESCONDE campo vazio: com DELTA ausente e BASE_NR=2, PAGE_KB
-# =2048, a emenda vira "22048", que é numérica, e o estado incompleto passa. O
-# efeito não é acadêmico:
+# A emenda numérica esconde campo vazio atrás do vizinho: com DELTA ausente,
+# BASE_NR=2 e PAGE_KB=2048, a emenda vira "22048", que é numérica, e o estado
+# incompleto passava pela guarda. O que vinha depois é o que torna estes dois
+# casos obrigatórios:
 #
-#   B10 (sem DELTA): `[ "$livre" -lt "$delta" ]` vira erro de sintaxe do `[`,
-#        que devolve 2 e é lido como FALSO — a verificação de consumidor ativo
-#        é PULADA — e o hook ainda escreve no pool ("$(( nr - delta ))" com
-#        delta vazio é o próprio nr). Escrever o mesmo valor é inofensivo por
-#        acidente, não por desenho, e o contrato diz "sem escrever no pool".
-#        Pior: quando base_nr casa com o nr atual, a devolução é declarada
-#        COMPROVADA e o estado é removido — sucesso silencioso sobre estado
-#        que ninguém entendeu.
-#   B11 (sem BASE_NR): pior ainda. delta=3000 é válido, base_nr vazio vira 0 na
-#        aritmética, o hook REDUZ o pool em 3000 páginas e só então descobre
-#        que não sabe qual era o baseline, gravando `BASE_NR=` (vazio) no
-#        RECOVERY_REQUIRED — um estado de recuperação que não descreve nada.
+#   B10 (sem DELTA): `[ "$livre" -lt "$delta" ]` com delta vazio vira ERRO DE
+#        SINTAXE do `[`, que devolve 2 — e 2 é lido como FALSO, então a
+#        verificação de consumidor ativo era PULADA. O hook ainda escrevia no
+#        pool, porque `$(( nr - delta ))` com delta vazio é o próprio nr; e
+#        quando base_nr casava com o nr atual, a devolução era declarada
+#        COMPROVADA e o estado removido. Sucesso silencioso sobre estado que
+#        ninguém conseguiu ler.
+#   B11 (sem BASE_NR): pior. delta=3000 era válido, base_nr vazio virava 0 na
+#        aritmética, e o hook REDUZIA o pool de 4096 para 1096 páginas antes de
+#        descobrir que não sabia qual era o baseline — gravando `BASE_NR=`
+#        (vazio) no RECOVERY_REQUIRED, um estado de recuperação que não
+#        descreve nada. Se aquelas páginas fossem de terceiro, 3000 delas
+#        tinham acabado de ser tiradas dele a partir de um estado ilegível: é a
+#        invariante "pool preexistente ou de terceiro nunca é zerado" quebrada
+#        em cheio, que é a razão de ser do requisito inteiro.
 #
-# A correção é validar cada campo separadamente. Estes dois casos afirmam o
-# comportamento de HOJE, no molde do único teste `_hoje_` de
-# tests/python/test_resources.py: quando a correção vier, eles falham e
-# obrigam quem corrigir a declarar a mudança em vez de deixá-la passar.
+# Hoje cada campo é validado sozinho, e estes dois casos falham de novo se a
+# validação voltar a ser feita em bloco.
 caso_padrao
 pool_montar 2048 4096 4096 0 0
 estado_escrever <<EOF
@@ -800,11 +832,16 @@ BASE_RESV=0
 BASE_SURPLUS=0
 EOF
 rodar "$FRAG_RELEASE" mem_devolver marca_restauracao
-exige_rc mem_devolver 0 'B10 (defeito aberto) estado sem DELTA'
-exige_texto 'integer expected' 'B10 (defeito aberto) estado sem DELTA'
-exige_texto 'devolução comprovada' 'B10 (defeito aberto) estado sem DELTA'
-exige_escritas '4096->4096' 'B10 (defeito aberto) estado sem DELTA'
-exige_estado_ausente 'B10 (defeito aberto) estado sem DELTA'
+exige_rc mem_devolver 1 'B10 estado sem DELTA'
+exige_texto "estado de memória sem o campo 'delta' ou com valor não numérico" 'B10 estado sem DELTA'
+# Prova de que o `[` não é mais alimentado com campo vazio: era esse erro de
+# sintaxe, lido como falso, que pulava a checagem de consumidor ativo.
+recusa_texto 'integer expected' 'B10 estado sem DELTA'
+recusa_texto 'devolução comprovada' 'B10 estado sem DELTA'
+exige_sem_escrita 'B10 estado sem DELTA'
+exige_pool '4096 4096 0 0' 'B10 estado sem DELTA'
+exige_estado_intacto 'B10 estado sem DELTA: o estado tem de ser PRESERVADO como estava, não removido nem reescrito'
+exige_texto 'RESTAUROU_GPU_E_DISPLAY' 'B10 estado sem DELTA'
 passo
 
 caso_padrao
@@ -820,12 +857,14 @@ BASE_RESV=0
 BASE_SURPLUS=0
 EOF
 rodar "$FRAG_RELEASE" mem_devolver marca_restauracao
-exige_rc mem_devolver 1 'B11 (defeito aberto) estado sem BASE_NR'
-exige_pool '1096 1096 0 0' 'B11 (defeito aberto) estado sem BASE_NR: o pool FOI reduzido a partir de estado incompleto'
-exige_escritas '4096->1096' 'B11 (defeito aberto) estado sem BASE_NR'
-exige_estado_campo ESTADO RECOVERY_REQUIRED 'B11 (defeito aberto) estado sem BASE_NR'
-exige_estado_campo BASE_NR '' 'B11 (defeito aberto) estado sem BASE_NR'
-exige_texto 'RESTAUROU_GPU_E_DISPLAY' 'B11 (defeito aberto) estado sem BASE_NR'
+exige_rc mem_devolver 1 'B11 estado sem BASE_NR'
+exige_texto "estado de memória sem o campo 'base_nr' ou com valor não numérico" 'B11 estado sem BASE_NR'
+exige_sem_escrita 'B11 estado sem BASE_NR'
+# A asserção que o defeito tornava impossível: os QUATRO contadores saem da
+# chamada exatamente como entraram. Antes, nr caía de 4096 para 1096.
+exige_pool '4096 4096 0 0' 'B11 estado sem BASE_NR: o pool tem de sair intacto de um estado que o hook não sabe ler'
+exige_estado_intacto 'B11 estado sem BASE_NR: o estado tem de ser PRESERVADO como estava'
+exige_texto 'RESTAUROU_GPU_E_DISPLAY' 'B11 estado sem BASE_NR'
 passo
 
 # ===========================================================================
@@ -1048,9 +1087,9 @@ CORPUS=(
   'modo-desconhecido|hugetlb-4m|8192|2048|0|0|0|0|20971520|1|-|recusa|aceita|-|modo fora do catálogo: o núcleo recusa nominalmente e o hook aplica o padrão mais seguro que ele pode aplicar sozinho, que é não tocar no pool'
   'modo-vazio||8192|2048|0|0|0|0|20971520|1|-|recusa|aceita|-|idem modo-desconhecido: modo vazio não é de runtime, o hook não toca no pool e o núcleo recusa por nome'
   'numa-dois-nos-delta-par|hugetlb-2m|8192|2048|0|0|0|0|20971520|2|-|aceita|aceita|4096|-'
-  'numa-dois-nos-delta-impar|hugetlb-2m|8194|2048|0|0|0|0|20971520|2|-|recusa|aceita|-|NUMA é decisão do planejador: o hook é deliberadamente cego a nós (I9-D8, Bash puro sem o core) e adquire o delta que recebeu pronto'
-  'numa-dois-nos-sem-contadores|hugetlb-2m|8192|2048|0|0|0|0|20971520|2sem|-|recusa|aceita|-|idem numa-dois-nos-delta-impar: sem contadores por nó o núcleo não consegue comprovar distribuição, e o hook não olha para NUMA'
-  'ram-nao-multipla-da-pagina|hugetlb-2m|8193|2048|0|0|0|0|20971520|1|-|recusa|aceita|-|a aritmética de páginas é do núcleo; o hook recebe o número já calculado e, num plano recusado, ele chega como 0, que o hook lê como "nada a adquirir"'
+  'numa-dois-nos-delta-impar|hugetlb-2m|8194|2048|0|0|0|0|20971520|2|-|recusa|aceita|-|NUMA é decisão do planejador e o hook é deliberadamente cego a nós (I9-D8, Bash puro sem o core). A recusa por plano zerado NÃO alcança este caso: resources.py fixa pages_needed ANTES da checagem de NUMA (linha 418 contra 472), então o hook recebe 4097 páginas válidas e adquire. Fechar isto exige a etapa 14 não renderizar hook a partir de plano recusado, não uma checagem local'
+  'numa-dois-nos-sem-contadores|hugetlb-2m|8192|2048|0|0|0|0|20971520|2sem|-|recusa|aceita|-|idem numa-dois-nos-delta-impar: a recusa do núcleo acontece depois da aritmética de páginas, o hook recebe 4096 páginas válidas e não tem como olhar para NUMA sozinho'
+  'ram-nao-multipla-da-pagina|hugetlb-2m|8193|2048|0|0|0|0|20971520|1|-|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026: a recusa nasce DENTRO de _pages_needed, então pages_needed chega 0 ao hook e a nova checagem de plano zerado recusa o start
 )
 
 : > "$ORACULO_DIR/corpus.tsv"
@@ -1137,8 +1176,8 @@ for linha in "${CORPUS[@]}"; do
     fi
     passo
 done
-[ "$DIVERGENCIAS" -eq 7 ] \
-    || fail "oráculo: o corpus previa 7 divergências declaradas e observou $DIVERGENCIAS; mudança de comportamento sem revisão do contrato"
+[ "$DIVERGENCIAS" -eq 6 ] \
+    || fail "oráculo: o corpus previa 6 divergências declaradas e observou $DIVERGENCIAS; mudança de comportamento sem revisão do contrato"
 passo
 
 # ===========================================================================
@@ -1153,7 +1192,7 @@ HOST_ESTADO_DEPOIS=$([ -e /var/lib/vm-passthrough ] && echo existe || echo ausen
     || fail '/var/lib/vm-passthrough foi criado ou removido pela suíte'
 [ -n "$(find "$LOG_DIR" -name hooks.log -print -quit)" ] \
     || fail 'o log dos hooks não caiu dentro do sandbox; verifique o redirecionamento de HOOK_LOG_DIR'
-PERMITIDOS=' bloco-prepare bloco-release boot_id estado frag-prepare.sh frag-release.sh kernel-escritas kernel-sombra log oraculo projeto render render.log runner.sh sys '
+PERMITIDOS=' bloco-prepare bloco-release boot_id estado estado-como-escrito frag-prepare.sh frag-release.sh kernel-escritas kernel-sombra log oraculo projeto render render.log runner.sh sys '
 while IFS= read -r item; do
     case "$PERMITIDOS" in
         *" $item "*) ;;

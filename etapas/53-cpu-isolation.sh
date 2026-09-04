@@ -169,20 +169,34 @@ verificar() {
                 v_falta "Pinning exato da VM não comprovado: ${XML_CPU_ERRO:-sem diagnóstico}."
             fi
         fi
-        if cmdline_parametros_exatos "$params"; then
-            v_ok "isolcpus, nohz_full e rcu_nocbs estão ativos uma única vez e com valores exatos."
+        # I9.12 (REQ-VM-RESOURCE-LIFECYCLE): a AUSÊNCIA de isolamento é o estado
+        # correto do perfil retornável, e relatá-la como divergência empurrava o
+        # operador para um custo permanente — a mesma inversão que a etapa 17
+        # tinha com a reserva estática de HugePages. Quando o isolamento não
+        # está aplicado, isto aqui é sucesso; quando está, o contrato antigo
+        # vale integralmente e ganha o aviso de não ser retornável.
+        if ! cmdline_possui_alguma_chave "$CHAVES_ISOLAMENTO"; then
+            v_ok "Nenhuma CPU sai do scheduler no boot: o perfil é retornável e o pinning da etapa 17 devolve a CPU quando o QEMU termina."
+            if ! kernel_param_chaves_persistentes_ausentes "$CHAVES_ISOLAMENTO" 2>/dev/null; then
+                v_kernel_persistencia_falhou "Ausência persistente de isolamento não comprovada: ${KERNEL_PERSISTENCIA_ERRO:-não verificável}."
+            fi
         else
-            v_falta "Cmdline de isolamento divergente: $CMDLINE_PARAM_ERRO"
-        fi
-        if kernel_parametros_persistentes_exatos "$params"; then
-            v_ok "Persistência das três chaves é exata e coerente."
-        else
-            v_kernel_persistencia_falhou "Persistência do isolamento não comprovada: $KERNEL_PERSISTENCIA_ERRO"
-        fi
-        if isolamento_efetivo_exato; then
-            v_ok "isolcpus/nohz_full efetivos correspondem a CPUS_VM; rcu_nocbs foi validado na cmdline."
-        else
-            v_falta "$ISOLAMENTO_ERRO"
+            v_falta "Isolamento persistente aplicado: as CPUs de CPUS_VM não voltam ao host quando a VM para. É perfil opt-in de desempenho, fora da base retornável; use --desfazer para sair dele."
+            if cmdline_parametros_exatos "$params"; then
+                v_ok "Perfil opt-in: isolcpus, nohz_full e rcu_nocbs estão ativos uma única vez e com valores exatos."
+            else
+                v_falta "Cmdline de isolamento divergente: $CMDLINE_PARAM_ERRO"
+            fi
+            if kernel_parametros_persistentes_exatos "$params"; then
+                v_ok "Perfil opt-in: persistência das três chaves é exata e coerente."
+            else
+                v_kernel_persistencia_falhou "Persistência do isolamento não comprovada: $KERNEL_PERSISTENCIA_ERRO"
+            fi
+            if isolamento_efetivo_exato; then
+                v_ok "Perfil opt-in: isolcpus/nohz_full efetivos correspondem a CPUS_VM; rcu_nocbs foi validado na cmdline."
+            else
+                v_falta "$ISOLAMENTO_ERRO"
+            fi
         fi
     fi
     v_fim
@@ -244,7 +258,23 @@ main() {
     info "Fase 2: comprovar o isolamento; não exige novo reboot do host."
     info "CPUs online=[$CPU_LAYOUT_ONLINE] VM=[$CPUS_VM] HOST=[$CPUS_HOST]"
     aviso "Com isolamento ativo, CPUS_VM deixa de atender processos comuns do host mesmo com a VM desligada."
-    aviso "Na etapa 17, HugePages também podem manter RAM indisponível ao host com a VM desligada."
+
+    # I9.12 (REQ-VM-RESOURCE-LIFECYCLE): isolamento PERSISTENTE é incompatível
+    # com o perfil retornável, e o motivo é o mesmo da reserva estática de
+    # HugePages: `isolcpus`, `nohz_full` e `rcu_nocbs` no boot não devolvem CPU
+    # ao scheduler quando a VM para — elas ficam fora do host o tempo todo,
+    # ligada ou não. O que é retornável é o `vcpupin`/`emulatorpin` da etapa
+    # 17, que deixa de consumir CPU quando o QEMU termina.
+    #
+    # A etapa não proíbe: ela recusa por padrão e exige que a saída do perfil
+    # retornável seja DIGITADA, para que a decisão fique explícita no log de
+    # ações em vez de escondida atrás de um "s".
+    aviso "Este isolamento é PERSISTENTE e NÃO retornável: as $(printf '%s' "$CPUS_VM" | tr ',' ' ' | wc -w) CPU(s) de CPUS_VM saem do scheduler do host no boot e não voltam quando a VM para."
+    info "A alternativa retornável já está aplicada pela etapa 17: vcpupin e emulatorpin organizam a VM quando ela está ligada e liberam a CPU quando o QEMU termina."
+    info "Para desfazer depois: bash etapas/53-cpu-isolation.sh --desfazer, seguido de reboot."
+    confirmar_digitando "ISOLAMENTO-NAO-RETORNAVEL" \
+        "Sair do perfil retornável e isolar CPUs de forma persistente é uma escolha de desempenho com custo permanente para o host." \
+        || falhar "Cancelado sem alterações: o perfil retornável foi preservado."
 
     if ! kernel_parametros_persistentes_exatos "$params"; then
         aviso "Persistência atual divergente/duplicada: ${KERNEL_PERSISTENCIA_ERRO:-estado não exato}."
