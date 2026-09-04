@@ -429,6 +429,10 @@ exige_estado_campo() { # exige_estado_campo CHAVE VALOR CONTEXTO
     [ "$obtido" = "$2" ] \
         || fail "$3: $1 no estado devia ser '$2' e é '${obtido:-vazio}'"
 }
+recusa_texto() { # recusa_texto TRECHO CONTEXTO
+    [[ $SAIDA != *"$1"* ]] \
+        || fail "$2: a saída trouxe '$1', que não devia mais aparecer. Saída: $SAIDA"
+}
 exige_modo_estado() {
     local modo
     modo=$(stat -c %a -- "$(estado_arquivo)")
@@ -594,6 +598,29 @@ exige_escritas '0->22 5->0' 'A11 baseline não restaurado'
 exige_estado_campo ESTADO RECOVERY_REQUIRED 'A11 baseline não restaurado'
 exige_estado_campo BASE_NR 0 'A11 baseline não restaurado'
 passo
+
+# A12: modo de runtime com plano ZERADO recusa o start.
+#
+# ISTO FOI DEFEITO, encontrado em 03/09/2026 e corrigido no mesmo dia: quando o
+# núcleo RECUSAVA a política na renderização, a etapa 14 assava
+# `MEM_PAGES_NEEDED=0` nos hooks assim mesmo, e o hook lia isso como "nada a
+# adquirir" e devolvia 0. A VM subia sem as páginas que o perfil promete, e a
+# mensagem da etapa afirmava que o hook recusaria no start — não recusava. A
+# razão da recusa é LOCAL, e é por isso que o hook consegue aplicá-la sozinho,
+# com o projeto apagado: num modo de runtime, zero página exigida é incoerente
+# por construção.
+for pedido in 0 '' quatro; do
+    caso_padrao
+    CASO_PAGES="$pedido"
+    pool_montar 2048 4096 4096 0 0
+    rodar "$FRAG_PREPARE" mem_adquirir
+    exige_rc mem_adquirir 1 "A12 plano zerado ('${pedido:-vazio}')"
+    exige_texto 'exige páginas, mas o plano assado nos hooks pede' "A12 plano zerado ('${pedido:-vazio}')"
+    exige_pool '4096 4096 0 0' "A12 plano zerado ('${pedido:-vazio}')"
+    exige_sem_escrita "A12 plano zerado ('${pedido:-vazio}')"
+    exige_estado_ausente "A12 plano zerado ('${pedido:-vazio}')"
+    passo
+done
 
 # ===========================================================================
 # B. Devolução (mem_devolver)
