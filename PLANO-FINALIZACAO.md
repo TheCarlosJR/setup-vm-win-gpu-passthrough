@@ -1258,6 +1258,49 @@ grafo acíclico, e cada uma cita o ciclo concreto que evita.
   - **Testes e gates:** I10/I12 devem usar sysfs, cgroup, libvirt e QEMU simulados, sem alterar o host, cobrindo memória normal/THP, 2 MiB runtime, 1 GiB runtime parcial/indisponível, pool externo, NUMA, falha/sinal em cada janela, start recusado, release com múltiplas falhas, crash, daemon indisponível, recuperação órfã, dois ciclos completos e no-op. O Gate I9 exige baseline restaurado e recursos externos preservados; nenhum modo entra como qualificado por fixture.
   - **Aceite operacional I13:** em hardware autorizado, registrar métricas antes/durante/depois e repetir start/stop/crash: com VM parada, toda RAM e toda CPU gerenciadas pelo perfil retornável estão novamente elegíveis ao host; com VM ativa, QEMU consumiu exatamente a política escolhida; falha de aquisição não inicia a VM; falha de release permanece erro recuperável com evidência. Medir sucesso após uptime/fragmentação e benefício de cada modo. Se 1 GiB runtime não for confiável, qualificar memória normal/THP ou 2 MiB runtime e manter 1 GiB estática somente como exceção opt-in não retornável.
 
+### Decisões tomadas ao implementar I9.12 (03/09/2026)
+
+Seis decisões que mudam o desenho e não se re-derivam lendo o código depois.
+
+- **I9.12-D1 (o hook faz a aritmética; o core faz o plano):** a decisão I9-D8
+  obriga o hook a ser autossuficiente — `tests/test-i9-hooks-isolados.sh` APAGA
+  o projeto antes de executá-lo —, então ele não pode chamar Python. A
+  aritmética de aquisição e devolução é Bash puro dentro do hook, e o core é o
+  planejador usado pela etapa e pelo gate. São duas implementações da mesma
+  regra por necessidade, e o que impede as duas de divergirem em silêncio é o
+  oráculo diferencial de `tests/test-i912-memoria-hooks.sh`, não confiança.
+- **I9.12-D2 (o estado de memória é persistente, não `/run`):** o estado do
+  ciclo de GPU vive em `/run` e some no reboot. O de memória vive em
+  `/var/lib/vm-passthrough/`, porque o requisito manda reconciliar por boot ID,
+  e boot ID só significa alguma coisa em estado que SOBREVIVE ao reboot. Estado
+  de outro boot descreve páginas que o reboot já devolveu: a reconciliação é
+  descartá-lo **sem tocar no pool**, porque o pool atual pertence a este boot.
+- **I9.12-D3 (o estado é gravado ANTES da escrita no pool):** se o hook morrer
+  entre adquirir e registrar, o release não saberia o que é dele para devolver,
+  e devolver "o que parecer nosso" é como se tira página de terceiro. A ordem
+  inversa perde páginas; esta, no pior caso, deixa um estado a mais para a
+  reconciliação resolver.
+- **I9.12-D4 (recusa transitória e recusa estrutural são coisas diferentes):**
+  `plan` publica `transient`. Recusa que depende do pool NAQUELE instante
+  (consumidor externo, `resv`, `surplus`, `MemAvailable`) é reavaliada pelo
+  hook no start. Recusa estrutural (modo, aritmética de página, pool ausente,
+  NUMA) não muda por esperar e o hook **não tem como reavaliá-la sozinho** — em
+  NUMA ele é cego por desenho. Por isso ela viaja assada em `MEM_PLANO_VALIDO`
+  e o hook nasce bloqueado. Sem essa distinção havia um buraco real, encontrado
+  pelo oráculo: plano recusado por NUMA chegava ao hook com contagem válida e
+  ele adquiria.
+- **I9.12-D5 (sair do perfil retornável se digita):** a etapa 18 recusa
+  isolamento persistente por padrão e exige `ISOLAMENTO-NAO-RETORNAVEL`
+  digitado. `isolcpus`, `nohz_full` e `rcu_nocbs` não devolvem CPU quando a VM
+  para, e o custo é permanente para o host; uma escolha assim precisa ficar
+  explícita no log de ações, não escondida atrás de um `s`.
+- **I9.12-D6 (o contrato das etapas 17 e 18 foi SUBSTITUÍDO, não estendido):**
+  a ausência de reserva e a ausência de isolamento passaram a ser pós-condição
+  de SUCESSO. Enquanto o `--verificar` exigisse `HugePages_Total` igual a
+  `HUGEPAGES_1G`, o host correto seria relatado como divergente e o status do
+  menu empurraria o operador de volta ao defeito. Acrescentar um modo ao lado
+  do contrato velho manteria dois caminhos mutantes, que a regra 8 proíbe.
+
 ### Sequência de migração deste host, medida em 03/09/2026 (entrada de I9.12)
 
 A auditoria de I9.12 encontrou algo que muda o tamanho da tarefa: **a etapa 17
