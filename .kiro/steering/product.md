@@ -4,7 +4,7 @@ Este repositório automatiza, por 21 etapas de menu, a preparação e a operaç�
 
 ## Fonte de verdade
 
-`PLANO-FINALIZACAO.md`, na raiz do repositório, é o único documento normativo. Antes de qualquer tarefa, leia a seção 0.0 ("Comece por aqui"), a auditoria mais recente da seção 1 e a última linha preenchida da seção 12. Estes arquivos de steering apenas resumem; quando divergirem do plano, o plano vence.
+`PLANO-FINALIZACAO.md`, na raiz do repositório, é o único documento normativo. Antes de qualquer tarefa, leia a seção 0.0 ("Comece por aqui"), a auditoria mais recente da seção 1 e a última linha preenchida da seção 12. Estes arquivos de steering apenas resumem; quando divergirem do plano, o plano vence. O bloco "Estado" abaixo é refrescado no mesmo commit que altera o cabeçalho do plano (regra 20 da seção 0.1); se a data dele for anterior à última linha preenchida da seção 12, o plano está à frente e este resumo está atrasado. O plano é executado por Kiro e Claude Code em alternância, nunca ao mesmo tempo (regra 21).
 
 ## Estado em 03/09/2026
 

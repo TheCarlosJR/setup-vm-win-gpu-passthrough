@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Gate canônico cumulativo: a CI e a execução local chamam exatamente este
-# runner. O caminho do arquivo é mantido por compatibilidade com a CI
-# versionada e com o plano; cada fase nova acrescenta seu manifesto e seus
-# passos sem remover nenhum dos anteriores.
+# Gate canônico cumulativo local. Cada fase nova acrescenta seu manifesto e
+# seus passos sem remover nenhum dos anteriores. Uma eventual automação de CI
+# deve chamar este mesmo runner, mas não há CI ativa no repositório.
 set -euo pipefail
 
 GATE_FASE=${GATE_FASE:-I9}
@@ -146,10 +145,10 @@ if command -v shellcheck >/dev/null 2>&1; then
     # históricos permanecem visíveis em auditorias dedicadas de fases futuras.
     LC_ALL=C.UTF-8 shellcheck --severity=error -x -P SCRIPTDIR "${shell_files[@]}"
 elif [[ ${CI:-} == true || ${I1_REQUIRE_SHELLCHECK:-0} == 1 ]]; then
-    printf 'ERRO: ShellCheck é obrigatório na CI, mas não está no PATH.\n' >&2
+    printf 'ERRO: ShellCheck foi exigido pelo ambiente, mas não está no PATH.\n' >&2
     exit 1
 else
-    printf 'AVISO: ShellCheck ausente localmente; a CI versionada o provisiona e o exige.\n' >&2
+    printf 'AVISO: ShellCheck ausente; instale-o ou use I1_REQUIRE_SHELLCHECK=1 para tornar a ausência fatal.\n' >&2
 fi
 
 secao 'whitespace working tree e index'

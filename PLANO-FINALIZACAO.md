@@ -1,9 +1,9 @@
 # Plano de Finalização: Windows 11 VM com GPU Passthrough (prioridade Ubuntu)
 
 > **Data de consolidação:** 16 de agosto de 2026
-> **Executor-alvo:** Claude Code (Opus 5)
+> **Executor-alvo:** Claude Code e Kiro, em alternância e nunca simultâneos (regras 20 e 21 da seção 0.1). `.kiro/steering/*.md` resume este plano para o Kiro e não o substitui; memória privada de qualquer ferramenta, fora do repositório, não é fonte de verdade.
 > **Status:** I0 e I1 concluídas e reverificadas em 16/08/2026; I2 a I5 em 17/08/2026; I6 em 23/08/2026; I7 e I8 em 28/08/2026 (Gates I7 e I8 aprovados). **I9 está REABERTA:** as tarefas I9.1 a I9.11 e I9.13 estão feitas e provadas, e o Gate I9 chegou a rodar em 02/09/2026 sem que o veredito final fosse observado; a fase foi reaberta por **I9.12 (REQ-VM-RESOURCE-LIFECYCLE)**, cuja migração deste host foi concluída em 03/09/2026 e cuja metade executora está implementada e coberta por bateria com sysfs simulado. A etapa 18 recusa isolamento persistente desde `10f5e52` (03/09/2026), ainda **sem teste dirigido** do contrato novo. Restam de I9.12: esse teste, a pergunta de `MEMORIA_MODO` na etapa 3 (I9.12-D7), a reexecução do Gate I9 com veredito observado e a qualificação em hardware (I13). A infraestrutura de I9B construída em 02/09/2026 foi perdida sem commit. Fases I9B a I14 pendentes. **Última auditoria plano contra código: 03/09/2026, seção 1.6**
-> **Escopo:** correções funcionais e de segurança, migração arquitetural híbrida Bash/Python, testes/CI, documentação, qualificação real de Ubuntu/Pop!_OS e, por último, expansão multidistribuição
+> **Escopo:** correções funcionais e de segurança, migração arquitetural híbrida Bash/Python, testes/gates locais, documentação, qualificação real de Ubuntu/Pop!_OS e, por último, expansão multidistribuição; CI remota somente se autorizada futuramente
 > **Substitui integralmente:** `PLANO-CORRECOES-AUDITORIA.md` (blocos A, B e C registrados como executados; itens restantes absorvidos no código atual e nos deltas de I0) e `PLANO-INTEGRADO-MELHORIAS-MIGRACAO-PYTHON.md` (todo o conteúdo normativo foi transportado para cá). Nenhum dos dois é necessário para executar este documento.
 
 ---
@@ -64,7 +64,7 @@ A ordem de execução **não é a ordem numérica**. Siga a coluna "ordem".
 | 11 | I9 | Modularização Bash e requisitos P1 restantes | `REABERTA` por I9.12 | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY, REQ-VM-RESOURCE-LIFECYCLE |
 | 12 | **I9B** | **Internacionalização (en, pt-BR, es)** | **ABERTA (nova)** | `lang/*.msg`, `lib/shell/i18n.sh`, `messages.py` |
 | — | nota | A infraestrutura de I9B chegou a ser construída e provada em 02/09/2026 e foi **perdida** com o diretório temporário da sessão, sem nunca ter sido commitada. As decisões e as medições foram recuperadas das notas da sessão em 03/09/2026 e registradas na fase I9B (subseção "Decisões e medições recuperadas"), com o que foi reverificado marcado como tal e o restante marcado como não reproduzido. Lição aplicada desde então: trabalho de valor nasce na árvore do repositório, não em diretório temporário. | | |
-| 13 | I10 | Convergência, remoção de legado e CI completa | `ABERTA` | gates estáticos, `check-python-boundary.py` |
+| 13 | I10 | Convergência, remoção de legado e gates locais | `ABERTA` | gates estáticos, `check-python-boundary.py` |
 | 14 | I11 | Documentação, specs e recuperação | `ABERTA` | docs + `check-plan-traceability.py` |
 | 15 | I12 | Validação hermética final | `ABERTA` | release candidate de código |
 | 16 | I13 | Qualificação operacional Ubuntu e Pop!_OS | `[H]` | campanha em hardware real |
@@ -94,14 +94,14 @@ O objetivo não é apenas criar um núcleo Python. O resultado final deve simult
 2. preservar os contratos públicos e operacionais atuais;
 3. separar cálculo/validação pura em Python de efeitos, privilégio e rollback em Bash;
 4. deixar todos os caminhos mutantes fail-closed e transacionais;
-5. comprovar o comportamento por testes herméticos e CI;
+5. comprovar o comportamento por testes herméticos e gates locais; automação remota de CI permanece opcional e adiada até autorização explícita;
 6. manter qualificação em hardware real separada de implementação e mocks;
 7. qualificar Ubuntu e Pop!_OS por campanhas distintas;
 8. implementar providers de novas distribuições, uma por vez, sem promover suporte por inferência.
 
 ### 0.1 Regras obrigatórias de execução
 
-1. Leia este plano, `README.md`, `Guia-QEMU-Passthrough.md`, os artefatos de estado (`tests/i0/*.tsv`, `tests/i0/baseline.md`, `tests/i1/mutators.tsv`), as steering/specs aplicáveis em `.kiro/specs/` e os arquivos da fase ativa antes de editar.
+1. Leia este plano, `README.md`, `Guia-QEMU-Passthrough.md`, os artefatos de estado (`tests/i0/*.tsv`, `tests/i0/baseline.md`, `tests/i1/mutators.tsv`), o steering em `.kiro/steering/`, as specs aplicáveis em `.kiro/specs/` e os arquivos da fase ativa antes de editar.
 2. Execute **uma fase por vez**. Crie uma lista de tarefas apenas para a fase ativa e só avance quando o gate dela estiver aprovado.
 3. Antes de cada fase, execute `git status --short`; preserve alterações do usuário e nunca use `git reset --hard`, `git clean`, checkout destrutivo ou sobrescrita ampla.
 4. Não crie commit, tag, release ou push sem pedido explícito do usuário.
@@ -111,7 +111,7 @@ O objetivo não é apenas criar um núcleo Python. O resultado final deve simult
 8. Nunca mantenha dois caminhos mutantes em produção. Comparação diferencial temporária só é permitida para funções puras e fixtures; remova-a no cutover da fase.
 9. Python não pode executar comandos do host, elevar privilégio ou controlar serviços/libvirt/rede/boot. Bash captura snapshots, confirma, aplica, verifica e restaura.
 10. Nunca transporte código do Python para o Bash: sem `eval`, sem `source` de dados, sem interpolação de comandos e sem parsing de JSON complexo por regex.
-11. Não instale dependências automaticamente. O core usa Python 3.10+ e biblioteca padrão. Dependências de sistema entram no bootstrap/provider e na CI de forma explícita.
+11. Não instale dependências automaticamente. O core usa Python 3.10+ e biblioteca padrão. Dependências de sistema entram no bootstrap/provider de forma explícita; uma eventual CI só pode adicioná-las após autorização explícita para reintroduzir automação remota.
 12. Durante implementação e testes automatizados, não altere o host de desenvolvimento: use fixtures, shims, mocks e raízes temporárias. Não execute `sudo`, `virsh define`, `systemctl`, `netplan apply`, comandos de boot/initramfs, firewall ou disco reais.
 13. Se uma validação exigir GPU real, reboot, bootloader, initramfs, rede física, firewall/SSH, disco, VM ou teste destrutivo, pare e peça ao usuário um ambiente descartável, backups, console fora de banda e autorização explícita.
 14. Para cada tarefa, rode primeiro o teste direcionado; para cada fase, rode o gate global. Corrija qualquer falha antes de avançar.
@@ -120,6 +120,8 @@ O objetivo não é apenas criar um núcleo Python. O resultado final deve simult
 17. Execute cada operação convergente duas vezes nos testes e prove que a segunda execução é no-op quando o estado já é o desejado, inclusive conteúdo, metadados e mtimes quando aplicável.
 18. Antes de declarar conclusão, revise todos os critérios da seção 16 e peça revisão do usuário antes de qualquer release.
 19. Manifesto de fase: todo arquivo novo (untracked ou adicionado ao index) precisa constar de um manifesto em `tests/manifests/` (ordenado em ordem C, um caminho por linha). O gate `tests/check-phase-manifest.sh` também exige que cada caminho nominal exista. Crie um manifesto novo por fase (por exemplo `tests/manifests/i2-files.txt`) e acrescente-o à chamada do checker em `tests/run-gate-i1.sh` ou no runner da fase.
+20. Sincronia com o Kiro: sempre que a linha `> **Status:**` deste cabeçalho, a fase ativa do mapa de execução ou a "próxima ação" da última linha da seção 12 mudarem, atualize **no mesmo commit** o bloco "Estado em ..." de `.kiro/steering/product.md` e a linha `> **Status:**` dos arquivos de `.kiro/specs/*/` cuja área foi tocada. Os checkboxes das specs continuam congelados até I11.3/I11.4 (tabela de coordenação de I11). `.kiro/` é rastreado desde `9c56a60` (24/08/2026) e consta de `tests/manifests/i6-docs-files.txt`; arquivo novo ali entra em manifesto como qualquer outro (regra 19).
+21. Alternância de executores: este plano é executado tanto pelo Claude Code quanto pelo Kiro, um de cada vez. Antes de trocar de ferramenta, commite ou, sem pedido de commit, registre o estado na seção 12 e deixe `git status --short` legível para o próximo. Nunca edite o checkout enquanto a outra ferramenta roda o gate (`tests/test-python-core.sh` fotografa conteúdo e mtime de tudo fora de `.git`). Memória privada de uma ferramenta, fora do repositório, nunca prevalece sobre este plano e o código.
 
 ### 0.2 Semântica dos checkboxes
 
@@ -884,7 +886,7 @@ Evidências: `tests/i0/{baseline.md,oracle.tsv,traceability.tsv,deltas.tsv}`, `t
 
 - Campanha integral de mutadores: 39 grupos sob bubblewrap, sem skips, raiz mínima em tmpfs, zero mutação real do host.
 - Medições autoritativas (LC_ALL=C, cache aquecido, serial): runner completo de dez testes com mediana de 14167 ms (orçamento pós-migração: 28334 ms); `menu.sh --status` com mediana de 3085 ms (orçamento: 6170 ms). O orçamento normativo por alvo é o maior entre 2x a baseline e baseline + 2 s (regra que I10.4/I10.5 reavaliam com nova medição comparável).
-- Specs `.kiro/`: seis `tasks.md`, 59 checkboxes; somente a tarefa 1 de `platform-multidistro-core` está marcada. `.kiro/` é ignorado e não deve ser editado fora dos pontos de alinhamento (I11.3/I11.4).
+- Specs `.kiro/`: seis `tasks.md`, 59 checkboxes; somente a tarefa 1 de `platform-multidistro-core` está marcada. `.kiro/` é ignorado e não deve ser editado fora dos pontos de alinhamento (I11.3/I11.4). **Correção de 04/09/2026:** `.kiro/` é rastreado desde `9c56a60` (24/08/2026) e consta de `tests/manifests/i6-docs-files.txt`; o que segue congelado até I11.3/I11.4 são os **checkboxes** das specs. O steering e as linhas `> **Status:**` das specs são atualizados pela regra 20 da seção 0.1.
 - Auditoria do histórico Git local: não encontrou o conteúdo da configuração local, mas não substitui scanner especializado nem auditoria de remotos; revisão/rotação continua registrada para I4.
 - Nenhum dos 13 requisitos da seção 4 estava `CONFORME`; três `AUSENTE` e dez `PARCIAL` (ver `deltas.tsv`).
 
@@ -1590,9 +1592,9 @@ A infraestrutura de I9B foi construída, provada e perdida no mesmo dia, fora da
 
 Três catálogos com o mesmo conjunto de chaves e placeholders compatíveis; `tests/i18n-pendentes.txt` vazio; nenhum literal humano fora de `msg` fora dos hooks; catálogo hostil inerte e comprovado; ausência de chave não aborta e não muda status; a suíte roda idêntica em `pt-BR`, `en` e `es` quanto a código de saída, canal de máquina e efeitos; nenhum item do canal de máquina foi traduzido; hooks permanecem independentes; segunda execução no-op; gate canônico aprovado.
 
-## I10: Convergência, remoção de legado e CI completa
+## I10: Convergência, remoção de legado e gates locais
 
-**Objetivo:** tornar a arquitetura nova obrigatória e impedir regressão automática.
+**Objetivo:** tornar a arquitetura nova obrigatória e impedir regressão automática pelos gates versionados locais.
 
 ### Tarefas
 
@@ -1601,12 +1603,12 @@ Três catálogos com o mesmo conjunto de chaves e placeholders compatíveis; `te
 - [ ] **I10.3:** tornar Python 3.10+ pré-requisito inicial com diagnóstico acionável; remover `xmlstarlet` de pacotes/docs somente após busca de consumidores vazia; manter `virt-xml-validate`.
 - [ ] **I10.4:** agrupar chamadas para reduzir overhead e repetir, nas mesmas fixtures/ambiente/locale/condição de cache da baseline I0, três execuções do runner hermético completo e três de `menu.sh --status`; comparar amostras e medianas por alvo.
 - [ ] **I10.5:** cumprir orçamento `max(2x, +2 s)` por alvo ou registrar exceção explícita aceita; não introduzir daemon/cache persistente.
-- [ ] **I10.6:** completar CI: suíte não interativa, Python, ShellCheck, validação XML/libvirt por fixtures, guardas/perfis recusados, logs transacionais e versões controladas; nunca mascarar status. Inclui blindar `tests/test-python-core.sh` contra `FORCE_COLOR`/`PYTHON_COLORS` herdados do ambiente: em 03/09/2026, com `FORCE_COLOR=3`, o Python 3.14 coloriu a linha `OK` do unittest mesmo sem TTY e o `grep -q '^OK$'` reprovou uma suíte de 1146 casos aprovada (`NO_COLOR=1` ou `PYTHON_COLORS=0` fixados pelo wrapper resolvem).
+- [ ] **I10.6:** completar o gate local estrito: suíte não interativa, Python, ShellCheck exigível por `I1_REQUIRE_SHELLCHECK=1`, validação XML/libvirt por fixtures, guardas/perfis recusados, logs transacionais e versões controladas; nunca mascarar status. Inclui blindar `tests/test-python-core.sh` contra `FORCE_COLOR`/`PYTHON_COLORS` herdados do ambiente: em 03/09/2026, com `FORCE_COLOR=3`, o Python 3.14 coloriu a linha `OK` do unittest mesmo sem TTY e o `grep -q '^OK$'` reprovou uma suíte de 1146 casos aprovada (`NO_COLOR=1` ou `PYTHON_COLORS=0` fixados pelo wrapper resolvem). Uma eventual CI deverá apenas reproduzir esse runner, depois de autorização explícita para reintroduzi-la.
 - [ ] **I10.7:** garantir cobertura completa das etapas 11/14/19/20/21: sucesso, falha pré-mudança e após cada publicação, `INT`/`TERM`/`EXIT`, rollback correto, explicitamente falho e zero-divergente, falha antes/depois de cada passo de restauração quando aplicável, estado final, metadados, idempotência e plataforma recusada.
 
 ### Gate I10
 
-Sem fallback/legado; gates estáticos aprovados; bootstrap correto; desempenho aceito; CI reproduz o gate global; revisão arquitetural/segurança sem bloqueador.
+Sem fallback/legado; gates estáticos aprovados; bootstrap correto; desempenho aceito; gate local estrito reproduz todos os passos exigidos; revisão arquitetural/segurança sem bloqueador.
 
 ## I11: Documentação, specs e recuperação
 
@@ -1827,11 +1829,13 @@ Eixo formalizado e presente em `guard_mutation`; NVIDIA idêntico byte a byte; n
 
 ---
 
-## 6. Gates globais e CI
+## 6. Gates globais locais e eventual CI
+
+**Decisão vigente (03/09/2026):** `.github/workflows/ci.yml` foi removido deliberadamente pelo usuário. Não há CI ativa nem automação remota substituta; reintroduzi-la exige autorização explícita. Os gates versionados locais permanecem obrigatórios e são a única autoridade automatizada enquanto essa decisão vigorar. Os registros datados anteriores que mencionam a CI preservam o estado histórico de suas execuções.
 
 ### 6.1 Gate local obrigatório por fase
 
-O gate canônico atual é `bash tests/run-gate-i1.sh` (manifesto nominal acumulado de I0 a I9, envelope I1, validador do host, campanha I0 integral sem skips, suíte histórica incluindo `tests/test-python-core.sh` e `tests/test-i3-domain-transactions.sh`, `bash -n`, `compileall` e `py_compile` sob `-I -S` com `pycache_prefix` externo, verificação de bytecode residual no checkout, hook condicional de `tests/check-python-boundary.py`, ShellCheck quando presente, whitespace de working tree/index/untracked). O rótulo da fase vem de `GATE_FASE`, cujo padrão acompanha a fase ativa; o caminho do arquivo é preservado por compatibilidade com a CI versionada. Desde I7.5 o gate leva cerca de **1 hora** (campanha I0 `full` com 49 grupos); rode-o com `TMPDIR` e `MUTATOR_HARNESS_TMP_PARENT` apontando para um diretório próprio fora de `/tmp` e **não edite nenhum arquivo do checkout enquanto ele roda**: `tests/test-python-core.sh` fotografa conteúdo, tamanho, modo e mtime de tudo fora de `.git` (`snapshot_checkout`) e reprova qualquer mudança. Em segundo plano, o veredito é a linha `OK: Gate <fase> concluído sem mascarar status`; código de saída de wrapper ou de `awk` não conta. A partir de I2, estenda o mesmo runner ou crie o runner da fase preservando todos os passos; adapte apenas caminhos que ainda não existirem e não silencie falhas reais. Complementos exigidos pelas fases novas:
+O gate canônico atual é `bash tests/run-gate-i1.sh` (manifesto nominal acumulado de I0 a I9, envelope I1, validador do host, campanha I0 integral sem skips, suíte histórica incluindo `tests/test-python-core.sh` e `tests/test-i3-domain-transactions.sh`, `bash -n`, `compileall` e `py_compile` sob `-I -S` com `pycache_prefix` externo, verificação de bytecode residual no checkout, hook condicional de `tests/check-python-boundary.py`, ShellCheck quando presente, whitespace de working tree/index/untracked). O rótulo da fase vem de `GATE_FASE`, cujo padrão acompanha a fase ativa; o caminho histórico do runner permanece por compatibilidade interna com o plano e os registros. Desde I7.5 o gate leva cerca de **1 hora** (campanha I0 `full` com 49 grupos); rode-o com `TMPDIR` e `MUTATOR_HARNESS_TMP_PARENT` apontando para um diretório próprio fora de `/tmp` e **não edite nenhum arquivo do checkout enquanto ele roda**: `tests/test-python-core.sh` fotografa conteúdo, tamanho, modo e mtime de tudo fora de `.git` (`snapshot_checkout`) e reprova qualquer mudança. Em segundo plano, o veredito é a linha `OK: Gate <fase> concluído sem mascarar status`; código de saída de wrapper ou de `awk` não conta. A partir de I2, estenda o mesmo runner ou crie o runner da fase preservando todos os passos; adapte apenas caminhos que ainda não existirem e não silencie falhas reais. Complementos exigidos pelas fases novas:
 
 ```bash
 set -o errexit -o nounset -o pipefail
@@ -1917,7 +1921,7 @@ done < <(git ls-files --others --exclude-standard -z)
 
 O registro da fase lista nominalmente todo arquivo untracked inspecionado e confirma que pertence ao manifesto da fase. Arquivo novo fora do manifesto e resíduo como `.pyc`/`__pycache__` reprovam o gate mesmo quando o whitespace é válido. Em `git diff --no-index`, código `1` com stdout/stderr capturados e vazios é a diferença esperada contra `/dev/null`; código `1` com diagnóstico ou código maior que `1` é falha.
 
-Se ShellCheck estiver disponível localmente, executá-lo em todos os arquivos shell; a ausência local deve ser registrada, não escondida nem corrigida por instalação automática. Na CI, ShellCheck é obrigatório e a versão deve ser controlada.
+Se ShellCheck estiver disponível localmente, executá-lo em todos os arquivos shell; a ausência local deve ser registrada, não escondida nem corrigida por instalação automática. Para tornar a ausência fatal, execute com `I1_REQUIRE_SHELLCHECK=1`. Uma eventual CI deverá usar esse modo estrito e versão controlada.
 
 ### 6.2 Gates arquiteturais após I10
 
@@ -1943,7 +1947,9 @@ O checker cobre `lib/**`, `libexec/**`, menu, etapas, utilitários, hooks/templa
 
 Falso positivo deve ser resolvido melhorando a regra ou criando exceção mínima documentada; nunca removendo silenciosamente o gate.
 
-### 6.3 Requisitos da CI
+### 6.3 Contrato para eventual CI (adiada; não ativa)
+
+As cláusulas abaixo são condições para uma futura automação remota e não autorizam sua criação. Enquanto não houver nova autorização explícita, elas são exercidas pelo gate local quando aplicáveis:
 
 - ambiente reproduzível e versões registradas;
 - suíte shell não interativa;
@@ -1959,9 +1965,9 @@ Falso positivo deve ser resolvido melhorando a regra ou criando exceção mínim
 - artefatos publicáveis de falha suficientes para diagnosticar estado anterior, candidato, observado e rollback, mas somente com fixtures sintéticas ou redação da seção 3.9; estado bruto real fica exclusivamente em bundle local de recuperação `0600`, fora do repositório/CI, com retenção e limpeza registradas;
 - nenhuma GPU/VM/rede/disco real necessária no runner.
 
-**Gate de integração:** nenhuma mudança entra como concluída sem suíte, ShellCheck, validação XML e guardas aprovados.
+**Gate de integração local:** nenhuma mudança entra como concluída sem suíte, ShellCheck em modo estrito quando exigido, validação XML e guardas aprovados.
 
-**Observação de manutenção da CI atual:** `.github/workflows/ci.yml` fixa `bubblewrap=0.9.0-1ubuntu0.1` no runner `ubuntu-24.04`; se o repositório de pacotes remover essa versão, atualize o pin explicitamente e registre a mudança.
+**Estado da automação remota:** o workflow histórico fixava `bubblewrap=0.9.0-1ubuntu0.1` no runner `ubuntu-24.04`, mas foi removido deliberadamente em 03/09/2026. Esse pin é apenas registro histórico; qualquer CI futura deve ser redesenhada e autorizada explicitamente, não restaurada por inferência.
 
 ---
 
@@ -2067,7 +2073,7 @@ README, guia, o índice `commands-list.md`, os documentos `commands-list/*.md`, 
 | INVENTORY-CORE | normalização/diff | I6 | atual/legado/ordem | hardware I13 |
 | PLATFORM-CORE | fatos/capabilities | I8 | 11 fixtures | providers I13/I14 |
 | SHELL-MODULES | common agregador | I9 | source/ciclos/hooks | não aplicável |
-| CI-GATES | arquitetura e regressão | I10/I12 | pipeline completo 2x | não aplicável |
+| LOCAL-GATES | arquitetura e regressão | I10/I12 | gate local completo 2x; CI futura somente se autorizada | não aplicável |
 | DOCS-SPECS | comportamento real | I11 | revisão/gates de links quando houver | revisão humana |
 | QUAL-UBUNTU-POP | campanha 00-70 | I13 | não substitui | obrigatória por combinação |
 | PROVIDERS | dez domínios por distro | I14 | fixtures reais | campanha por combinação |
@@ -2160,7 +2166,7 @@ Somente quando:
 - verificadores não têm falso sucesso;
 - config/exemplo são neutros e seguros;
 - arquitetura híbrida e gates de I10 estão ativos;
-- CI, ShellCheck e XML passam;
+- gates locais, ShellCheck em modo estrito quando exigido e XML passam;
 - docs/specs estão sincronizadas;
 - matriz exata de versões existe;
 - I12 foi aprovado duas vezes.
@@ -2242,6 +2248,7 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I9 (I9.1 a I9.11) | 2026-08-30 a 2026-09-02 | `91cd349` a `43ec863` | novos `lib/shell/{base,ui,privilege,status,probes,storage,network-effects,libvirt,config,waivers}.sh`, `lib/policy/waivers.tsv`, `tests/check-waivers-matrix.py`, `tests/test-i9-{modulos,hooks-isolados,windows-state,airlock-verify,verify-helpers,waivers,revisao-semantica}.sh`, `tests/manifests/i9-files.txt`; alterados `lib/common.sh` (4145 para 80 linhas), `lib/shell/boot.sh`, `menu.sh`, `etapas/02-detectar-config.sh` | suítes dirigidas de I9.1 a I9.11 (37+9+50+59+41+24 casos); `GATE_FASE=I9 bash tests/run-gate-i1.sh` executado em 02/09/2026 com `MUTATOR_HARNESS_TMP_PARENT` e `TMPDIR` fora de `/tmp`: manifesto de **160** arquivos, envelope I1 com 30 mutadores diretos e 23 seleções de menu em 6 perfis duas vezes, `atualizar-host --validar` em 29 cenários, **campanha I0 `full` aprovada nos 49 grupos em 61 min**, e o laço histórico aprovado até `test-i9-airlock-verify.sh` | **PARCIAL: veredito final do gate NÃO observado** | O log do gate foi perdido antes de eu ler as linhas finais, e a notificação de "exit code 0" era do `awk` do wrapper, não do gate (a armadilha que a própria seção 12 já registra). Portanto o gate **não** conta como aprovado: nenhuma linha `OK: Gate I9 concluído` foi vista. Independentemente disso, **I9.12 reabriu a fase**, então o gate precisa ser reexecutado no fechamento dela. ShellCheck ausente neste host (a CI versionada o exige). Artefatos de I9B construídos nesta mesma sessão foram perdidos com o scratchpad e precisam ser reconstruídos | commit `43ec863`; `tests/test-i9-revisao-semantica.sh` (24 casos) no repositório | implementar I9.12 e reexecutar o Gate I9 |
 | I9.12 | 2026-09-03 | `43ec863` a `8c84a54` (21 commits) | novos `libexec/passthrough_core/resources.py`, `tests/python/test_resources.py`, `tests/test-i912-memoria-hooks.sh`; alterados `etapas/{50,52,53}`, `lib/shell/{boot,config,probes}.sh`, `libexec/passthrough_core/{cli,config}.py`, `passthrough.conf.example`, `tests/{check-python-boundary.py,check-phase-manifest.sh,test-i5-cpu-boot.sh,test-i9-hooks-isolados.sh,test-i0-characterization.sh}`, `tests/i0/traceability.tsv`, `tests/manifests/i9-files.txt`, este plano | migração no host executada pelo operador (XML sem `memoryBacking`, 21,8 GiB devolvidos em runtime, três chaves fora do GRUB, baseline persistente após reboot com `MemAvailable` 27,7 GiB); `tests/python/test_resources.py`; `bash tests/test-i912-memoria-hooks.sh`; `tests/test-i5-cpu-boot.sh` caso 3e-bis (I9.13) | **PARCIAL** | etapa 18 alterada em `10f5e52` sem teste dirigido; pergunta de `MEMORIA_MODO` ausente (D7); Gate I9 não reexecutado; conf do operador com `MEMORIA_MODO` vazio e `HUGEPAGES_1G=22` residual; etapa 14 precisa ser reexecutada para instalar os hooks novos; passo 3 da migração (VM com memória comum) não executado | fase I9: tabela de provas, decisões I9.12-D1 a D7 e sequência de migração | teste da etapa 18, pergunta na etapa 3, reexecutar o Gate I9 |
 | Auditoria | 2026-09-03 | `8c84a54` (working tree limpa) | `PLANO-FINALIZACAO.md`, `.kiro/steering/{product,safety,structure,tech}.md`, linha `> **Status:**` de `.kiro/specs/*/{requirements,design,tasks}.md`; nenhum arquivo de código, teste, exemplo ou manifesto | verificação por leitura e `grep` (seção 1.6.1); `printf` posicional medido; recontagem da superfície humana; 26 suítes `tests/test-*.sh` aprovadas (sem a campanha I0) e `run_tests.py` com 1146 casos OK; `test-python-core.sh` só reprova sob `FORCE_COLOR=3` do ambiente | plano realinhado: 3 menções a "falta a etapa 18" corrigidas para "feita sem teste dirigido"; decisões I9B-D1 a D12 recuperadas; 3.10 reescrita; seções 10, 12 e 16 completadas; I13.4/11.2 alinhados ao perfil retornável; steering do Kiro atualizado | não reexecutou o gate canônico; não escreveu teste nem código; specs do Kiro só no cabeçalho de status | seção 1.6 | executor: pendências 1 a 3 de I9.12, depois Gate I9; operador: pendência 4 |
+| Decisão CI local | 2026-09-03 | `f2c4258` + working tree | workflow já removido pelo usuário; `PLANO-FINALIZACAO.md`, `tests/manifests/i1-files.txt`, `tests/run-gate-i1.sh` | `bash -n` do runner/checker; `git diff --check`; manifesto cumulativo I9 com 161 caminhos | **APROVADO para o escopo documental**: sem CI ativa; gates locais permanecem obrigatórios | gate canônico de cerca de 1 hora não executado; CI futura exige nova autorização explícita | seção 6 e saída desta sessão | manter pendências 1 a 3 de I9.12, depois Gate I9 |
 | I10 | | | | | não iniciado | | | aguarda I9 |
 | I11 | | | | | não iniciado | | | aguarda I10 |
 | I12 | | | | | não iniciado | | | aguarda I11 |
@@ -2305,7 +2312,7 @@ Uma fase só termina quando:
 2. teste direcionado e gate global passaram;
 3. segunda execução comprovou idempotência quando aplicável;
 4. nenhuma mudança do usuário foi perdida;
-5. documentação/testes afetados foram atualizados na mesma fase;
+5. documentação/testes afetados foram atualizados na mesma fase, inclusive `.kiro/steering/product.md` e as linhas `> **Status:**` das specs tocadas (regra 20);
 6. revisão semântica exigida não possui bloqueador;
 7. registro contém comandos, resultados, arquivos e limitações;
 8. busca por consumidor legado da fase está vazia ou exceção mínima está documentada;
@@ -2354,7 +2361,7 @@ Uma fase só termina quando:
 ### Testes, dados e documentação
 
 - [ ] Cobertura transacional completa de 30/50/60/61/70.
-- [~] CI executa suíte, Python, ShellCheck, XML e guardas (gate canônico versionado e ativo, com as suítes Python de I2/I3, `compileall` com cache externo, verificação de bytecode residual e as fixtures de XML/JSON de I3; faltam os canários de redação e a validação por `virt-xml-validate` na CI, que dependem das fases futuras).
+- [~] Gate local executa suíte, Python, ShellCheck quando disponível ou exigido, XML e guardas (gate canônico versionado e ativo, com as suítes Python de I2/I3, `compileall` com cache externo, verificação de bytecode residual e as fixtures de XML/JSON de I3; faltam os canários de redação e a validação por `virt-xml-validate`, que dependem das fases futuras). CI remota está deliberadamente ausente e adiada até autorização explícita; isso não substitui nem reduz o gate local.
 - [ ] Gate global passou duas vezes.
 - [ ] Gates arquiteturais negativos passaram.
 - [ ] Desempenho está no orçamento ou exceção foi aceita.

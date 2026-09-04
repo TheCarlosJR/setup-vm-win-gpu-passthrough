@@ -1,4 +1,3 @@
-.github/workflows/ci.yml
 tests/check-phase-manifest.sh
 tests/i1/mutators.tsv
 tests/lib/i1-guard-harness.sh
