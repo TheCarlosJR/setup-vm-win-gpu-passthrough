@@ -1336,6 +1336,26 @@ em runtime neste kernel, e portanto o modo `hugetlb-1g` em runtime é
 fisicamente possível aqui. A prova vale para o desenho de I9.12 inteiro: sem
 ela, o modo de 1 GiB em runtime seria especulação.
 
+**Passos 4 e 5 executados em 03/09/2026: migração concluída e persistente.** A
+fase 2/2 removeu `default_hugepagesz`, `hugepagesz` e `hugepages` do GRUB e o
+host reiniciou. Estado depois do reboot:
+
+- `/proc/cmdline` sem nenhuma chave de hugepages;
+- `HugePages_Total=0`, `Hugetlb=0`;
+- `MemAvailable` em **29.093.508 kB (27,7 GiB)** de `MemTotal` 31.722.704 kB;
+- `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash amd_iommu=on iommu=pt"`.
+
+Duas coisas provadas aqui, além da devolução em si. Primeira: **`amd_iommu=on` e
+`iommu=pt` sobreviveram**. Eram o risco R2 da auditoria — a remoção arrastar
+chave de outro dono e quebrar o passthrough inteiro —, e o `kernel_param_del`
+por chave o evitou. Segunda: esta foi a **primeira execução real** da transação
+de boot corrigida em I9.13, e ela concluiu sem acusar rollback, o que só passou
+a significar alguma coisa depois que a prova deixou de comparar a fonte com o
+backup da fonte.
+
+O baseline retornável do host está estabelecido. O que falta de I9.12 não é
+mais a migração, é a **metade executora**: adquirir no start, devolver no stop.
+
 **A inversão de contrato, demonstrada em vez de argumentada.** Com o host já no
 estado que este requisito considera CORRETO, `bash etapas/52-cpu-pinning-hugepages.sh --verificar`
 devolve `rc=2` e diz:
