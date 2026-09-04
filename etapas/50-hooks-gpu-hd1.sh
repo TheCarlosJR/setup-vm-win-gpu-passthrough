@@ -435,6 +435,7 @@ emitir_hook_memoria_fn() {
     printf 'MEMORIA_MODO=%q\n' "${MEMORIA_MODO:-normal}"
     printf 'MEM_PAGE_KB=%q\n' "${MEM_PAGE_KB:-0}"
     printf 'MEM_PAGES_NEEDED=%q\n' "${MEM_PAGES_NEEDED:-0}"
+    printf 'MEM_PLANO_VALIDO=%q\n' "${MEM_PLANO_VALIDO:-1}"
     printf 'MEM_ROTULO=%q\n' "$rotulo"
     cat <<'HOOKMEM'
 MEM_STATE_DIR=/var/lib/vm-passthrough
@@ -517,6 +518,10 @@ mem_adquirir() {
     # recusada pelo planejador na renderização (e o hook recebeu 0), ou a
     # configuração está inconsistente. Nos dois casos o start é recusado, em
     # vez de a VM subir sem as páginas que o perfil promete.
+    if [ "${MEM_PLANO_VALIDO:-1}" != 1 ]; then
+        mem_erro "o plano de memória assado nestes hooks foi recusado por motivo estrutural na renderização; corrija a política e reexecute a etapa 14"
+        return 1
+    fi
     case "$MEM_PAGES_NEEDED" in
         ''|*[!0-9]*|0)
             mem_erro "modo '$MEMORIA_MODO' exige páginas, mas o plano assado nos hooks pede $MEM_PAGES_NEEDED; reexecute a etapa 14 depois de corrigir a política"
@@ -792,6 +797,7 @@ CORPO
 
 MEM_PAGE_KB=0
 MEM_PAGES_NEEDED=0
+MEM_PLANO_VALIDO=1
 MEM_PLANO_AVISO=""
 memoria_plano_resolver() {
     # Deriva tamanho de página e contagem PELO CORE, em vez de repetir a tabela
@@ -805,12 +811,13 @@ memoria_plano_resolver() {
     # avisar o operador no momento da instalação.
     local -a permitidas=("${CORE_PARES_ENVELOPE[@]}" VALID ERROR MODE RUNTIME
         RETURNABLE PAGE_KB PAGES_NEEDED BASELINE_NR BASELINE_FREE BASELINE_RESV
-        BASELINE_SURPLUS ACQUIRE_DELTA TARGET_NR NODE_COUNT FINGERPRINT)
+        BASELINE_SURPLUS ACQUIRE_DELTA TARGET_NR NODE_COUNT FINGERPRINT TRANSIENT)
     local -a payload=()
     local foto=""
     MEMORIA_MODO="${MEMORIA_MODO:-normal}"
     MEM_PAGE_KB=0
     MEM_PAGES_NEEDED=0
+    MEM_PLANO_VALIDO=1
     MEM_PLANO_AVISO=""
     foto="$(recursos_fotografar)" || foto=""
     payload=(mode "$MEMORIA_MODO" snapshot "$foto" vm_ram_mib "${VM_RAM_MB:-0}")
@@ -820,7 +827,17 @@ memoria_plano_resolver() {
     fi
     MEM_PAGE_KB="${MEMPLANO_PAGE_KB:-0}"
     MEM_PAGES_NEEDED="${MEMPLANO_PAGES_NEEDED:-0}"
-    [ "${MEMPLANO_VALID:-0}" = 1 ] || MEM_PLANO_AVISO="${MEMPLANO_ERROR:-plano de memória recusado}"
+    # Recusa TRANSITÓRIA (consumidor no pool agora, memória apertada agora) é
+    # reavaliada pelo hook no start, então o plano continua válido para assar.
+    # Recusa ESTRUTURAL (modo, aritmética de página, pool ausente, NUMA) não
+    # muda por esperar, e o hook não tem como reavaliá-la sozinho — NUMA em
+    # especial exige contadores por nó que ele é cego para julgar. Nesse caso o
+    # hook nasce bloqueado e o start é recusado até a etapa 14 rodar de novo.
+    MEM_PLANO_VALIDO=1
+    if [ "${MEMPLANO_VALID:-0}" != 1 ]; then
+        MEM_PLANO_AVISO="${MEMPLANO_ERROR:-plano de memória recusado}"
+        [ "${MEMPLANO_TRANSIENT:-0}" = 1 ] || MEM_PLANO_VALIDO=0
+    fi
     return 0
 }
 
@@ -1452,7 +1469,11 @@ gerar_conjunto_hooks() {
     memoria_plano_resolver || true
     if [ -n "$MEM_PLANO_AVISO" ]; then
         aviso "Política de memória: $MEM_PLANO_AVISO"
-        info "Os hooks são renderizados assim mesmo. Recusa transitória (consumidor no pool agora, memória apertada agora) é reavaliada no start. Recusa estrutural faz o plano assar zero páginas, e nesse caso o hook RECUSA o start em vez de subir a VM sem as páginas que o perfil promete."
+        if [ "$MEM_PLANO_VALIDO" = 1 ]; then
+            info "A recusa é transitória e será reavaliada no start: os hooks são renderizados normalmente."
+        else
+            aviso "A recusa é estrutural: os hooks nascem bloqueados e vão RECUSAR o start até a política ser corrigida e a etapa 14 rodar de novo."
+        fi
     fi
     gerar_dispatcher "$diretorio/qemu" "$legado"
     gerar_prepare "$diretorio/prepare.sh"

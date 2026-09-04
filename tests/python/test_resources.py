@@ -1584,7 +1584,7 @@ class ContratoDeChavesTests(unittest.TestCase):
         provaria isso.
         """
         aceita = plano("hugetlb-1g", snapshot=SO_1G, vm_ram_mib=30720)
-        self.assertEqual(len(aceita), 15)
+        self.assertEqual(len(aceita), 16)
         recusas = (
             resources.plan({"mode": "invalido"}),
             plano("hugetlb-2m", snapshot=SO_1G, vm_ram_mib=8192),

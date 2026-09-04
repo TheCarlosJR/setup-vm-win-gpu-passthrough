@@ -341,11 +341,19 @@ def _plan_vazio(mode: str) -> dict:
         "target_nr": 0,
         "node_count": 0,
         "fingerprint": "",
+        # `transient` diz se a recusa depende do estado do pool NESTE instante.
+        # Recusa transitória (consumidor externo, reserva, surplus, memória
+        # disponível) pode desaparecer sozinha e deve ser reavaliada no start.
+        # Recusa estrutural (modo, aritmética de página, ausência do pool,
+        # NUMA) não muda por esperar, e por isso precisa BLOQUEAR o start em
+        # vez de ser reavaliada — quem a reavaliaria é o hook, e ele não tem
+        # como comprovar distribuição por nó NUMA sozinho (decisão I9-D8).
+        "transient": 0,
     }
     return dados
 
 
-def _recusar(dados: dict, motivo: str) -> dict:
+def _recusar(dados: dict, motivo: str, transitoria: bool = False) -> dict:
     """Marca a recusa NO dicionário que já existe.
 
     Remontar o dicionário do zero era o que fazia as recusas posteriores à
@@ -354,6 +362,7 @@ def _recusar(dados: dict, motivo: str) -> dict:
     """
     dados["valid"] = 0
     dados["error"] = motivo
+    dados["transient"] = 1 if transitoria else 0
     return dados
 
 
@@ -439,12 +448,14 @@ def plan(payload: Mapping[str, Any]) -> dict:
             base,
             "Pool de %d kB tem %d página(s) em uso por outro consumidor; start recusado."
             % (page_kb, em_uso),
+            transitoria=True,
         )
     if pool["resv"] > 0:
         return _recusar(
             base,
             "Pool de %d kB tem %d página(s) reservada(s) por outro consumidor."
             % (page_kb, pool["resv"]),
+            transitoria=True,
         )
     if pool["surplus"] > 0:
         # Surplus é página de overcommit, criada e destruída pelo kernel sob
@@ -454,6 +465,7 @@ def plan(payload: Mapping[str, Any]) -> dict:
             base,
             "Pool de %d kB tem %d página(s) de surplus; a exatidão da devolução"
             " não pode ser provada." % (page_kb, pool["surplus"]),
+            transitoria=True,
         )
 
     # Pool preexistente e totalmente livre (é o caso deste host, com 22 páginas
@@ -468,7 +480,7 @@ def plan(payload: Mapping[str, Any]) -> dict:
     if delta > 0:
         faltando = _memoria_insuficiente(snapshot, delta, page_kb)
         if faltando:
-            return _recusar(base, faltando)
+            return _recusar(base, faltando, transitoria=True)
         numa = _numa_incompativel(snapshot, delta, page_kb)
         if numa:
             return _recusar(base, numa)
