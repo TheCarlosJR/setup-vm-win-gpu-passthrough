@@ -1,6 +1,6 @@
 # Design — Perfis de pacotes APT e pacman
 
-> **Status:** baseline APT existente; convergência I10 e providers I14 ainda futuros.
+> **Status (03/09/2026):** baseline APT de Ubuntu/Pop!_OS inalterado; `platform.py` (I8) e os módulos `lib/shell/` (I9) já existem; convergência, gates estáticos e remoção de `xmlstarlet` continuam em I10; providers Debian/Arch/CachyOS só em I14. Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe.
 > **Escopo:** resolução por capability e efeitos de pacote; NTFS, boot e rede ficam fora.
 > **Dependências:** `platform.py` de I8, modularização I9, convergência I10 e qualificação I13.
 > **Gate:** gate canônico + boundary/static checks de I10 + campanha individual I14.

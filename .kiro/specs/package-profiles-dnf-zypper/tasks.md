@@ -1,6 +1,6 @@
 # Tarefas — Perfis DNF e Zypper
 
-> **Status:** todas futuras e abertas.
+> **Status (03/09/2026):** inalterado: nenhum provider DNF/Zypper existe nem deve existir antes de I14.2/I14.5/I14.6, após `BASE_QUALIFICADA`. Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe.
 > **Escopo:** I14.2, I14.5 e I14.6, executados individualmente.
 > **Dependências:** I8–I10 e I13/`BASE_QUALIFICADA`.
 > **Gate:** gate por alvo, sem promoção por fixture.

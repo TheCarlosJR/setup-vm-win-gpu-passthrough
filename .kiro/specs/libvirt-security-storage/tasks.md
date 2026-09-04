@@ -1,6 +1,6 @@
 # Tarefas — Libvirt, segurança e armazenamento
 
-> **Status:** todas abertas como reconciliação/deltas; entregas I3 são registradas, não remarcadas em bloco.
+> **Status (03/09/2026):** núcleo I3 preservado; REQ-DISK-IDENTITY e REQ-USB-IDENTITY concluídos em I6 (23/08/2026); efeitos libvirt e storage extraídos para `lib/shell/{libvirt,storage}.sh` em I9 (30/08/2026); hooks provados puros e independentes do checkout por `tests/test-i9-hooks-isolados.sh`; hooks passaram a adquirir e devolver memória (I9.12). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Providers de outras distros só em I14.
 > **Escopo:** preservar core I3, fechar identidades I6, modularizar efeitos I9 e adicionar providers somente em I14.
 > **Dependências:** I3 histórico → I6/I8/I9 → I13/I14.
 > **Gate:** regressões dirigidas e gate da fase correspondente; hardware real separado.

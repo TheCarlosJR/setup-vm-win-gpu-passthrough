@@ -1,6 +1,6 @@
 # Tarefas — Rede e firewall multi-distro
 
-> **Status:** todas abertas; implementação parcial atual será preservada e caracterizada.
+> **Status (03/09/2026):** `libexec/passthrough_core/network.py` e a transação da etapa 19 concluídos em I7 (Gate I7 aprovado em 28/08/2026, REQ-NET-TX fechado com `recovery_id` e bundle privado); `lib/shell/network-effects.sh` criado e REQ-AIRLOCK-VERIFY fechado em I9.8 (`tests/test-i9-airlock-verify.sh`). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. NetworkManager/networkd/Wicked/firewalld só em I14.
 > **Escopo:** I7 base, I9 efeitos/Airlock, I14 providers.
 > **Dependências:** I6.0/I6 → I7 → I8/I9/I10 → I13 → I14.
 > **Gate:** Gate I7, Gate I9 e qualificação individual de provider.

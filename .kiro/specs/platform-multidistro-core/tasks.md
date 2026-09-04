@@ -1,6 +1,6 @@
 # Tarefas — Núcleo de plataforma multi-distro
 
-> **Status:** parcial; somente a tarefa histórica 1 permanece marcada.
+> **Status (03/09/2026):** I8 APROVADO em 28/08/2026: `libexec/passthrough_core/platform.py` existe e é o resolvedor por trás de `lib/platform.sh` (I8.4), eixos de CPU e GPU modelados como fatos tipados (I8.7/I8.8), backend libvirt resolvido pelo core (I8.6), 11 fixtures em `tests/test-i8-platform.sh`; os classificadores em Bash foram removidos. Checkboxes abaixo congelados até o alinhamento formal em I11.3 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Nenhuma distro foi promovida.
 > **Escopo:** tarefas I8; providers e qualificação de novas distros pertencem a I14.
 > **Dependências:** I6.0, I6 e I7 aprovados.
 > **Gate:** Gate I8 e gate canônico; nenhuma fixture promove suporte.

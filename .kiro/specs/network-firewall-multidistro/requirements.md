@@ -1,6 +1,6 @@
 # Requisitos — Rede e firewall multi-distro
 
-> **Status:** transação Netplan/libvirt atual é parcial; I7, I9 e providers I14 permanecem abertos.
+> **Status (03/09/2026):** `libexec/passthrough_core/network.py` e a transação da etapa 19 concluídos em I7 (Gate I7 aprovado em 28/08/2026, REQ-NET-TX fechado com `recovery_id` e bundle privado); `lib/shell/network-effects.sh` criado e REQ-AIRLOCK-VERIFY fechado em I9.8 (`tests/test-i9-airlock-verify.sh`). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. NetworkManager/networkd/Wicked/firewalld só em I14.
 > **Escopo:** I7 cria planner backend-neutral; I9 extrai efeitos e fecha Airlock; I14 adiciona providers.
 > **Dependências:** I6.0/I6 antes de I7; I8/I9 para providers; I13 antes de I14.
 > **Gate:** Gate I7, Gate I9, gate canônico e campanhas individuais I14.

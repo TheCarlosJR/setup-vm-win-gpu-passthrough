@@ -1,6 +1,6 @@
 # Requisitos — Libvirt, segurança e armazenamento
 
-> **Status:** núcleo XML/JSON e QCOW2 implementado em I3; efeitos/modularização e providers permanecem parciais/futuros.
+> **Status (03/09/2026):** núcleo I3 preservado; REQ-DISK-IDENTITY e REQ-USB-IDENTITY concluídos em I6 (23/08/2026); efeitos libvirt e storage extraídos para `lib/shell/{libvirt,storage}.sh` em I9 (30/08/2026); hooks provados puros e independentes do checkout por `tests/test-i9-hooks-isolados.sh`; hooks passaram a adquirir e devolver memória (I9.12). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Providers de outras distros só em I14.
 > **Escopo:** preservar entregas I3, fechar deltas operacionais e modularizar efeitos em I9; sem promoção de hardware real.
 > **Dependências:** I3 histórico, I6 para identidades, I8 para plataforma, I9 para módulos shell e I14 para novos providers.
 > **Gate:** regressões I3, gates das fases aplicáveis e campanhas reais separadas.

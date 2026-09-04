@@ -1,6 +1,6 @@
 # Requisitos — Perfis DNF e Zypper
 
-> **Status:** futuro; não há provider operacional DNF/Zypper no estado atual.
+> **Status (03/09/2026):** inalterado: nenhum provider DNF/Zypper existe nem deve existir antes de I14.2/I14.5/I14.6, após `BASE_QUALIFICADA`. Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe.
 > **Escopo:** Fedora Workstation I14.2, openSUSE Tumbleweed I14.5 e Fedora Silverblue diagnóstico I14.6.
 > **Dependências:** I8–I10 concluídos, I13 aprovado e `BASE_QUALIFICADA`.
 > **Gate:** gate canônico e campanha individual do alvo; nenhuma promoção por fixture.

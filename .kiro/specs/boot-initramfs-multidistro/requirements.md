@@ -1,6 +1,6 @@
 # Requisitos — Boot e initramfs multi-distro
 
-> **Status:** baseline AMD/Ubuntu/Pop!_OS implementado em I5; expansão de providers e Intel permanece futura.
+> **Status (03/09/2026):** baseline I5 mantido; I9.3 consolidou `lib/shell/boot.sh`; I9.13 fechou REQ-BOOT-POSCONDICAO para GRUB (commit `39440f2`, prova do `grub.cfg` regenerado no apply e no rollback); I9.12 tirou a reserva de HugePages e o isolamento persistente do perfil retornável (etapas 17 e 18). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Intel continua bloqueado até I14B.
 > **Escopo:** preservar `lib/shell/boot.sh`, pós-condições e compatibilidade; Intel pertence a I14B.
 > **Dependências:** I5 histórico; I8/I9 para evolução; I13 antes de I14B e providers I14.
 > **Gate:** testes I5 existentes, gate canônico e qualificação real por bootloader/hardware.

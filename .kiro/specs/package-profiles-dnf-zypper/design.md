@@ -1,6 +1,6 @@
 # Design — Perfis DNF e Zypper
 
-> **Status:** desenho futuro de I14; nenhum adaptador implementado.
+> **Status (03/09/2026):** inalterado: nenhum provider DNF/Zypper existe nem deve existir antes de I14.2/I14.5/I14.6, após `BASE_QUALIFICADA`. Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe.
 > **Escopo:** Fedora Workstation, openSUSE Tumbleweed e recusa diagnóstica de Silverblue.
 > **Dependências:** core/fachadas estabilizados em I8–I10 e base qualificada em I13.
 > **Gate:** um alvo por campanha I14, sempre sobre o gate canônico.

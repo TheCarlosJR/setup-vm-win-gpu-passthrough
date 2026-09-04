@@ -1,6 +1,6 @@
 # Requisitos — Finalização do repositório: I6
 
-> **Status:** spec ativo; I6.0 aprovado em 23/08/2026; I6 liberada.
+> **Status:** spec concluída; I6.0 aprovado e I6 encerrada em 23/08/2026 (Gate I6). Referência histórica: a fase ativa está em `PLANO-FINALIZACAO.md`, seção 0.0.
 > **Escopo:** inventário e identidades físicas de I6, sem antecipar I7–I14.
 > **Dependências:** entregas históricas I0–I5 e revalidação I6.0.
 > **Gate:** `bash tests/run-gate-i1.sh`, campanha I0 `full` e Gate I6 descrito no `PLANO-FINALIZACAO.md`.

@@ -1,6 +1,6 @@
 # Design — Finalização do repositório: I6
 
-> **Status:** desenho proposto; nenhuma implementação I6 realizada.
+> **Status:** implementação concluída em I6 (Gate I6 aprovado em 23/08/2026); este desenho é registro histórico do que foi construído em `inventory.py` e nas etapas 1, 3, 14 e 15.
 > **Escopo:** normalização, comparação e identidade física; efeitos continuam no Bash existente.
 > **Dependências:** I6.0 aprovado e contratos I0–I5 preservados.
 > **Gate:** Gate I6 mais gate canônico cumulativo.

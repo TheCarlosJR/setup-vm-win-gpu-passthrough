@@ -1,6 +1,6 @@
 # Tarefas — Perfis de pacotes APT e pacman
 
-> **Status:** todas abertas; baseline existente não implica conclusão destas tarefas.
+> **Status (03/09/2026):** baseline APT de Ubuntu/Pop!_OS inalterado; `platform.py` (I8) e os módulos `lib/shell/` (I9) já existem; convergência, gates estáticos e remoção de `xmlstarlet` continuam em I10; providers Debian/Arch/CachyOS só em I14. Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe.
 > **Escopo:** convergência I10 e alvos I14 individuais; sem NTFS.
 > **Dependências:** I8/I9 antes de I10; I13 antes de I14.
 > **Gate:** teste direcionado, gate canônico e qualificação separada por alvo.

@@ -1,6 +1,6 @@
 # Design — Libvirt, segurança e armazenamento
 
-> **Status:** cálculo puro central entregue em I3; efeitos e providers ainda parciais.
+> **Status (03/09/2026):** núcleo I3 preservado; REQ-DISK-IDENTITY e REQ-USB-IDENTITY concluídos em I6 (23/08/2026); efeitos libvirt e storage extraídos para `lib/shell/{libvirt,storage}.sh` em I9 (30/08/2026); hooks provados puros e independentes do checkout por `tests/test-i9-hooks-isolados.sh`; hooks passaram a adquirir e devolver memória (I9.12). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Providers de outras distros só em I14.
 > **Escopo:** manter módulos Python existentes e concluir a separação de efeitos em I9/I14.
 > **Dependências:** I6 para identidades, I8 para plataforma, I9 para modularização e I14 para expansão.
 > **Gate:** regressões I3 e gates das fases; hardware real permanece evidência separada.

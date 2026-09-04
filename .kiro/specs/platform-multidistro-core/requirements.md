@@ -1,6 +1,6 @@
 # Requisitos — Núcleo de plataforma multi-distro
 
-> **Status:** parcial; `lib/platform.sh` atende o baseline, enquanto `platform.py` permanece futuro em I8.
+> **Status (03/09/2026):** I8 APROVADO em 28/08/2026: `libexec/passthrough_core/platform.py` existe e é o resolvedor por trás de `lib/platform.sh` (I8.4), eixos de CPU e GPU modelados como fatos tipados (I8.7/I8.8), backend libvirt resolvido pelo core (I8.6), 11 fixtures em `tests/test-i8-platform.sh`; os classificadores em Bash foram removidos. Checkboxes abaixo congelados até o alinhamento formal em I11.3 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Nenhuma distro foi promovida.
 > **Escopo:** detecção somente leitura, fatos/capabilities e eixos de suporte; não implementa providers de I14.
 > **Dependências:** I6.0, I6 e I7 aprovados antes de I8; I14 somente após I13 e `BASE_QUALIFICADA`.
 > **Gate:** Gate I8 mais `bash tests/run-gate-i1.sh`; fixtures não promovem suporte.

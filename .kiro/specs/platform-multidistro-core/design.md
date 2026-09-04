@@ -1,6 +1,6 @@
 # Design — Núcleo de plataforma multi-distro
 
-> **Status:** baseline Bash implementado; migração pura de I8 ainda futura.
+> **Status (03/09/2026):** I8 APROVADO em 28/08/2026: `libexec/passthrough_core/platform.py` existe e é o resolvedor por trás de `lib/platform.sh` (I8.4), eixos de CPU e GPU modelados como fatos tipados (I8.7/I8.8), backend libvirt resolvido pelo core (I8.6), 11 fixtures em `tests/test-i8-platform.sh`; os classificadores em Bash foram removidos. Checkboxes abaixo congelados até o alinhamento formal em I11.3 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. Nenhuma distro foi promovida.
 > **Escopo:** fatos, resolução, capabilities e diagnóstico; providers mutáveis ficam fora.
 > **Dependências:** I6.0 → I6 → I7 → I8; expansão somente em I14 após I13.
 > **Gate:** fixtures de plataforma, Gate I8 e gate canônico cumulativo.

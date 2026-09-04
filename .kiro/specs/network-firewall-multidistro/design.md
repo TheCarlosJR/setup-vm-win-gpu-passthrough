@@ -1,6 +1,6 @@
 # Design — Rede e firewall multi-distro
 
-> **Status:** baseline Netplan/UFW embutido e transação parcial; arquitetura-alvo ainda futura.
+> **Status (03/09/2026):** `libexec/passthrough_core/network.py` e a transação da etapa 19 concluídos em I7 (Gate I7 aprovado em 28/08/2026, REQ-NET-TX fechado com `recovery_id` e bundle privado); `lib/shell/network-effects.sh` criado e REQ-AIRLOCK-VERIFY fechado em I9.8 (`tests/test-i9-airlock-verify.sh`). Checkboxes abaixo congelados até o alinhamento formal em I11.4 (tabela de coordenação do `PLANO-FINALIZACAO.md`); não reimplementar o que já existe. NetworkManager/networkd/Wicked/firewalld só em I14.
 > **Escopo:** I7 cálculo puro, I9 efeitos/Airlock e I14 providers.
 > **Dependências:** I6 aprovado antes de I7; I8/I9/I10 antes de I14.
 > **Gate:** rollback semântico em I7/I9 e campanha de provider em I14.
