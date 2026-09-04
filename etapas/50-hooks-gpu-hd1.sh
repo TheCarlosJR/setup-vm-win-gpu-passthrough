@@ -810,9 +810,9 @@ MEM_PLANO_VALIDO=1
 MEM_PLANO_AVISO=""
 memoria_plano_resolver() {
     # Deriva tamanho de página e contagem PELO CORE, em vez de repetir a tabela
-    # de modos aqui: o hook executa a aritmética, mas quem a define é
-    # libexec/passthrough_core/resources.py, e duplicar a tabela criaria duas
-    # fontes para a mesma decisão.
+    # de modos aqui: o hook executa a aritmética, mas quem a define é o módulo
+    # de recursos do core, alcançado pela ponte única, e duplicar a tabela
+    # criaria duas fontes para a mesma decisão.
     #
     # A recusa do plano NÃO impede renderizar: ela costuma ser transitória
     # (consumidor externo no pool agora, memória apertada agora) e o hook

@@ -954,8 +954,8 @@ plano_memoria_vm() {
 }
 
 # --- Fotografia de recursos dedicados (REQ-VM-RESOURCE-LIFECYCLE, I9.12) ------
-# Observação pura do host, no formato fechado que libexec/passthrough_core/
-# resources.py interpreta: um fato por linha, campos separados por TAB. A
+# Observação pura do host, no formato fechado que o módulo de recursos do core
+# interpreta: um fato por linha, campos separados por TAB. A
 # captura passa por caminho_sistema, então a suíte encena sysfs e /proc numa
 # raiz temporária e o mesmo código roda contra host real e contra fixture.
 #
