@@ -784,6 +784,50 @@ exige_rc mem_adquirir 0 'A13c hook antigo com contagem válida adquire (o padrã
 exige_pool '4096 4096 0 0' 'A13c hook antigo com contagem válida'
 passo
 
+# A13d: modo que NÃO é de runtime com plano estrutural inválido também recusa.
+#
+# Esta é a ordem, e a ordem é a decisão (tomada em 03/09/2026). Enquanto o
+# bloqueio ficou DEPOIS de `mem_modo_de_runtime`, um `MEMORIA_MODO` desconhecido
+# ou vazio devolvia 0 sem nunca olhar para o plano, e a VM subia com memória
+# comum apesar de o operador ter declarado outra coisa: o "fallback silencioso
+# entre 1 GiB, 2 MiB, THP e memória normal" que o requisito proíbe em letra. O
+# caso mais concreto é `hugetlb-1g-boot` com reserva que não cobre a RAM da VM:
+# antes o hook deixava passar e o QEMU falhava ao mapear o backing store DEPOIS
+# do prepare, com o display manager já derrubado e a GPU já destacada — o
+# operador ficava sem desktop e sem VM.
+#
+# Um caso direto diz isto melhor do que uma divergência ausente no oráculo: se
+# alguém reverter a ordem, aqui falha com o nome do que quebrou.
+for modo in normal hugetlb-1g-boot hugetlb-4m; do
+    caso_padrao
+    CASO_MODO="$modo"
+    CASO_PAGE_KB=1048576
+    CASO_PAGES=22
+    CASO_PLANO_VALIDO=0
+    pool_montar 1048576 10 10 0 0
+    rodar "$FRAG_PREPARE" mem_adquirir
+    exige_rc mem_adquirir 1 "A13d modo não-runtime '$modo' com plano estrutural inválido"
+    exige_texto 'recusado por motivo estrutural na renderização' "A13d modo não-runtime '$modo'"
+    exige_pool '10 10 0 0' "A13d modo não-runtime '$modo'"
+    exige_sem_escrita "A13d modo não-runtime '$modo'"
+    exige_estado_ausente "A13d modo não-runtime '$modo'"
+    passo
+done
+
+# E o par: com o plano válido, o perfil legado continua passando sem tocar no
+# pool. Sem esta ponta, "recusa estrutural" viraria "o modo legado nunca sobe".
+caso_padrao
+CASO_MODO=hugetlb-1g-boot
+CASO_PAGE_KB=1048576
+CASO_PAGES=22
+pool_montar 1048576 22 22 0 0
+rodar "$FRAG_PREPARE" mem_adquirir
+exige_rc mem_adquirir 0 'A13d par: perfil legado com plano válido não toca no pool'
+exige_texto 'o ciclo de vida não toca no pool' 'A13d par: perfil legado com plano válido'
+exige_pool '22 22 0 0' 'A13d par: perfil legado com plano válido'
+exige_sem_escrita 'A13d par: perfil legado com plano válido'
+passo
+
 # ===========================================================================
 # B. Devolução (mem_devolver)
 # ===========================================================================
@@ -1242,9 +1286,9 @@ CORPUS=(
   '1g-boot-cobre|hugetlb-1g-boot|22528|1048576|22|22|0|0|4143904|1|-|1|aceita|aceita|0|-'
   '2m-kernel-honesto-sem-memoria|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|100|1|recusa|recusa|-|-'
   '2m-memavail-insuficiente|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|-|1|recusa|aceita|-|o núcleo recusa CEDO por MemAvailable; o hook não lê meminfo (I9-D8) e só reprova pela pós-condição, quando o kernel de fato não entrega. Com kernel generoso o hook aceita, e é o cenário 2m-kernel-honesto-sem-memoria que prova que os dois recusam quando a memória realmente falta'
-  '1g-boot-nao-cobre|hugetlb-1g-boot|22528|1048576|10|10|0|0|4143904|1|-|0|recusa|aceita|-|hugetlb-1g-boot não é modo de runtime: o hook por contrato NÃO toca no pool e devolve 0. Quem recusa a reserva estática insuficiente é o núcleo, na renderização'
-  'modo-desconhecido|hugetlb-4m|8192|2048|0|0|0|0|20971520|1|-|0|recusa|aceita|-|modo fora do catálogo. MEM_PLANO_VALIDO chega 0, mas NÃO alcança este caso: mem_adquirir consulta mem_modo_de_runtime ANTES do bloqueio estrutural, e um modo que não é de runtime devolve 0 sem olhar para o plano. É defensável (para modo desconhecido, o padrão mais seguro que o hook pode aplicar sozinho é não tocar no pool), e é o desenho atual; se a intenção for bloquear o start em plano estruturalmente recusado seja qual for o modo, a checagem tem de subir para antes de mem_modo_de_runtime'
-  'modo-vazio||8192|2048|0|0|0|0|20971520|1|-|0|recusa|aceita|-|idem modo-desconhecido, e pelo mesmo mecanismo: o bloqueio por MEM_PLANO_VALIDO=0 mora depois de mem_modo_de_runtime, que já devolveu 0 para modo vazio'
+  '1g-boot-nao-cobre|hugetlb-1g-boot|22528|1048576|10|10|0|0|4143904|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026, e é melhoria, não efeito colateral: reserva estática de 1 GiB que não cobre a RAM da VM passou a recusar o start CEDO, em vez de deixar o QEMU descobrir na hora de mapear o backing store — que é a falha depois do prepare, com o display já derrubado, descrita na sequência de migração do plano
+  'modo-desconhecido|hugetlb-4m|8192|2048|0|0|0|0|20971520|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026: o bloqueio estrutural subiu para ANTES de mem_modo_de_runtime, então modo fora do catálogo deixou de devolver 0 sem olhar o plano
+  'modo-vazio||8192|2048|0|0|0|0|20971520|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026 pelo mesmo mecanismo de modo-desconhecido
   'numa-dois-nos-delta-par|hugetlb-2m|8192|2048|0|0|0|0|20971520|2|-|1|aceita|aceita|4096|-'
   'numa-dois-nos-delta-impar|hugetlb-2m|8194|2048|0|0|0|0|20971520|2|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026: o hook continua cego a NUMA, mas a decisão do planejador passou a viajar assada em MEM_PLANO_VALIDO=0 e ele bloqueia sem precisar enxergar
   'numa-dois-nos-sem-contadores|hugetlb-2m|8192|2048|0|0|0|0|20971520|2sem|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026 pelo mesmo mecanismo
@@ -1349,8 +1393,8 @@ for linha in "${CORPUS[@]}"; do
     fi
     passo
 done
-[ "$DIVERGENCIAS" -eq 4 ] \
-    || fail "oráculo: o corpus previa 4 divergências declaradas e observou $DIVERGENCIAS; mudança de comportamento sem revisão do contrato"
+[ "$DIVERGENCIAS" -eq 1 ] \
+    || fail "oráculo: o corpus previa 1 divergência declaradas e observou $DIVERGENCIAS; mudança de comportamento sem revisão do contrato"
 passo
 
 # ===========================================================================
@@ -1378,5 +1422,5 @@ for obrigatorio in render sys log runner.sh oraculo; do
 done
 passo
 
-printf 'OK: ciclo de vida da memória dos hooks (I9.12) em %d casos: aquisição fail-closed, devolução exata, reconciliação por boot ID, dois ciclos idempotentes e oráculo Bash x Python com %d divergências declaradas\n' \
+printf 'OK: ciclo de vida da memória dos hooks (I9.12) em %d casos: aquisição fail-closed, devolução exata, reconciliação por boot ID, dois ciclos idempotentes e oráculo Bash x Python com %d divergência(s) declarada(s)\n' \
     "$CASOS" "$DIVERGENCIAS"
