@@ -2,7 +2,7 @@
 
 > **Data de consolidação:** 16 de agosto de 2026
 > **Executor-alvo:** Claude Code (Opus 5)
-> **Status:** I0 e I1 concluídas e reverificadas em 16/08/2026; I2 a I5 em 17/08/2026; I6 em 23/08/2026; I7 e I8 em 28/08/2026 (Gates I7 e I8 aprovados). **I9 está REABERTA:** as tarefas I9.1 a I9.11 e I9.13 estão feitas e provadas, e o Gate I9 chegou a rodar em 02/09/2026 sem que o veredito final fosse observado; a fase foi reaberta por **I9.12 (REQ-VM-RESOURCE-LIFECYCLE)**, cuja migração deste host foi concluída em 03/09/2026 e cuja metade executora está implementada e coberta por bateria com sysfs simulado. Restam de I9.12 a etapa 18 e a qualificação em hardware (I13). Fases I9B a I14 pendentes
+> **Status:** I0 e I1 concluídas e reverificadas em 16/08/2026; I2 a I5 em 17/08/2026; I6 em 23/08/2026; I7 e I8 em 28/08/2026 (Gates I7 e I8 aprovados). **I9 está REABERTA:** as tarefas I9.1 a I9.11 e I9.13 estão feitas e provadas, e o Gate I9 chegou a rodar em 02/09/2026 sem que o veredito final fosse observado; a fase foi reaberta por **I9.12 (REQ-VM-RESOURCE-LIFECYCLE)**, cuja migração deste host foi concluída em 03/09/2026 e cuja metade executora está implementada e coberta por bateria com sysfs simulado. A etapa 18 recusa isolamento persistente desde `10f5e52` (03/09/2026), ainda **sem teste dirigido** do contrato novo. Restam de I9.12: esse teste, a pergunta de `MEMORIA_MODO` na etapa 3 (I9.12-D7), a reexecução do Gate I9 com veredito observado e a qualificação em hardware (I13). A infraestrutura de I9B construída em 02/09/2026 foi perdida sem commit. Fases I9B a I14 pendentes. **Última auditoria plano contra código: 03/09/2026, seção 1.6**
 > **Escopo:** correções funcionais e de segurança, migração arquitetural híbrida Bash/Python, testes/CI, documentação, qualificação real de Ubuntu/Pop!_OS e, por último, expansão multidistribuição
 > **Substitui integralmente:** `PLANO-CORRECOES-AUDITORIA.md` (blocos A, B e C registrados como executados; itens restantes absorvidos no código atual e nos deltas de I0) e `PLANO-INTEGRADO-MELHORIAS-MIGRACAO-PYTHON.md` (todo o conteúdo normativo foi transportado para cá). Nenhum dos dois é necessário para executar este documento.
 
@@ -37,9 +37,9 @@ Este arquivo é a fonte de verdade para a implementação.
 Se você é o executor e acabou de abrir este documento, faça exatamente isto, nesta ordem:
 
 1. Rode `git status --short` e preserve qualquer alteração do usuário.
-2. Leia a seção **1.5** (auditoria de 23/08/2026). Ela diz o que foi verificado **no código**, não nos checkboxes.
-3. Execute a tarefa **I6.0** da seção 1.5.4. Ela é um bloqueador: o Gate I5 não vale mais como baseline porque 27 commits alteraram a árvore depois dele.
-4. Só então abra a fase ativa no **mapa de execução** abaixo e trabalhe **uma fase por vez**.
+2. Leia a auditoria mais recente da seção 1 (hoje, **1.6**, de 03/09/2026). Ela diz o que foi verificado **no código**, não nos checkboxes, e lista o que ficou pendente.
+3. Leia a última linha preenchida da seção 12 (registro de execução): ela nomeia a fase ativa e a próxima ação. Em 03/09/2026 a fase ativa é **I9, reaberta por I9.12**; o Gate I9 ainda não teve veredito observado e precisa ser reexecutado (cerca de 1 hora, regras na seção 6.1).
+4. Só então abra a fase ativa no **mapa de execução** abaixo e trabalhe **uma fase por vez**. Todo arquivo novo nasce na árvore do repositório e entra no manifesto da fase; nada de valor fica em diretório temporário (a infraestrutura de I9B foi perdida assim em 02/09/2026).
 
 Nunca presuma que um item está ausente só porque aparece como tarefa. Primeiro detecte e caracterize o estado atual, classifique-o como `AUSENTE`, `PARCIAL` ou `CONFORME`, preserve o que já estiver correto e aplique somente o delta necessário. A seção 1.5 é o exemplo normativo de como fazer essa caracterização.
 
@@ -63,7 +63,7 @@ A ordem de execução **não é a ordem numérica**. Siga a coluna "ordem".
 | 10 | I8 | Plataforma, capabilities e **eixos de hardware** | `CONCLUÍDA` 2026-08-28 | `platform.py`, eixos distro/CPU/GPU |
 | 11 | I9 | Modularização Bash e requisitos P1 restantes | `REABERTA` por I9.12 | `lib/shell/*`, REQ-WINDOWS-STATE, REQ-AIRLOCK-VERIFY, REQ-VM-RESOURCE-LIFECYCLE |
 | 12 | **I9B** | **Internacionalização (en, pt-BR, es)** | **ABERTA (nova)** | `lang/*.msg`, `lib/shell/i18n.sh`, `messages.py` |
-| — | nota | A infraestrutura de I9B chegou a ser construída e provada em 02/09/2026 e foi **perdida** com o diretório temporário da sessão, sem nunca ter sido commitada. O que sobreviveu são as decisões e as medições, registradas na própria fase I9B. Lição aplicada desde então: trabalho de valor nasce na árvore do repositório, não em diretório temporário. | | |
+| — | nota | A infraestrutura de I9B chegou a ser construída e provada em 02/09/2026 e foi **perdida** com o diretório temporário da sessão, sem nunca ter sido commitada. As decisões e as medições foram recuperadas das notas da sessão em 03/09/2026 e registradas na fase I9B (subseção "Decisões e medições recuperadas"), com o que foi reverificado marcado como tal e o restante marcado como não reproduzido. Lição aplicada desde então: trabalho de valor nasce na árvore do repositório, não em diretório temporário. | | |
 | 13 | I10 | Convergência, remoção de legado e CI completa | `ABERTA` | gates estáticos, `check-python-boundary.py` |
 | 14 | I11 | Documentação, specs e recuperação | `ABERTA` | docs + `check-plan-traceability.py` |
 | 15 | I12 | Validação hermética final | `ABERTA` | release candidate de código |
@@ -199,6 +199,7 @@ O prompt de `USUARIO_LINUX` (1/8) mantém o aborto fatal deliberadamente: a vali
 
 - **Corrigido pela metade em 20/08/2026, ver seção 1.5:** `README.md:1` já **não** diz "Pop!_OS" no título; `Guia-QEMU-Passthrough.md:1` **ainda diz**. Resta somente o guia. Contexto original: enquanto `lib/platform.sh` e o menu suportam Ubuntu e Pop!_OS com perfis distintos (Ubuntu: `grub` + `ubuntu-drivers` + `qemu-system-x86`; Pop: `kernelstub`/`grub` + `system76` + `qemu-kvm`).
 - `tests/i0/baseline.md` referencia o nome do plano antigo; é evidência histórica e não deve ser reescrita.
+- `commands-list/README.md` aponta o índice como `../comandos.md`, que não existe (o índice é `commands-list.md`). É a ambiguidade R3-06 da seção 10.2; corrigir em I11.1, quando o Gate I11 passa a exigir índice e diretório sincronizados.
 
 ### 1.5 Auditoria de 23 de agosto de 2026 (verificada contra o código, não contra os checkboxes)
 
@@ -239,6 +240,51 @@ A tabela de numeração da seção "Numeração das etapas" mapeia as 21 etapas 
 Os 27 commits de 18/08 a 23/08 alteraram etapas cobertas pelos oráculos de I0 e pelas suítes de regressão **sem reexecutar nem registrar o gate canônico**. Portanto o resultado do Gate I5 **não vale mais como baseline**. Antes da primeira linha de I6:
 
 - [x] **I6.0:** reexecutado `bash tests/run-gate-i1.sh` sobre o estado atual e registrada a sequência completa na seção 12. A primeira tentativa parou no manifesto por causa da documentação Kiro recém-tornada rastreável; a segunda revelou a regressão preexistente da etapa 55 ausente no envelope I1; após integrar os documentos ao manifesto e corrigir `tests/i1/mutators.tsv`, o gate foi aprovado. A campanha I0 `full` também foi repetida explicitamente e aprovou 42 grupos de cenários.
+
+### 1.6 Auditoria de 03 de setembro de 2026 (plano contra código, depois de I9.12)
+
+Mesmo método da seção 1.5: cada afirmação abaixo foi testada contra a working tree em `8c84a54`, não contra os checkboxes. Motivo: entre 30/08 e 03/09/2026 entraram 26 commits (I9.1 a I9.13 e toda a implementação de I9.12), o plano foi editado em paralelo por várias sessões e uma delas perdeu trabalho não commitado. Era preciso saber o que existe de fato.
+
+**Estado das caixas antes desta revisão:** 123 em `[ ]`, 16 em `[~]`, 73 em `[x]`, 0 em `[H]`. **Depois:** 115 em `[ ]`, 22 em `[~]`, 76 em `[x]`, 0 em `[H]`.
+
+#### 1.6.1 Verificado no código
+
+| Afirmação do plano | Evidência em 03/09/2026 | Veredito |
+|---|---|---|
+| I9.12: núcleo, fotografia, hooks e contrato da etapa 17 | `libexec/passthrough_core/resources.py` com os subcomandos `resources-plan`, `resources-verify`, `resources-release-plan` e `resources-state` (`cli.py:733-736`); `recursos_fotografar` em `lib/shell/probes.sh:967`; `emitir_hook_memoria_fn`, `mem_adquirir` e `mem_devolver` em `etapas/50-hooks-gpu-hd1.sh:422/509/600`, chamados no `prepare` (linha 1121, aborta o start) e no `release` (linha 1391, nunca aborta); `--verificar` da etapa 17 decide pela política em `etapas/52-cpu-pinning-hugepages.sh:283-420`; `MEMORIA_MODO` no schema (`config.py`, hoje com 47 chaves), na allowlist do shell, no exemplo e em `tests/i0/traceability.tsv` | `CONFORME` |
+| "Falta a etapa 18" (cabeçalho, REQ-VM-RESOURCE-LIFECYCLE e tabela de provas) | **Defasado.** `etapas/53-cpu-isolation.sh` já trata a ausência de isolamento como sucesso do perfil retornável e exige `ISOLAMENTO-NAO-RETORNAVEL` digitado antes de aplicar (commit `10f5e52`, 03/09/2026). Porém **nenhuma suíte exercita o contrato novo**: `grep -rl ISOLAMENTO-NAO-RETORNAVEL tests/` é vazio e `tests/test-i912-memoria-hooks.sh` não menciona a etapa 18; a cobertura existente (`test-cpu-hugepages.sh`, `test-i5-cpu-boot.sh`, `tests/i1/mutators.tsv`) prova só recusa da CPU 0, `--desfazer`, fingerprint de topologia e guarda | código `CONFORME`, prova `AUSENTE`; corrigido para "feita sem teste dirigido" nos três lugares |
+| Pergunta de `MEMORIA_MODO` na etapa 3 (I9.12-D7) | `grep MEMORIA_MODO etapas/02-detectar-config.sh` vazio | `AUSENTE`, coerente com D7 |
+| I9B "infraestrutura construída e provada" | Nenhum dos arquivos existe (`lang/`, `lib/shell/i18n.sh`, `libexec/passthrough_core/messages.py`, `tests/check-i18n-catalogs.py`, `tests/test-i9b-i18n.sh`, `tests/i18n-pendentes.txt`); `git log --all` sem nenhum commit tocando esses caminhos; a nota do mapa dizia que as decisões estavam "registradas na própria fase I9B", e `grep -c I9B-D` no plano devolvia **0** | `AUSENTE`; decisões recuperadas nesta revisão a partir das notas da sessão |
+| Seção 3.10: valor do catálogo "usado como formato de `printf`" com `%N$s` | `bash -c 'printf "%2\$s %1\$s\n" a b'` em bash 5.3.9 devolve `printf: '$': caractere de formato inválido` (rc 1); `/usr/bin/printf` aceita. O contrato como estava era inimplementável com o embutido | **Defasado**; 3.10 e I9B.2 reescritos: renderização por expansão de parâmetro |
+| Dimensão de I9B (1783 pontos em 23/08) | Recontagem pela expressão declarada em I9B: **1790** (1465 em `etapas/`, 158 em `util/`, 160 em `lib/`, 7 em `menu.sh`); 4 prompts `read -r -p`; 70 chamadas de `assert_text*` em duas suítes | compatível; tabela mantida com a recontagem anotada |
+| `tests/check-phase-manifest.sh` aceita a fase `I9B` | linha 26 valida com `^I[0-9]+$` e recusa `I9B` com código 64 | armadilha real; registrada em I9B.12 |
+| Ambientes confinados aceitam `PASSTHROUGH_LANG` | listas fechadas de variáveis sem a chave em `tests/lib/mutator-harness.sh:583-587`, `tests/lib/i1-guard-harness.sh:441-453` e nos dois `env -i` de `tests/test-ubuntu-audit-regressions.sh` (1212 e 1646); o gate exporta `LC_ALL=C` | armadilha real; registrada em I9B.10 |
+| Tabela "Numeração das etapas" contra `ETAPAS` de `menu.sh` | 21 posições idênticas, inclusive 15 (`51`), 16 (`55`), 17 (`52`) e 18 (`53`) | `CONFORME` |
+| Seção 16 (checklist mestre) | 14 caixas descreviam como pendente trabalho fechado por gate em I6, I7, I8 e I9 (REQ-GUARD, WINDOWS-STATE, AIRLOCK-VERIFY, VERIFY-FAILCLOSED, DISK-IDENTITY, USB-IDENTITY, NET-TX, BOOT-POSCONDICAO, migrações de CPU/inventário/rede/plataforma, `common.sh` agregador, hooks puros); REQ-VM-RESOURCE-LIFECYCLE não constava | corrigidas com a fase e a suíte que provam cada uma; hardware continua `[H]` |
+| Seção 10 (matriz de rastreabilidade) | REQ-VM-RESOURCE-LIFECYCLE ausente | linha acrescentada |
+| Seção 12 (registro) | I9.12 inteira (21 commits em 03/09/2026) sem linha; I9B como "não iniciado" sem registrar a perda | linhas acrescentadas |
+| I13.4, 11.2 e seção 16 exigiam "HugePages de 1 GiB por NUMA" na qualificação | contradiz REQ-VM-RESOURCE-LIFECYCLE, que tornou a reserva de 1 GiB no boot perfil opt-in não retornável e fora da base qualificada; qualificar assim reintroduziria o defeito que I9.12 removeu | reescritos para o perfil retornável |
+| Catálogo da seção 4 | linhas de "Estado" de REQ-WINDOWS-STATE, AIRLOCK-VERIFY, VERIFY-FAILCLOSED, DISK-IDENTITY, USB-IDENTITY e NET-TX paradas em I3 | atualizações datadas acrescentadas, sem reescrever o histórico |
+| Steering do Kiro (`.kiro/steering/*.md`) | os quatro arquivos descreviam I6 como fase ativa e exigiam I6.0 antes de I6.1 | reescritos para o estado atual, apontando este plano como fonte de verdade |
+| Specs do Kiro (`.kiro/specs/*/`) | `repository-finalization` correta e encerrada; as seis specs multidistribuição têm cabeçalhos de status parados em I3/I5/I8 ("`platform.py` permanece futuro") | só a linha `> **Status:**` foi atualizada com data; checkboxes intactos até I11.3/I11.4, como a tabela de coordenação exige |
+
+#### 1.6.2 Suítes reexecutadas nesta auditoria (sem a campanha I0, que é do gate)
+
+Executadas sobre `8c84a54`, com `LC_ALL=C` e `TMPDIR` fora de `/tmp`: as 26 suítes `tests/test-*.sh` fora da campanha I0, mais a suíte Python.
+
+| Resultado | Detalhe |
+|---|---|
+| 26 suítes shell aprovadas | rc 0 em todas; as mais longas: `test-i1-safety-envelope.sh` 282 s, `test-i9-airlock-verify.sh` 104 s, `test-i6-inventory.sh` 21 s, `test-ubuntu-audit-regressions.sh` 20 s, `test-atualizar-host-validation.sh` 19 s, `test-i9-windows-state.sh` 17 s, `test-i912-memoria-hooks.sh` 11 s |
+| `tests/python/run_tests.py` | **1146 casos, OK** (eram 992 no fecho de I8; `test_resources.py` entrou em I9.12) |
+| `tests/test-python-core.sh` | reprovou na primeira execução com `relatório do unittest sem OK final` e passou na segunda. Causa: o ambiente da sessão exporta `FORCE_COLOR=3`, o Python 3.14 colore a linha `OK` mesmo sem TTY e o `grep -q '^OK$'` não casa. Sem defeito no código: com `FORCE_COLOR` desligado, rc 0. Fragilidade do harness anotada em I10.6 (a CI não exporta a variável) |
+| Campanha I0 `full` e gate canônico | **não executados** nesta auditoria (cerca de 1 hora); a linha de I9 na seção 12 continua `PARCIAL` |
+
+#### 1.6.3 O que esta revisão NÃO fez
+
+- Não escreveu o teste da etapa 18 nem a pergunta de `MEMORIA_MODO`: são trabalho de I9.12, não de auditoria.
+- Não reexecutou o gate canônico (1 hora); a linha de I9 na seção 12 continua `PARCIAL` até que o veredito `OK: Gate I9 concluído` seja observado.
+- Não marcou nenhum checkbox das specs do Kiro nem corrigiu `commands-list/README.md`: ambos pertencem a I11.
+- Não alterou código, testes, exemplo de configuração nem manifestos.
 
 ---
 
@@ -470,7 +516,7 @@ Traduzir qualquer item do canal de máquina é regressão de contrato e reprova 
 
 **Catálogo é dado, nunca código.** É proibido `source`, `eval`, `declare -a` a partir do arquivo, substituição de comando e expansão aritmética sobre qualquer valor do catálogo. O carregamento usa leitura linha a linha com `while IFS= read -r` e separação pelo primeiro `=` por expansão de parâmetro. Um catálogo hostil deve ser **inerte**: `$(...)`, crase, `${...}`, `;`, newline escapado, `%n` e sequência `%` desconhecida não podem executar nada nem quebrar o processo.
 
-**Format string controlada.** O valor do catálogo é usado como formato de `printf`, portanto o conjunto de especificadores é fechado por allowlist validada **no carregamento e no gate**: somente `%%` e `%N$s` (posicional, `N` de 1 a 9). Qualquer outro `%` reprova o catálogo inteiro e força o fallback para `en`. Posicional é obrigatório porque a ordem dos termos muda entre idiomas; `%s` simples não sobrevive a reordenação.
+**Format string controlada.** O valor do catálogo é uma format string com allowlist fechada, validada **no carregamento e no gate**: somente `%%` e `%N$s` (posicional, `N` de 1 a 9). Qualquer outro `%` reprova o catálogo inteiro e força o fallback para `en`. Posicional é obrigatório porque a ordem dos termos muda entre idiomas; `%s` simples não sobrevive a reordenação. **A renderização não usa o `printf` embutido do bash:** ele recusa o especificador posicional (`printf: '$': caractere de formato inválido`, medido em bash 5.3.9 em 03/09/2026), e `/usr/bin/printf`, que aceita, custaria um processo por mensagem. `msg` substitui os marcadores por expansão de parâmetro, o que também torna o catálogo hostil inerte por construção: nenhum byte do valor chega a um interpretador.
 
 **Precedência de seleção**, determinística e nesta ordem:
 
@@ -492,6 +538,8 @@ Suporte **não** é um booleano por distribuição. São três eixos ortogonais,
 | **Distribuição** | `supported`, `diagnostic-only`, `family-unverified`, `blocked` | `lib/platform.sh`, depois `platform.py` (I8) | `ubuntu` e `pop` suportados; `debian`, `arch`, `cachyos`, `fedora`, `opensuse-tumbleweed` em diagnóstico; Silverblue imutável |
 | **Fabricante de CPU** | `supported`, `blocked` | `plataforma_validar_cpu_amd` em `lib/platform.sh` | somente `AuthenticAMD`; `GenuineIntel` explicitamente bloqueado |
 | **Fabricante de GPU** | `supported`, `blocked` | hoje **implícito**, espalhado por 12 arquivos | somente NVIDIA, sem eixo formal |
+
+**Atualização de 28/08/2026 (I8.7 e I8.8):** os eixos de CPU e de GPU passaram a ser fatos tipados resolvidos pelo core (`PLATAFORMA_CPU_VENDOR_SUPORTADO`, `PLATAFORMA_GPU_VENDOR_SUPORTADO`, cada um com motivo próprio), ainda AMD-only e NVIDIA-only por decisão; o eixo de GPU continua fora de `guard_mutation` até I14C, e a fachada captura só `lscpu` no eixo de CPU até I14B.
 
 **Regras invariantes:**
 
@@ -650,7 +698,7 @@ Incluir `--remover-video` e `--anti-code43` na transação principal ou em segun
 
 ### REQ-WINDOWS-STATE: instalação, power state e agent independentes (P1)
 
-**Fases:** suporte XML I3 (feito); decisão/persistência I4/I9; cenário real I13. Estado: `PARCIAL`. Em I3 o core passou a ler e gravar a metadata namespaced `vmpass:windows-install` vinculada ao digest do QCOW2, de forma idempotente e preservando metadata de terceiros, com recusa de digest/data/origem inválidos. Nada disso foi ligado ao fluxo da etapa 13: instalação, power e agent continuam como três eixos separados a decidir em I4/I9.
+**Fases:** suporte XML I3 (feito); decisão/persistência I4/I9; cenário real I13. Estado: `PARCIAL`. Em I3 o core passou a ler e gravar a metadata namespaced `vmpass:windows-install` vinculada ao digest do QCOW2, de forma idempotente e preservando metadata de terceiros, com recusa de digest/data/origem inválidos. Nada disso foi ligado ao fluxo da etapa 13: instalação, power e agent continuam como três eixos separados a decidir em I4/I9. **Atualização de 2026-08-30 (I9.7, commit `c7e4e8f`):** os três eixos foram ligados ao fluxo da etapa 13 e provados em `tests/test-i9-windows-state.sh`; o cenário com Windows real é de I13.
 
 Persistir evidência durável da instalação independente do guest agent, sem criar simples arquivo `.done`. Preferir metadata namespaced no XML inativo do domínio, vinculada à identidade do QCOW2 e criada apenas após evidência/aceite explícito. Modelar separadamente:
 
@@ -666,7 +714,7 @@ VM desligada ou perda do agent não apaga a evidência de instalação. Mensagen
 
 ### REQ-AIRLOCK-VERIFY: prova semântica do Airlock (P1)
 
-**Fases:** I9; IPv4/IPv6 real I13. Estado: `PARCIAL` (deltas D-AIRLOCK-*).
+**Fases:** I9 (feita); IPv4/IPv6 real I13. Estado: código `CONFORME` desde I9.8 (2026-08-30, commit `54327bf`): o verificador reutiliza a avaliação efetiva do apply e prova a política em efeito, `tests/test-i9-airlock-verify.sh`; a prova em rede real continua em I13.
 
 `--verificar` deve reutilizar a avaliação efetiva do apply e consultar `sshd -T -C` para o contexto. Verificar conta, UID/GID, grupos, lock/autenticação, GID/shell/chroot, bindfs configurado e ativo, fingerprint, owner/grupo/modos, política positiva e negativa, IPv4 e IPv6. Texto presente mas inefetivo deve falhar.
 
@@ -676,7 +724,7 @@ VM desligada ou perda do agent não apaga a evidência de instalação. Mensagen
 
 ### REQ-VERIFY-FAILCLOSED: verificadores sem falso sucesso (P1)
 
-**Fases:** correção urgente I1 (feita para `util/atualizar-host.sh --validar`); auditoria completa I9; gate I12.
+**Fases:** correção urgente I1 (feita para `util/atualizar-host.sh --validar`); auditoria completa I9 (feita em I9.9 e I9.11, `tests/test-i9-verify-helpers.sh` e `tests/test-i9-revisao-semantica.sh`); gate I12.
 
 Auditar todos os `--verificar`/`--validar`. Separar aviso, desconhecido e erro; ferramenta ausente, saída inesperada e parsing incompleto não podem virar sucesso. Fornecer mensagens acionáveis e códigos estáveis; validar pós-condições semânticas, não apenas retorno de comando/texto.
 
@@ -706,7 +754,7 @@ Se mantidas:
 
 ### REQ-DISK-IDENTITY: identidade física workingDisk/HD1 (P1)
 
-**Fases:** integração XML I3 (feita); modelo e fluxo I6. Estado: `PARCIAL` (delta D-DISK-IDENTITY). Em I3 a projeção de disco block passou a expor `wwn`/`serial` declarados no XML; a resolução de identidade física, o cruzamento com HD1 e a recusa de ambiguidade continuam em I6.
+**Fases:** integração XML I3 (feita); modelo e fluxo I6. Estado: `PARCIAL` (delta D-DISK-IDENTITY). Em I3 a projeção de disco block passou a expor `wwn`/`serial` declarados no XML; a resolução de identidade física, o cruzamento com HD1 e a recusa de ambiguidade continuam em I6. **Concluído em I6.5 (2026-08-23):** cruzamento sistema/workingDisk/HD1 por identidade física em `inventory.py` e nas etapas 3 e 14, provado em `tests/test-i6-inventory.sh`; discos reais em I13.
 
 Capturar e persistir identidade estável do workingDisk, preferindo WWN, serial e `/dev/disk/by-id`. Resolver `/dev/sdX`, symlinks, partições e device-mapper ao mesmo dispositivo físico e comparar com todos os HD1, inclusive desmontados. Igualdade ou ambiguidade deve ser recusada. Substituição ou ausência de ID exige confirmação explícita e auditável.
 
@@ -716,7 +764,7 @@ Capturar e persistir identidade estável do workingDisk, preferindo WWN, serial 
 
 ### REQ-USB-IDENTITY: seleção USB não ambígua (P1)
 
-**Fases:** I6, integração de domínio I3 quando necessária (feita). Estado: `PARCIAL`. Em I3 a enumeração de hostdev USB passou a exigir discriminador (vendor/product ou endereço físico) e a informar quantos pares VID:PID estão duplicados; a etapa 15 recusa a remoção quando há ambiguidade em vez de escolher pela ordem. Serial/porta persistidos e a revalidação antes do attach continuam em I6.
+**Fases:** I6, integração de domínio I3 quando necessária (feita). Estado: `PARCIAL`. Em I3 a enumeração de hostdev USB passou a exigir discriminador (vendor/product ou endereço físico) e a informar quantos pares VID:PID estão duplicados; a etapa 15 recusa a remoção quando há ambiguidade em vez de escolher pela ordem. Serial/porta persistidos e a revalidação antes do attach continuam em I6. **Concluído em I6.6 (2026-08-23):** serial/porta persistidos e revalidados antes do attach na etapa 15, `tests/test-i6-inventory.sh`; as correções de 24/08 (major:minor por namespace de bloco e caractere) e 25/08 (pós-condição por identidade) estão na seção 12; dispositivos reais em I13.
 
 Usar VID:PID apenas quando único. Persistir serial quando disponível; sem serial, usar porta/caminho físico estável. Exibir candidatos e atributos; revalidar discriminador antes de anexar; duplicidade ou ambiguidade deve recusar, nunca escolher arbitrariamente.
 
@@ -726,7 +774,7 @@ Usar VID:PID apenas quando único. Persistir serial quando disponível; sem seri
 
 ### REQ-NET-TX: bridge/NAT transacional (P1)
 
-**Fases:** harness I0 (feito); inspeção de XML migrada em I3; implementação I7. Estado: `PARCIAL` (deltas D-NET-* seguem abertos). Em I3 a etapa 19 passou a analisar XML de rede e de domínio pelo core, com marcador comparado explicitamente e cardinalidade exigida em `<forward>`, `<bridge>`, blocos `<ip>` e reservas DHCP; a transação, os fingerprints de aplicação/restauração e o `recovery_id` são de I7.
+**Fases:** harness I0 (feito); inspeção de XML migrada em I3; implementação I7 (feita). Estado: código `CONFORME` desde I7.6/I7.8 (2026-08-28): D-NET-CONCURRENCY, D-NET-UNMANAGED-BRIDGE, D-NET-RECOVERY-EVIDENCE e D-NET-IDEMPOTENCE fechados, matriz de rollback com 40 injeções em 20 posições; conectividade e console reais em I13. Em I3 a etapa 19 passou a analisar XML de rede e de domínio pelo core, com marcador comparado explicitamente e cardinalidade exigida em `<forward>`, `<bridge>`, blocos `<ip>` e reservas DHCP; a transação, os fingerprints de aplicação/restauração e o `recovery_id` são de I7.
 
 Validar candidato e snapshots; armar traps antes da primeira alteração; publicar/ativar/provar bridge, libvirt e conectividade; commit só após todas as pós-condições. Rollback restaura arquivos e estado ativo, relê e compara semanticamente. Mudança concorrente de qualquer fingerprint causa conflito, não sobrescrita.
 
@@ -812,7 +860,7 @@ Exigência: em **ambos** os caminhos, apply e rollback, capturar a identidade do
 
 ### REQ-VM-RESOURCE-LIFECYCLE: recursos dedicados voltam ao host quando a VM para (P0)
 
-**Fases:** contrato e implementação em **I9.12** (fase I9 reaberta por este requisito em 02/09/2026); baterias simuladas em I10 e I12; aceite operacional em I13. Estado: `PARCIAL` — migração deste host concluída e baseline retornável provado em 03/09/2026; ciclo de aquisição e devolução implementado nos hooks e coberto por bateria com sysfs simulado; **falta** a etapa 18 (isolamento de CPU) e a qualificação em hardware, que é de I13.
+**Fases:** contrato e implementação em **I9.12** (fase I9 reaberta por este requisito em 02/09/2026); baterias simuladas em I10 e I12; aceite operacional em I13. Estado: `PARCIAL` — migração deste host concluída e baseline retornável provado em 03/09/2026; ciclo de aquisição e devolução implementado nos hooks e coberto por bateria com sysfs simulado; a etapa 18 recusa isolamento persistente por padrão desde `10f5e52` (03/09/2026), mas o contrato novo dela **não tem teste dirigido**; **faltam** esse teste, a pergunta de `MEMORIA_MODO` na etapa 3 (I9.12-D7), a reexecução do Gate I9 e a qualificação em hardware, que é de I13.
 
 O contrato completo, com as nove cláusulas normativas, está na tarefa **I9.12** da fase I9, e é lá que ele é mantido; esta entrada existe para que o requisito apareça no catálogo, na rastreabilidade e nos critérios de conclusão, sem criar uma segunda fonte de verdade.
 
@@ -1248,7 +1296,7 @@ grafo acíclico, e cada uma cita o ciclo concreto que evita.
 - [x] **I9.10:** concluir integração de REQ-WAIVERS em menu, pré-requisitos, execução direta, status e resumo.
 - [x] **I9.11:** revisão semântica do checkpoint (regra 15), com os defeitos encontrados corrigidos e cada um coberto por regressão que falha na árvore anterior.
 - [x] **I9.13:** fechar **REQ-BOOT-POSCONDICAO** provando o ARTEFATO regenerado, e não a fonte contra o backup da fonte, nos caminhos de apply e de rollback do GRUB. É pré-requisito de I9.12: a migração de I9.12 remove parâmetros de boot, e fazer isso sobre um rollback que anuncia sucesso sem provar o `grub.cfg` seria construir sobre falso sucesso.
-- [ ] **I9.12:** implementar **REQ-VM-RESOURCE-LIFECYCLE**, garantindo que recursos computacionais dedicados à VM sejam adquiridos somente para o ciclo da VM e devolvidos ao host depois que ela parar. **I9 fica reaberta por este requisito, registrado em 02/09/2026 após observar 22 GiB de HugePages de 1 GiB livres, porém permanentemente retirados da RAM comum com a VM desligada.** O contrato é:
+- [~] **I9.12:** implementar **REQ-VM-RESOURCE-LIFECYCLE**, garantindo que recursos computacionais dedicados à VM sejam adquiridos somente para o ciclo da VM e devolvidos ao host depois que ela parar. **I9 fica reaberta por este requisito, registrado em 02/09/2026 após observar 22 GiB de HugePages de 1 GiB livres, porém permanentemente retirados da RAM comum com a VM desligada.** O contrato é:
   - **Decisão de viabilidade:** HugePages explícitas são otimização, não requisito funcional para a VM. Memória normal, com THP apenas oportunístico, é o baseline mais confiável e volta naturalmente ao host quando o QEMU termina. HugePages de 2 MiB alocadas em runtime são o modo hugetlb preferencial a avaliar. HugePages de 1 GiB em runtime são viáveis somente como modo `best-effort` fail-closed: cada página exige 1 GiB fisicamente contíguo e a alocação exata de 22 páginas não pode ser garantida após uptime, pressão ou fragmentação. Reserva de 1 GiB no boot pode continuar apenas como perfil legado/opt-in de desempenho, explicitamente incompatível com este requisito e fora da base qualificada retornável; nunca como padrão silencioso.
   - **RAM no start:** em `prepare/begin`, antes de desligar display ou destacar GPU, capturar baseline, boot ID, fingerprint de topologia/NUMA, política, tamanho do pool, páginas livres/reservadas/surplus e ownership; tomar lock global por pool; e, somente quando a política exigir hugetlb, adquirir exatamente o delta necessário. Alocação parcial, NUMA divergente, memória insuficiente, consumidor externo ou pós-condição não comprovada abortam o start, restauram o baseline e impedem o QEMU. Não fazer fallback silencioso entre 1 GiB, 2 MiB, THP e memória normal.
   - **RAM no stop:** em `release/end`, falha de start e recuperação órfã, provar domínio desligado, ausência de QEMU residual e páginas atribuídas à operação já livres; devolver somente o delta adquirido pela operação e comprovar `total/free/reserved/surplus` iguais ao baseline legítimo anterior. Nunca zerar pool preexistente ou pertencente a terceiro. Se a devolução não puder ser provada, preservar state privado, marcar `RECOVERY_REQUIRED`, tentar as demais restaurações independentes e retornar erro; o dispatcher de release não pode abandonar GPU/display/CPU porque uma limpeza anterior falhou.
@@ -1257,6 +1305,14 @@ grafo acíclico, e cada uma cita o ciclo concreto que evita.
   - **Estado e recuperação:** hooks instalados permanecem Bash puro, autossuficientes e independentes do checkout; Python apenas calcula/valida plano, contagem, diff e fingerprints. Registrar estados `PREPARED/ACQUIRED/VERIFIED/RELEASING/RELEASED/RECOVERY_REQUIRED`, operação/VM/boot ID/baseline/delta, com lock, permissões privadas, idempotência, proteção contra double-acquire/double-release, duas VMs, daemon indisponível, crash do QEMU e state órfão. Power loss/reboot não depende de `release/end`: o boot seguinte deve reconciliar o baseline declarativo antes de permitir novo start.
   - **Testes e gates:** I10/I12 devem usar sysfs, cgroup, libvirt e QEMU simulados, sem alterar o host, cobrindo memória normal/THP, 2 MiB runtime, 1 GiB runtime parcial/indisponível, pool externo, NUMA, falha/sinal em cada janela, start recusado, release com múltiplas falhas, crash, daemon indisponível, recuperação órfã, dois ciclos completos e no-op. O Gate I9 exige baseline restaurado e recursos externos preservados; nenhum modo entra como qualificado por fixture.
   - **Aceite operacional I13:** em hardware autorizado, registrar métricas antes/durante/depois e repetir start/stop/crash: com VM parada, toda RAM e toda CPU gerenciadas pelo perfil retornável estão novamente elegíveis ao host; com VM ativa, QEMU consumiu exatamente a política escolhida; falha de aquisição não inicia a VM; falha de release permanece erro recuperável com evidência. Medir sucesso após uptime/fragmentação e benefício de cada modo. Se 1 GiB runtime não for confiável, qualificar memória normal/THP ou 2 MiB runtime e manter 1 GiB estática somente como exceção opt-in não retornável.
+
+**Pendências de I9.12 em 03/09/2026, o que separa `[~]` de `[x]`:**
+
+1. **Teste dirigido da etapa 18.** O contrato novo de `etapas/53-cpu-isolation.sh` (ausência de isolamento é sucesso do perfil retornável; apply exige `ISOLAMENTO-NAO-RETORNAVEL` digitado; isolamento presente é relatado como opt-in não retornável) existe desde `10f5e52`, mas nenhuma suíte o exercita. Precisa de casos para: cmdline sem as três chaves e persistência ausente comprovada (rc 0); chaves presentes e exatas (rc 1 com o aviso de não retornável); confirmação errada ou vazia (nenhum efeito); e a regressão da árvore anterior, que relatava a ausência como divergência.
+2. **Pergunta de `MEMORIA_MODO` na etapa 3** (I9.12-D7), ou decisão registrada de deixá-la manual no `passthrough.conf`. Enquanto não existir, a etapa 17 relata pendência, como manda o requisito.
+3. **Gate I9 reexecutado com veredito observado** (`OK: Gate I9 concluído sem mascarar status`), depois dos itens 1 e 2.
+4. **Operador, neste host:** declarar `MEMORIA_MODO` no `passthrough.conf`, remover o resíduo `HUGEPAGES_1G=22`, e reexecutar a etapa 14 para instalar os hooks com `mem_adquirir`/`mem_devolver` e `MEM_PLANO_VALIDO` (I9.12-D4c). O passo 3 da sequência de migração (iniciar a VM com memória comum) continua devendo.
+5. **Aceite operacional** em I13.
 
 ### Decisões tomadas ao implementar I9.12 (03/09/2026)
 
@@ -1471,7 +1527,7 @@ recusar entrar nesse estado, não sair dele.
 | I9.9 | provas compartilhadas dos verificadores | `tests/test-i9-verify-helpers.sh`, commits `8bf5fd6` e `57af49f` |
 | I9.10 | matriz de dispensas versionada e símbolo `[disp]` no menu | `tests/test-i9-waivers.sh`, `tests/check-waivers-matrix.py`, commits `7febdd2` e `da7df55` |
 | I9.11 | três defeitos da revisão semântica corrigidos: leitor de dispensa fail-closed, menu sem afirmação que ele não pode sustentar e o último `[ -f ] && v_ok` eliminado | `tests/test-i9-revisao-semantica.sh` (24 casos), commit `43ec863`; cada defeito reprova isoladamente na árvore de `91cd349` |
-| I9.12 | **migração**: XML sem `memoryBacking`, três chaves fora do GRUB, pool devolvido em runtime e baseline provado persistente após reboot. **Núcleo puro** `resources.py`: plano, prova de pós-condição, plano de devolução e máquina de estados com reconciliação por boot ID. **Fotografia** `recursos_fotografar` e chave `MEMORIA_MODO`. **Metade executora**: `mem_adquirir` no `prepare/begin` antes de o display cair, `mem_devolver` no `release/end` sem poder abortar, estado 0600 em `/var/lib/vm-passthrough/` publicado por rename e carimbado com `BOOT_ID`. **Contrato da etapa 17 substituído**: a política virou o critério, e a ausência de reserva virou pós-condição de sucesso. | 21,8 GiB devolvidos sem reiniciar e `MemAvailable` em 29,1 GB após o reboot, com `amd_iommu=on iommu=pt` preservados; `tests/python/test_resources.py` (135 métodos, 20 mutações aplicadas e 20 pegas, 6 defeitos do núcleo achados e corrigidos); `tests/test-i912-memoria-hooks.sh` (**87 casos** com sysfs simulado, 10 mutações aplicadas e 10 pegas, oráculo diferencial Bash × Python com **uma** divergência declarada — a transitória por `MemAvailable`, reavaliada no start). A bateria achou **2 defeitos** no hook, os dois corrigidos: uma guarda de completude que concatenava os campos do estado, e por isso reduzia o pool de 4096 para 1096 páginas a partir de estado que ela não sabia ler; e plano recusado virando aceite silencioso. E achou um terceiro por consequência, quando a primeira correção não fechou tudo: o bloqueio estrutural precisava valer para QUALQUER modo, não só para os de runtime (I9.12-D4b). Os três apareceram porque o oráculo cobra que toda divergência declarada continue sendo verdade — foi ele que reprovou quando uma delas deixou de existir. **Falta**: etapa 18 e qualificação em hardware (I13). |
+| I9.12 | **migração**: XML sem `memoryBacking`, três chaves fora do GRUB, pool devolvido em runtime e baseline provado persistente após reboot. **Núcleo puro** `resources.py`: plano, prova de pós-condição, plano de devolução e máquina de estados com reconciliação por boot ID. **Fotografia** `recursos_fotografar` e chave `MEMORIA_MODO`. **Metade executora**: `mem_adquirir` no `prepare/begin` antes de o display cair, `mem_devolver` no `release/end` sem poder abortar, estado 0600 em `/var/lib/vm-passthrough/` publicado por rename e carimbado com `BOOT_ID`. **Contrato da etapa 17 substituído**: a política virou o critério, e a ausência de reserva virou pós-condição de sucesso. | 21,8 GiB devolvidos sem reiniciar e `MemAvailable` em 29,1 GB após o reboot, com `amd_iommu=on iommu=pt` preservados; `tests/python/test_resources.py` (135 métodos, 20 mutações aplicadas e 20 pegas, 6 defeitos do núcleo achados e corrigidos); `tests/test-i912-memoria-hooks.sh` (**87 casos** com sysfs simulado, 10 mutações aplicadas e 10 pegas, oráculo diferencial Bash × Python com **uma** divergência declarada — a transitória por `MemAvailable`, reavaliada no start). A bateria achou **2 defeitos** no hook, os dois corrigidos: uma guarda de completude que concatenava os campos do estado, e por isso reduzia o pool de 4096 para 1096 páginas a partir de estado que ela não sabia ler; e plano recusado virando aceite silencioso. E achou um terceiro por consequência, quando a primeira correção não fechou tudo: o bloqueio estrutural precisava valer para QUALQUER modo, não só para os de runtime (I9.12-D4b). Os três apareceram porque o oráculo cobra que toda divergência declarada continue sendo verdade — foi ele que reprovou quando uma delas deixou de existir. **Etapa 18** (commit `10f5e52`): `--verificar` trata a ausência de isolamento como sucesso do perfil retornável e o apply exige `ISOLAMENTO-NAO-RETORNAVEL` digitado; **sem teste dirigido** do contrato novo (as suítes existentes cobrem só CPU 0, `--desfazer` e fingerprint). **Falta**: esse teste, a pergunta de `MEMORIA_MODO` na etapa 3, o Gate I9 reexecutado e a qualificação em hardware (I13). |
 | I9.13 | `_grub_cfg_copia` captura o artefato ANTES da janela; o rollback só anuncia sucesso quando o `grub.cfg` volta byte a byte ao estado anterior, e o apply recusa aplicador que devolveu zero sem regenerar | `tests/test-i5-cpu-boot.sh` caso 3e-bis: com a chamada 1 do `update-grub` regenerando divergente (o que um snippet de `/etc/default/grub.d` faz de verdade) e a chamada 2, a da restauração, devolvendo zero sem escrever, a árvore de `43ec863` imprime **"Rollback da fonte GRUB e regeneração do grub.cfg concluídos"** com o artefato ainda divergente; a árvore corrigida recusa a prova e nomeia a causa |
 
 ### Gate I9
@@ -1494,12 +1550,31 @@ recusar entrar nesse estado, não sair dele.
 | `menu.sh` | 6 | |
 | **Total** | **1783** | contagem de chamadas de `info`/`ok`/`aviso`/`erro`/`titulo`/`falhar`/`v_ok`/`v_falta`/`v_erro` com literal |
 
+Recontagem em 03/09/2026, sobre `8c84a54`, pela expressão `^\s*(\|\||&&)?\s*(info|ok|aviso|erro|titulo|falhar|v_ok|v_falta|v_erro|v_indeterminado|mem_dizer|mem_erro)\s+["']`: **1790** pontos (1465 em `etapas/`, 158 em `util/`, 160 em `lib/`, 7 em `menu.sh`); os cinco maiores são `02-detectar-config.sh` (197), `50-hooks-gpu-hd1.sh` (168), `60-rede-bridge.sh` (146), `40-criar-vm.sh` (102) e `41-instalacao-windows.sh` (91). A diferença para 1783 é ruído de método; I9B.7 refaz a contagem com o extrator definitivo. A sessão perdida de 02/09/2026 anotou 2459 pontos de saída humana no total, dos quais 922 eram texto-como-dado que **não** se traduz (marcadores, chaves, XML) e 1827 mensagens convertíveis; esses três números não foram reproduzidos nesta árvore.
+
 **Acoplamento dos testes, medido:** existem **46** chamadas de `assert_text`/`assert_text_any` (44 em `tests/test-i0-mutators.sh`, 2 em `tests/test-atualizar-host-validation.sh`), das quais **12** casam texto humano em português. O restante do português nos testes são mensagens de falha do próprio teste, que são superfície de desenvolvedor e **não** entram no catálogo. Esse acoplamento é pequeno e não justifica adiar a fase.
+
+### Decisões e medições recuperadas (sessão de 02/09/2026, registradas em 03/09/2026)
+
+A infraestrutura de I9B foi construída, provada e perdida no mesmo dia, fora da árvore. O que segue foi recuperado das notas daquela sessão; cada item diz se foi **reverificado** neste checkout ou se é **não reproduzido**. Nada aqui promove tarefa a `[x]`.
+
+- **I9B-D1 (renderização sem `printf`), reverificado em 03/09/2026:** o `printf` embutido do bash 5.3.9 recusa `%N$s`; `/usr/bin/printf` aceita, mas é um fork por mensagem (medido a 2,0 ms contra 0,013 ms do embutido, não reproduzido). `msg` interpreta a allowlist (`%%` e `%N$s`) por expansão de parâmetro em Bash puro. Consequência gratuita: catálogo hostil é inerte por construção, sem depender de validação.
+- **I9B-D2 (carga única no shell pai):** cada `$(msg ...)` roda em subshell e não propaga estado; o catálogo tem de ser carregado uma vez, pela fachada `lib/common.sh`, antes do primeiro uso. Carregar dentro de `msg` sob demanda repetiria a leitura a cada chamada em subshell.
+- **I9B-D3 (leitura por `mapfile`), não reproduzido:** um fork por entrada custava 3 a 4 s por processo; `mapfile -t` lê 2400 linhas em 1 ms contra 14 ms do laço `while read`. A regra da seção 3.10 (dado, nunca código) vale igual para `mapfile`: a separação continua sendo `${linha%%=*}`/`${linha#*=}`.
+- **I9B-D4 (orçamento por processo), não reproduzido:** com escopo por namespace, `mapfile` e validação achatada, a carga ficou em cerca de 50 ms por processo; validar uma chave custa cerca de 17 µs. `menu.sh --status` abre 22 processos (o menu e 21 verificadores), então todo custo de carga é multiplicado por 22; a baseline daquele dia era 13 s neste host, não comparável à de I0 (3085 ms, configuração diferente). I10.4 mede em condições iguais.
+- **I9B-D5 (harness copia `lang/`):** projeto encenado por teste precisa copiar `lang/` junto com `lib/` e `libexec/`, ou toda mensagem vira `!!CHAVE!!` dentro do harness.
+- **I9B-D6 (gate roda em `en`), reverificado:** `tests/run-gate-i1.sh` exporta `LC_ALL=C`, que a precedência da seção 3.10 resolve para `en`; suíte que compara texto humano em português precisa fixar `PASSTHROUGH_LANG=pt-BR` (I9B.10).
+- **I9B-D7 (manifesto recusa `I9B`), reverificado:** `tests/check-phase-manifest.sh:26` valida a fase com `^I[0-9]+$`; `GATE_FASE=I9B` é recusado com código 64 (I9B.12).
+- **I9B-D8 (ambientes confinados), reverificado:** `tests/lib/mutator-harness.sh:583-587`, `tests/lib/i1-guard-harness.sh:441-453` e os dois `env -i` de `tests/test-ubuntu-audit-regressions.sh` (linhas 1212 e 1646) têm lista fechada de variáveis; `PASSTHROUGH_LANG` precisa entrar nominalmente em cada um (I9B.10).
+- **I9B-D9 (hooks fixos em `en`):** decorre de I9-D8; o hook não carrega catálogo porque não pode depender do checkout (I9B.11).
+- **I9B-D10 (`menu.sh` como implementação de referência):** a migração começa pelo menu (7 pontos) para fixar o padrão de chave, namespace e prova antes dos 1465 pontos das etapas (I9B.7).
+- **I9B-D11 (texto-como-dado não se traduz):** marcadores comparados por teste, chaves de configuração, nomes de capability, XML e `recovery_id` são canal de máquina (seção 3.10); o extrator precisa separá-los antes de contar, senão a allowlist `tests/i18n-pendentes.txt` nunca esvazia.
+- **I9B-D12 (trabalho nasce na árvore):** protótipo fora do repositório não é progresso; a lição está na seção 0.0 e no steering do Kiro.
 
 ### Tarefas
 
 - [ ] **I9B.1:** criar `lang/en.msg`, `lang/pt-BR.msg` e `lang/es.msg`. Formato: uma entrada por linha, `CHAVE=valor`, comentários iniciados por `#`, linha vazia ignorada, sem continuação de linha, sem aspas envolventes, UTF-8 sem BOM, terminador LF. Chave casa `^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)*$` e usa namespace por origem (`MENU.`, `CONF.`, `REDE.`, `AIRLOCK.`, `GPU.`, `USB.`, `CPU.`, `BOOT.`, `VM.`, `TRIM.`, `COMMON.`). Justificativa de não usar gettext: `.po`/`.mo` exigem runtime e ferramenta externas, e o plano proíbe dependência nova; `$"..."` do Bash depende de `.mo` compilado e de locale do sistema, o que quebraria o determinismo exigido pela seção 3.8.
-- [ ] **I9B.2:** implementar `lib/shell/i18n.sh` com `i18n_carregar` e `msg CHAVE [args...]`. O carregamento lê o catálogo linha a linha com `while IFS= read -r`, separa a chave com `${linha%%=*}` e o valor com `${linha#*=}`, valida a chave pela expressão acima e popula um array associativo. **Proibido** `source`, `eval`, `declare` a partir do arquivo, substituição de comando e expansão aritmética sobre o valor. Carregar uma vez por processo; sem I/O por mensagem.
+- [ ] **I9B.2:** implementar `lib/shell/i18n.sh` com `i18n_carregar` e `msg CHAVE [args...]`. O carregamento lê o catálogo como dado inerte (`mapfile -t`, ou `while IFS= read -r` linha a linha), separa a chave com `${linha%%=*}` e o valor com `${linha#*=}`, valida a chave pela expressão acima e popula um array associativo. `msg` **não** passa o valor ao `printf` embutido, que recusa `%N$s` (I9B-D1): substitui os marcadores por expansão de parâmetro. **Proibido** `source`, `eval`, `declare` a partir do arquivo, substituição de comando e expansão aritmética sobre o valor. Carregar uma vez por processo; sem I/O por mensagem.
 - [ ] **I9B.3:** validar a format string no carregamento: percorrer o valor e aceitar apenas `%%` e `%N$s` com `N` de 1 a 9. Qualquer outro `%` invalida o catálogo inteiro, registra aviso e força fallback para `en`. Provar com fixture hostil contendo `%n`, `%s` simples, `%(`, `%` terminal, `$(id)`, crase, `${IFS}`, `;rm`, CRLF, BOM, chave duplicada, linha truncada e encoding inválido; nenhum caso pode executar nada nem abortar o processo.
 - [ ] **I9B.4:** implementar a precedência de seleção da seção 3.10 e a normalização de locale (`pt_BR.UTF-8` para `pt-BR`, `es_ES@euro` para `es`, desconhecido para `en`). Acrescentar a chave `IDIOMA` ao schema de `passthrough.conf` e a `passthrough.conf.example`, com classe de dado conforme a seção 3.9 e valor padrão vazio (que significa "decidir pelo ambiente").
 - [ ] **I9B.5:** implementar fallback por chave com marcador `!!CHAVE!!`, aviso registrado e erro sob `PASSTHROUGH_I18N_STRICT=1`. Provar que mensagem ausente **nunca** aborta mutador nem altera código de saída.
@@ -1507,9 +1582,9 @@ recusar entrar nesse estado, não sair dele.
 - [ ] **I9B.7:** migrar a superfície humana na ordem `menu.sh` (6), `lib/` (147), `util/` (179) e `etapas/` na ordem do menu (1451). Manter um allowlist explícito em `tests/i18n-pendentes.txt` com os arquivos ainda não migrados; o gate exige que essa lista **encolha monotonicamente** e termine vazia. Nunca manter dois caminhos de mensagem no mesmo arquivo.
 - [ ] **I9B.8:** traduzir prompts interativos (`read -r -p`) de `menu.sh` e `etapas/02-detectar-config.sh` **sem** traduzir as respostas aceitas. As respostas continuam sendo comparadas por valor canônico (`s`/`n` viram um conjunto por idioma mapeado para um booleano interno), jamais por texto traduzido. Provar que responder no idioma ativo e no idioma de fallback produz a mesma decisão.
 - [ ] **I9B.9:** implementar `tests/check-i18n-catalogs.py` e integrá-lo ao gate canônico. O checker reprova: conjunto de chaves divergente entre os três catálogos; chave fora do padrão; chave duplicada; placeholders com índices ou aridade divergentes entre idiomas; `%` fora da allowlist; BOM, CRLF ou byte inválido; chave órfã (no catálogo e não usada no código); literal humano remanescente fora de `msg` em arquivo já migrado.
-- [ ] **I9B.10:** fixar `PASSTHROUGH_LANG=pt-BR` nas suítes existentes para preservar as 12 asserções atuais, e acrescentar uma suíte nova que reexecuta os mesmos cenários sob `en` e `es` verificando **apenas** código de saída, canal de máquina e efeitos no host. Isso prova a invariante central: idioma não muda comportamento.
+- [ ] **I9B.10:** fixar `PASSTHROUGH_LANG=pt-BR` nas suítes existentes para preservar as 12 asserções atuais, e acrescentar uma suíte nova que reexecuta os mesmos cenários sob `en` e `es` verificando **apenas** código de saída, canal de máquina e efeitos no host. Isso prova a invariante central: idioma não muda comportamento. Armadilhas já medidas (I9B-D6 e D8): o gate exporta `LC_ALL=C`, que resolve para `en`; e `tests/lib/mutator-harness.sh`, `tests/lib/i1-guard-harness.sh` e os dois `env -i` de `tests/test-ubuntu-audit-regressions.sh` têm lista fechada de variáveis onde `PASSTHROUGH_LANG` precisa entrar nominalmente. Projeto encenado por teste copia `lang/` junto com `lib/` e `libexec/` (I9B-D5).
 - [ ] **I9B.11:** garantir que os hooks libvirt continuem Bash puro e autossuficientes. Hook **não** carrega catálogo e **não** depende do diretório do repositório; suas mensagens permanecem fixas em `en`, com justificativa registrada, porque rodam fora da sessão do operador.
-- [ ] **I9B.12:** acrescentar `tests/manifests/i9b-files.txt` e registrar todos os arquivos novos.
+- [ ] **I9B.12:** acrescentar `tests/manifests/i9b-files.txt` e registrar todos os arquivos novos. `tests/check-phase-manifest.sh:26` valida a fase com `^I[0-9]+$` e recusa `I9B` (I9B-D7): ajustar a expressão e o `GATE_FASE` faz parte desta tarefa, com teste de que `I9B` passa e `I9x` continua recusado.
 
 ### Gate I9B
 
@@ -1526,7 +1601,7 @@ Três catálogos com o mesmo conjunto de chaves e placeholders compatíveis; `te
 - [ ] **I10.3:** tornar Python 3.10+ pré-requisito inicial com diagnóstico acionável; remover `xmlstarlet` de pacotes/docs somente após busca de consumidores vazia; manter `virt-xml-validate`.
 - [ ] **I10.4:** agrupar chamadas para reduzir overhead e repetir, nas mesmas fixtures/ambiente/locale/condição de cache da baseline I0, três execuções do runner hermético completo e três de `menu.sh --status`; comparar amostras e medianas por alvo.
 - [ ] **I10.5:** cumprir orçamento `max(2x, +2 s)` por alvo ou registrar exceção explícita aceita; não introduzir daemon/cache persistente.
-- [ ] **I10.6:** completar CI: suíte não interativa, Python, ShellCheck, validação XML/libvirt por fixtures, guardas/perfis recusados, logs transacionais e versões controladas; nunca mascarar status.
+- [ ] **I10.6:** completar CI: suíte não interativa, Python, ShellCheck, validação XML/libvirt por fixtures, guardas/perfis recusados, logs transacionais e versões controladas; nunca mascarar status. Inclui blindar `tests/test-python-core.sh` contra `FORCE_COLOR`/`PYTHON_COLORS` herdados do ambiente: em 03/09/2026, com `FORCE_COLOR=3`, o Python 3.14 coloriu a linha `OK` do unittest mesmo sem TTY e o `grep -q '^OK$'` reprovou uma suíte de 1146 casos aprovada (`NO_COLOR=1` ou `PYTHON_COLORS=0` fixados pelo wrapper resolvem).
 - [ ] **I10.7:** garantir cobertura completa das etapas 11/14/19/20/21: sucesso, falha pré-mudança e após cada publicação, `INT`/`TERM`/`EXIT`, rollback correto, explicitamente falho e zero-divergente, falha antes/depois de cada passo de restauração quando aplicável, estado final, metadados, idempotência e plataforma recusada.
 
 ### Gate I10
@@ -1616,7 +1691,7 @@ Tudo automatizável comprovado; host intacto; nenhuma distro promovida; nenhum t
 - [ ] **I13.1:** registrar distro, kernel, firmware, bootloader, QEMU, libvirt, OVMF, NVIDIA, hardware, topologia e hashes/versões relevantes.
 - [ ] **I13.2:** executar instalação limpa das etapas 1 a 21.
 - [ ] **I13.3:** executar dois reboots e provar persistência IOMMU/VFIO, módulos e binding de todas as funções da GPU.
-- [ ] **I13.4:** após cada reboot, provar estado persistido e ativo de CPU sets/isolamento, topologia e HugePages de 1 GiB por nó NUMA; validar pinning/NUMA no XML e no processo QEMU; iniciar a VM, comprovar alocação/consumo e, após desligá-la, liberação esperada; testar rollback e registrar evidências.
+- [ ] **I13.4:** após cada reboot, provar o perfil retornável de REQ-VM-RESOURCE-LIFECYCLE: topologia e pinning/NUMA no XML e no processo QEMU; ausência de `isolcpus`/`nohz_full`/`rcu_nocbs` e de reserva de HugePages no boot (salvo opt-in digitado, registrado como não retornável e fora da base qualificada); iniciar a VM e comprovar que a política de `MEMORIA_MODO` foi adquirida exatamente (`total/free/reserved/surplus` do pool, ou memória comum no modo `normal`); desligá-la e comprovar RAM e CPU de volta ao baseline; repetir com crash do QEMU, com falha induzida de aquisição (a VM não inicia) e de devolução (erro recuperável com evidência e restauração de GPU/display preservada); medir sucesso após uptime e fragmentação para os modos hugetlb; testar rollback e registrar evidências.
 - [ ] **I13.5:** instalar Windows real com OVMF, TPM, VirtIO e agent; validar metadata durável e estados independentes.
 - [ ] **I13.6:** testar ciclos completos VM/GPU/display/HD1/hooks, incluindo detach/reattach e recuperação.
 - [ ] **I13.7:** testar USB real: dispositivo único; dois dispositivos com mesmo VID:PID discriminados por serial; fallback por porta sem serial; desconexão/reconexão; recusa de seleção obsoleta/ambígua antes do attach; e confirmação da identidade efetivamente anexada. Se o hardware necessário não existir, marcar a capability USB como não qualificada e impedir qualificação completa da combinação.
@@ -1756,7 +1831,7 @@ Eixo formalizado e presente em `guard_mutation`; NVIDIA idêntico byte a byte; n
 
 ### 6.1 Gate local obrigatório por fase
 
-O gate canônico atual é `bash tests/run-gate-i1.sh` (manifesto nominal acumulado de I0, I1, I2 e I3, envelope I1, validador do host, campanha I0 integral sem skips, suíte histórica incluindo `tests/test-python-core.sh` e `tests/test-i3-domain-transactions.sh`, `bash -n`, `compileall` e `py_compile` sob `-I -S` com `pycache_prefix` externo, verificação de bytecode residual no checkout, hook condicional de `tests/check-python-boundary.py`, ShellCheck quando presente, whitespace de working tree/index/untracked). O rótulo da fase vem de `GATE_FASE`, cujo padrão acompanha a fase ativa; o caminho do arquivo é preservado por compatibilidade com a CI versionada. A partir de I2, estenda o mesmo runner ou crie o runner da fase preservando todos os passos; adapte apenas caminhos que ainda não existirem e não silencie falhas reais. Complementos exigidos pelas fases novas:
+O gate canônico atual é `bash tests/run-gate-i1.sh` (manifesto nominal acumulado de I0 a I9, envelope I1, validador do host, campanha I0 integral sem skips, suíte histórica incluindo `tests/test-python-core.sh` e `tests/test-i3-domain-transactions.sh`, `bash -n`, `compileall` e `py_compile` sob `-I -S` com `pycache_prefix` externo, verificação de bytecode residual no checkout, hook condicional de `tests/check-python-boundary.py`, ShellCheck quando presente, whitespace de working tree/index/untracked). O rótulo da fase vem de `GATE_FASE`, cujo padrão acompanha a fase ativa; o caminho do arquivo é preservado por compatibilidade com a CI versionada. Desde I7.5 o gate leva cerca de **1 hora** (campanha I0 `full` com 49 grupos); rode-o com `TMPDIR` e `MUTATOR_HARNESS_TMP_PARENT` apontando para um diretório próprio fora de `/tmp` e **não edite nenhum arquivo do checkout enquanto ele roda**: `tests/test-python-core.sh` fotografa conteúdo, tamanho, modo e mtime de tudo fora de `.git` (`snapshot_checkout`) e reprova qualquer mudança. Em segundo plano, o veredito é a linha `OK: Gate <fase> concluído sem mascarar status`; código de saída de wrapper ou de `awk` não conta. A partir de I2, estenda o mesmo runner ou crie o runner da fase preservando todos os passos; adapte apenas caminhos que ainda não existirem e não silencie falhas reais. Complementos exigidos pelas fases novas:
 
 ```bash
 set -o errexit -o nounset -o pipefail
@@ -2001,6 +2076,7 @@ README, guia, o índice `commands-list.md`, os documentos `commands-list/*.md`, 
 | REQ-CPU-VENDOR | eixo de CPU e topologia híbrida | I8 (modelo)/I14B | fixtures de vendor e de tipo de core, SMT desligado | host Intel real I14B |
 | REQ-GPU-VENDOR | eixo de GPU e prova de retorno | I8 (modelo)/I14C | fixtures de vendor, reset_method, APU recusada | GPU Radeon real I14C |
 | REQ-BOOT-POSCONDICAO | aplicador prova que regenerou | I9 | aplicador zero-sem-efeito, fonte restaurada com artefato divergente | bootloaders reais I13/I14 |
+| REQ-VM-RESOURCE-LIFECYCLE | recursos dedicados voltam ao host com a VM parada | I9.12 (código)/I13 | plano puro em `tests/python/test_resources.py`, hooks com sysfs simulado e oráculo diferencial em `tests/test-i912-memoria-hooks.sh`; falta o teste da etapa 18 | baseline de RAM/CPU restaurado em hardware, I13 |
 
 ### 10.1 Rastreabilidade de componentes atuais para módulos-alvo
 
@@ -2093,7 +2169,7 @@ Isso significa **código completo**, não hardware qualificado.
 
 ### 11.2 Ubuntu/Pop operacionalmente qualificado
 
-Além de 11.1, exige campanha I13 separada: 00-70 limpo, dois reboots, IOMMU/VFIO, CPU sets/isolamento e HugePages de 1 GiB por NUMA comprovados no host/XML/QEMU, Windows real, GPU/HD1/hooks, identidade USB real sem ambiguidade, Airlock IPv4/IPv6, TRIM físico, rede/recuperação, backup restaurado e evidências.
+Além de 11.1, exige campanha I13 separada: 00-70 limpo, dois reboots, IOMMU/VFIO, pinning e perfil retornável de recursos (REQ-VM-RESOURCE-LIFECYCLE) comprovados no host/XML/QEMU, com RAM e CPU de volta ao baseline após o stop, Windows real, GPU/HD1/hooks, identidade USB real sem ambiguidade, Airlock IPv4/IPv6, TRIM físico, rede/recuperação, backup restaurado e evidências.
 
 ### 11.3 Nova distro completa
 
@@ -2164,6 +2240,8 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I7 | 2026-08-28 | `4590231` + working tree | fases `I7.1` a `I7.8` | ver linhas acima | **CONCLUÍDA; Gate I7 APROVADO** | qualificação real de rede continua sendo I13, com hardware e autorização do usuário | seção 12 | executar I8 |
 | I8 | 2026-08-28 | `4590231` + working tree | novos `libexec/passthrough_core/platform.py`, `tests/python/test_platform.py`, `tests/test-i8-platform.sh`, `tests/manifests/i8-files.txt`; alterados `lib/platform.sh`, `libexec/passthrough_core/cli.py`, `tests/check-python-boundary.py`, `tests/run-gate-i1.sh`, `etapas/11-driver-nvidia.sh`, `menu.sh`, `tests/i1/mutators.tsv`, este plano | oráculo diferencial do rascunho (55 casos, 12 variáveis, zero divergência) antes de pousar; diferencial de 43 cenários ANTES/DEPOIS para a resolução de unidade systemd, diff limpo; 8 regressões injetadas no teste das 11 fixtures, 8 pegas; fumaça no host real (ubuntu 26.04 `supported`, `AuthenticAMD` suportado, GPU `10de`/nvidia suportada); **gate canônico reexecutado por mim**: `bash tests/run-gate-i1.sh` rc 0, manifesto de 140 arquivos, campanha I0 `full` de 49 grupos, **992** casos no core, `bash -n` em 57 arquivos | **APROVADO (rc=0)** | os classificadores em Bash foram REMOVIDOS, não duplicados: saíram `_plataforma_ler_os_release`, `_plataforma_decodificar_valor`, `_plataforma_detectar_imutabilidade`, `_plataforma_classificar_suporte`, `_plataforma_id_like_contem`, `_plataforma_sondar_unidade_fixture` e `_plataforma_classificar_unidade`. `guard_mutation` não mudou em nenhum byte e nenhum eixo entrou nela. **Limites declarados:** a fachada ainda captura só `lscpu` no eixo de CPU (ligar `/proc/cpuinfo` quebraria o perfil `intel` do envelope I1, porque os harnesses trocam comando por `PATH` e não conseguem redirecionar arquivo — fica para I14B); `plataforma_detectar_gpu_vendor` existe e publica, mas nenhum consumidor ainda decide por ela, porque a interseção dos eixos é I14C; cinco divergências fail-closed em entrada degenerada da resolução de unidade (controle/NUL na fixture, teto de 60 KiB e 4096 linhas, TAB em valor de `systemctl show`, nome de unidade fora do padrão, e um processo `python3` a mais por chamada) estão nominadas em I8.6. Medição que vale registrar: o teste de I8.5 é **estritamente mais forte** que o oráculo do gate I1 num ponto — tirar o ponto final de `MSG_BLOCKED` passa pelo `grep -Eiq` do envelope e é reprovado por ele. ShellCheck ausente localmente | seção 12, `scratchpad/gate-i8-final.log` | executar I9 |
 | I9 (I9.1 a I9.11) | 2026-08-30 a 2026-09-02 | `91cd349` a `43ec863` | novos `lib/shell/{base,ui,privilege,status,probes,storage,network-effects,libvirt,config,waivers}.sh`, `lib/policy/waivers.tsv`, `tests/check-waivers-matrix.py`, `tests/test-i9-{modulos,hooks-isolados,windows-state,airlock-verify,verify-helpers,waivers,revisao-semantica}.sh`, `tests/manifests/i9-files.txt`; alterados `lib/common.sh` (4145 para 80 linhas), `lib/shell/boot.sh`, `menu.sh`, `etapas/02-detectar-config.sh` | suítes dirigidas de I9.1 a I9.11 (37+9+50+59+41+24 casos); `GATE_FASE=I9 bash tests/run-gate-i1.sh` executado em 02/09/2026 com `MUTATOR_HARNESS_TMP_PARENT` e `TMPDIR` fora de `/tmp`: manifesto de **160** arquivos, envelope I1 com 30 mutadores diretos e 23 seleções de menu em 6 perfis duas vezes, `atualizar-host --validar` em 29 cenários, **campanha I0 `full` aprovada nos 49 grupos em 61 min**, e o laço histórico aprovado até `test-i9-airlock-verify.sh` | **PARCIAL: veredito final do gate NÃO observado** | O log do gate foi perdido antes de eu ler as linhas finais, e a notificação de "exit code 0" era do `awk` do wrapper, não do gate (a armadilha que a própria seção 12 já registra). Portanto o gate **não** conta como aprovado: nenhuma linha `OK: Gate I9 concluído` foi vista. Independentemente disso, **I9.12 reabriu a fase**, então o gate precisa ser reexecutado no fechamento dela. ShellCheck ausente neste host (a CI versionada o exige). Artefatos de I9B construídos nesta mesma sessão foram perdidos com o scratchpad e precisam ser reconstruídos | commit `43ec863`; `tests/test-i9-revisao-semantica.sh` (24 casos) no repositório | implementar I9.12 e reexecutar o Gate I9 |
+| I9.12 | 2026-09-03 | `43ec863` a `8c84a54` (21 commits) | novos `libexec/passthrough_core/resources.py`, `tests/python/test_resources.py`, `tests/test-i912-memoria-hooks.sh`; alterados `etapas/{50,52,53}`, `lib/shell/{boot,config,probes}.sh`, `libexec/passthrough_core/{cli,config}.py`, `passthrough.conf.example`, `tests/{check-python-boundary.py,check-phase-manifest.sh,test-i5-cpu-boot.sh,test-i9-hooks-isolados.sh,test-i0-characterization.sh}`, `tests/i0/traceability.tsv`, `tests/manifests/i9-files.txt`, este plano | migração no host executada pelo operador (XML sem `memoryBacking`, 21,8 GiB devolvidos em runtime, três chaves fora do GRUB, baseline persistente após reboot com `MemAvailable` 27,7 GiB); `tests/python/test_resources.py`; `bash tests/test-i912-memoria-hooks.sh`; `tests/test-i5-cpu-boot.sh` caso 3e-bis (I9.13) | **PARCIAL** | etapa 18 alterada em `10f5e52` sem teste dirigido; pergunta de `MEMORIA_MODO` ausente (D7); Gate I9 não reexecutado; conf do operador com `MEMORIA_MODO` vazio e `HUGEPAGES_1G=22` residual; etapa 14 precisa ser reexecutada para instalar os hooks novos; passo 3 da migração (VM com memória comum) não executado | fase I9: tabela de provas, decisões I9.12-D1 a D7 e sequência de migração | teste da etapa 18, pergunta na etapa 3, reexecutar o Gate I9 |
+| Auditoria | 2026-09-03 | `8c84a54` (working tree limpa) | `PLANO-FINALIZACAO.md`, `.kiro/steering/{product,safety,structure,tech}.md`, linha `> **Status:**` de `.kiro/specs/*/{requirements,design,tasks}.md`; nenhum arquivo de código, teste, exemplo ou manifesto | verificação por leitura e `grep` (seção 1.6.1); `printf` posicional medido; recontagem da superfície humana; 26 suítes `tests/test-*.sh` aprovadas (sem a campanha I0) e `run_tests.py` com 1146 casos OK; `test-python-core.sh` só reprova sob `FORCE_COLOR=3` do ambiente | plano realinhado: 3 menções a "falta a etapa 18" corrigidas para "feita sem teste dirigido"; decisões I9B-D1 a D12 recuperadas; 3.10 reescrita; seções 10, 12 e 16 completadas; I13.4/11.2 alinhados ao perfil retornável; steering do Kiro atualizado | não reexecutou o gate canônico; não escreveu teste nem código; specs do Kiro só no cabeçalho de status | seção 1.6 | executor: pendências 1 a 3 de I9.12, depois Gate I9; operador: pendência 4 |
 | I10 | | | | | não iniciado | | | aguarda I9 |
 | I11 | | | | | não iniciado | | | aguarda I10 |
 | I12 | | | | | não iniciado | | | aguarda I11 |
@@ -2176,7 +2254,7 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I14.4 CachyOS | | | | | PLANEJADO | ordem a registrar | | aguarda target anterior |
 | I14.5 openSUSE Tumbleweed | | | | | PLANEJADO | ordem a registrar | | aguarda target anterior |
 | I14.6 Silverblue | | | | | diagnóstico pendente | sem mutação | | aguarda base/guarda |
-| I9B | | | | | não iniciado | i18n en/pt-BR/es | | aguarda I9 |
+| I9B | 2026-09-02 | nenhum | nenhum na árvore: protótipo construído e provado em diretório temporário, nunca commitado, perdido no fim da sessão | 75 casos de `test-i9b-i18n.sh` e 87 de `test_messages.py` reportados pela sessão; irreproduzíveis | **PERDIDO; não iniciado na árvore** | decisões e medições recuperadas na fase I9B em 03/09/2026 (I9B-D1 a D12) | fase I9B | reconstruir na árvore, começando por I9B.1, depois do Gate I9 |
 | I14B Intel | | | | | PLANEJADO | exige host Intel | | trilha de expansão |
 | I14C GPU AMD | | | | | PLANEJADO | exige GPU Radeon | | trilha de expansão |
 
@@ -2239,37 +2317,38 @@ Uma fase só termina quando:
 
 ### Código e segurança
 
-- [~] REQ-GUARD aprovado em todo mutador, menu e execução direta (parte I1 feita; falta o resolver Python de I8 e a prova real I13/I14).
+- [~] REQ-GUARD aprovado em todo mutador, menu e execução direta (I1 e o resolver Python de I8 feitos; `guard_mutation` sem mudança de byte; falta a prova real I13/I14).
 - [x] REQ-CONF-ISO aprovado sem abrir/privilegiar caminho legado (I4; prova em host descartável é opcional).
 - [~] REQ-TRIM-TX aprovado com sinais e rollback semântico (código e matriz hermética aprovados em I3; blocos/alocação reais são `[H]` de I13).
 - [~] REQ-IOMMU-TX aprovado, separando ativo/persistente (código `CONFORME` e **aprovado em I5**, conforme o catálogo da seção 4; a caixa estava desatualizada e foi corrigida na auditoria de 23/08/2026. Os dois reboots reais continuam `[H]` em I13).
 - [~] REQ-LIBVIRT-BACKEND aprovado em backend monolítico/modular (resolução autoritativa e matriz por fixture aprovadas em I3; libvirt real é `[H]` de I13).
 - [~] REQ-HOOKS-TX aprovado incluindo opções XML (opções dentro da transação, rollback comprovado e idempotência exata aprovados em I3; ciclo real de GPU/display é `[H]` de I13).
-- [~] REQ-WINDOWS-STATE separa instalação/power/agent (metadata durável vinculada ao QCOW2 pronta e testada em I3; a decisão e os três eixos entram em I4/I9).
-- [ ] REQ-AIRLOCK-VERIFY prova política efetiva.
-- [~] REQ-VERIFY-FAILCLOSED não possui falso sucesso conhecido (o caso `atualizar-host --validar` foi corrigido em I1; auditoria completa pendente em I9).
+- [~] REQ-WINDOWS-STATE separa instalação/power/agent (metadata em I3; os três eixos ligados ao fluxo da etapa 13 em I9.7, `tests/test-i9-windows-state.sh`; Windows real é `[H]` de I13).
+- [~] REQ-AIRLOCK-VERIFY prova política efetiva (I9.8, `tests/test-i9-airlock-verify.sh`; IPv4/IPv6 reais são `[H]` de I13).
+- [~] REQ-VERIFY-FAILCLOSED não possui falso sucesso conhecido (I1 corrigiu `atualizar-host --validar`; I9.9 e I9.11 auditaram todos os verificadores, `tests/test-i9-verify-helpers.sh` e `tests/test-i9-revisao-semantica.sh`; o gate final é I12).
 - [x] REQ-WAIVERS tem efeito real ou foi removido com migração (I4: duas mantidas com efeito testado, duas removidas por migração segura).
-- [ ] REQ-DISK-IDENTITY impede workingDisk igual a HD1 físico.
-- [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (a etapa 15 já recusa VID:PID duplicado em vez de escolher por ordem; serial/porta e revalidação antes do attach são de I6).
-- [ ] REQ-NET-TX não deixa estado parcial e prova recuperação.
+- [~] REQ-DISK-IDENTITY impede workingDisk igual a HD1 físico (I6.5, `tests/test-i6-inventory.sh`; discos reais são `[H]` de I13).
+- [~] REQ-USB-IDENTITY recusa dispositivos ambíguos (I6.6: serial/porta persistidos e revalidados antes do attach; dispositivos reais são `[H]` de I13).
+- [~] REQ-NET-TX não deixa estado parcial e prova recuperação (I7.5, I7.6 e I7.8; rede real é `[H]` de I13).
 
-- [ ] REQ-BOOT-POSCONDICAO: nenhum aplicador de bootloader declara sucesso sem provar regeneração.
+- [~] REQ-BOOT-POSCONDICAO: nenhum aplicador de bootloader declara sucesso sem provar regeneração (I9.13 para GRUB, kernelstub já validava entry por entry; reforço por perfil em I14).
+- [~] REQ-VM-RESOURCE-LIFECYCLE: recursos dedicados voltam ao host com a VM parada (I9.12: migração, núcleo, hooks e contratos das etapas 17 e 18 feitos; faltam o teste dirigido da etapa 18, a pergunta de `MEMORIA_MODO` na etapa 3, o Gate I9 e o aceite I13).
 - [ ] REQ-I18N: idioma não altera código de saída, fluxo, canal de máquina nem byte publicado.
 - [ ] REQ-CPU-VENDOR: nenhum plano de pinning mistura tipos de core; híbrida sem evidência é recusada.
 - [ ] REQ-GPU-VENDOR: nenhuma promessa de retorno da GPU sem classificação de reset.
 
 ### Arquitetura híbrida
 
-- [~] Core Python 3.10+ stdlib, `-I -S -B`, `sys.dont_write_bytecode`, sem `site`/`.pth`/pacotes globais, bytecode residual ou comandos/privilégio (propriedade estabelecida em I2, mantida em I3 com verificação por AST, e vigiada pelo gate; o core ainda cresce nas fases I4 a I8).
-- [~] Ponte única e protocolo JSON v1/NUL seguros (implementados em I2; em I3 ganharam o canal de entrada por pares e os primeiros consumidores de produção; a configuração entra em I4).
-- [~] XML/JSON/config/snapshots nunca entram em `argv`; usam stdin/arquivo `0600` e temporários são limpos (provado em I2 e aplicado em I3 a todo XML de domínio/rede/snapshot e ao JSON do `qemu-img`, com canário e shim de `argv`; a configuração entra em I4).
+- [~] Core Python 3.10+ stdlib, `-I -S -B`, `sys.dont_write_bytecode`, sem `site`/`.pth`/pacotes globais, bytecode residual ou comandos/privilégio (propriedade estabelecida em I2, mantida em I3 com verificação por AST, e vigiada pelo gate e por `tests/check-python-boundary.py`, que I8 e I9.12 estenderam a `platform.py` e `resources.py`; o gate normativo de fronteira é I10.2).
+- [~] Ponte única e protocolo JSON v1/NUL seguros (implementados em I2; canal de pares em I3; configuração em I4; rede em I7 e plataforma em I8 pelo mesmo canal).
+- [~] XML/JSON/config/snapshots nunca entram em `argv`; usam stdin/arquivo `0600` e temporários são limpos (provado em I2 e aplicado em I3 a todo XML de domínio/rede/snapshot e ao JSON do `qemu-img`, com canário e shim de `argv`; a configuração desde I4 pelo descritor de diretório).
 - [x] Zero heredoc Python em produção (11 removidos em I3; asserção versionada em `tests/test-i3-domain-transactions.sh`; o gate estático normativo é de I10.2).
 - [x] Zero parsing/mutação XML disperso (todo XML de domínio, de rede e de snapshot passa pelo core desde I3).
 - [~] Zero dependência operacional de `xmlstarlet` (nenhum consumidor operacional restou em I3; o pacote e a documentação saem em I10, conforme a decisão registrada na seção 9).
 - [x] Config/schema/relações/atomicidade migrados (I4).
-- [ ] CPU/RAM, inventário, rede e plataforma migrados conforme fronteira.
-- [ ] `common.sh` é agregador, sem algoritmos de domínio.
-- [ ] Hooks permanecem Bash puro e autossuficiente.
+- [x] CPU/RAM (I5), inventário (I6), rede (I7) e plataforma (I8) migrados conforme fronteira.
+- [x] `common.sh` é agregador, sem algoritmos de domínio (I9.4: 80 linhas, `tests/test-i9-modulos.sh`).
+- [x] Hooks permanecem Bash puro e autossuficiente (I9.5, `tests/test-i9-hooks-isolados.sh` apaga o projeto antes de executá-los; I9B.11 mantém a regra para o catálogo).
 - [ ] Sem fallback legado ou dois caminhos mutantes.
 
 ### Testes, dados e documentação
@@ -2292,7 +2371,7 @@ Uma fase só termina quando:
 
 - [ ] `[H]` Campanha Ubuntu I13 aprovada para combinação registrada.
 - [ ] `[H]` Campanha Pop!_OS I13 aprovada para combinação registrada.
-- [ ] Cada campanha real comprovou CPU sets/isolamento, HugePages 1 GiB por NUMA, pinning XML/QEMU e alocação/liberação após reboot.
+- [ ] Cada campanha real comprovou o perfil retornável de REQ-VM-RESOURCE-LIFECYCLE: pinning XML/QEMU; política de `MEMORIA_MODO` adquirida exatamente no start e devolvida no stop; baseline de RAM e CPU restaurado com a VM parada; isolamento persistente e reserva de HugePages no boot ausentes, salvo opt-in digitado e registrado como não retornável.
 - [ ] Cada campanha real comprovou identidade USB única/serial/porta/reconexão/recusa ambígua; capability ausente permaneceu não qualificada.
 - [ ] Marco `BASE_QUALIFICADA` registrado após I0-I13.
 - [ ] Todos os cinco providers mutáveis de I14 implementados e qualificados, um por vez, com repetição integral de I13.1-I13.13.
