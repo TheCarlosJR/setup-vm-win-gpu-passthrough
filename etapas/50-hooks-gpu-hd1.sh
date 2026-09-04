@@ -20,7 +20,7 @@
 # Recuperar a GPU no host não desfaz a configuração persistente; após sucesso,
 # a reversão exige restaurar os backups de XML/hooks em janela de manutenção.
 # ============================================================================
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 carregar_conf
@@ -419,6 +419,245 @@ validar_config_hooks() {
     fi
 }
 
+emitir_hook_memoria_fn() {
+    # Insere nos hooks o ciclo de vida da memória dedicada
+    # (REQ-VM-RESOURCE-LIFECYCLE, I9.12). Sai nos DOIS hooks a partir desta
+    # fonte única: prepare adquire, release devolve, e as duas metades têm de
+    # concordar sobre formato de estado e aritmética.
+    #
+    # Por que a aritmética é Bash puro aqui, e não uma chamada ao core: o hook
+    # precisa continuar autossuficiente e independente do checkout (decisão
+    # I9-D8, provada por tests/test-i9-hooks-isolados.sh, que APAGA o projeto
+    # antes de executar os hooks). O core é o planejador e o validador usados
+    # pela etapa e pelo gate; o hook é a autoridade de runtime. Que as duas
+    # implementações concordem é obrigação de teste diferencial, não de fé.
+    local rotulo="$1"
+    printf 'MEMORIA_MODO=%q\n' "${MEMORIA_MODO:-normal}"
+    printf 'MEM_PAGE_KB=%q\n' "${MEM_PAGE_KB:-0}"
+    printf 'MEM_PAGES_NEEDED=%q\n' "${MEM_PAGES_NEEDED:-0}"
+    printf 'MEM_ROTULO=%q\n' "$rotulo"
+    cat <<'HOOKMEM'
+MEM_STATE_DIR=/var/lib/vm-passthrough
+MEM_STATE_FILE="$MEM_STATE_DIR/${VM_NAME}.memoria"
+MEM_POOL_DIR="/sys/kernel/mm/hugepages/hugepages-${MEM_PAGE_KB}kB"
+
+mem_dizer() { echo "[hook $MEM_ROTULO/mem] $*"; hook_log "mem: $*"; }
+mem_erro()  { echo "[hook $MEM_ROTULO/mem] ERRO: $*" >&2; hook_log "mem ERRO: $*"; }
+
+mem_campo() {
+    # mem_campo CAMPO -> inteiro do sysfs. Vazio ou não numérico é falha, não
+    # zero: tratar leitura falha como "pool vazio" faria a devolução achar que
+    # não há nada a devolver.
+    local campo="$1" valor=""
+    [ -r "$MEM_POOL_DIR/$campo" ] || return 1
+    IFS= read -r valor < "$MEM_POOL_DIR/$campo" || return 1
+    case "$valor" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$valor"
+}
+
+mem_boot_id() {
+    local valor=""
+    [ -r /proc/sys/kernel/random/boot_id ] || return 1
+    IFS= read -r valor < /proc/sys/kernel/random/boot_id || return 1
+    case "$valor" in [0-9a-f]*-*-*-*-*) printf '%s\n' "$valor" ;; *) return 1 ;; esac
+}
+
+mem_modo_de_runtime() {
+    case "$MEMORIA_MODO" in
+        hugetlb-2m|hugetlb-1g) return 0 ;;
+    esac
+    return 1
+}
+
+mem_escrever_pool() {
+    # Escrita única e verificada. O kernel aceita a escrita e entrega o que
+    # conseguiu: sem reler, "aloquei 22" e "aloquei 9" são indistinguíveis.
+    local alvo="$1" obtido=""
+    printf '%s\n' "$alvo" > "$MEM_POOL_DIR/nr_hugepages" 2>/dev/null || return 1
+    obtido="$(mem_campo nr_hugepages)" || return 1
+    [ "$obtido" = "$alvo" ] || return 1
+    return 0
+}
+
+mem_estado_gravar() {
+    # mem_estado_gravar ESTADO DELTA NR FREE RESV SURPLUS
+    # Publicação atômica por rename, modo 0600: o estado diz quantas páginas
+    # são NOSSAS, e quem puder editá-lo escolhe quantas o release vai tirar do
+    # pool de outra pessoa.
+    local estado="$1" delta="$2" nr="$3" livre="$4" resv="$5" surplus="$6"
+    local tmp boot
+    boot="$(mem_boot_id)" || return 1
+    install -d -o root -g root -m 0700 "$MEM_STATE_DIR" || return 1
+    tmp="$MEM_STATE_FILE.$$"
+    {
+        printf 'ESTADO=%s\n' "$estado"
+        printf 'BOOT_ID=%s\n' "$boot"
+        printf 'MODO=%s\n' "$MEMORIA_MODO"
+        printf 'PAGE_KB=%s\n' "$MEM_PAGE_KB"
+        printf 'DELTA=%s\n' "$delta"
+        printf 'BASE_NR=%s\n' "$nr"
+        printf 'BASE_FREE=%s\n' "$livre"
+        printf 'BASE_RESV=%s\n' "$resv"
+        printf 'BASE_SURPLUS=%s\n' "$surplus"
+    } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$MEM_STATE_FILE" || { rm -f -- "$tmp"; return 1; }
+    return 0
+}
+
+mem_adquirir() {
+    # Usada pelo prepare. Falhar aqui ABORTA o start, e é esse o contrato: uma
+    # VM que sobe com metade das páginas prometidas mente sobre o próprio
+    # perfil. Nenhum fallback silencioso para outro modo.
+    mem_modo_de_runtime || {
+        mem_dizer "política de memória '$MEMORIA_MODO': o ciclo de vida não toca no pool"
+        return 0
+    }
+    [ -d "$MEM_POOL_DIR" ] \
+        || { mem_erro "o host não expõe pool de ${MEM_PAGE_KB} kB"; return 1; }
+    local nr livre resv surplus delta alvo livre_depois
+    nr="$(mem_campo nr_hugepages)" || { mem_erro "nr_hugepages ilegível"; return 1; }
+    livre="$(mem_campo free_hugepages)" || { mem_erro "free_hugepages ilegível"; return 1; }
+    resv="$(mem_campo resv_hugepages)" || { mem_erro "resv_hugepages ilegível"; return 1; }
+    surplus="$(mem_campo surplus_hugepages)" || { mem_erro "surplus_hugepages ilegível"; return 1; }
+
+    # Consumidor externo recusa o start: na devolução não haveria como
+    # distinguir a nossa página da dele, e tirar página de outra VM é
+    # inaceitável.
+    [ "$nr" -eq "$livre" ] \
+        || { mem_erro "pool com $((nr - livre)) página(s) em uso por outro consumidor"; return 1; }
+    [ "$resv" -eq 0 ] \
+        || { mem_erro "pool com $resv página(s) reservada(s) por outro consumidor"; return 1; }
+    [ "$surplus" -eq 0 ] \
+        || { mem_erro "pool com $surplus página(s) de surplus; a exatidão da devolução não pode ser provada"; return 1; }
+
+    delta=$(( MEM_PAGES_NEEDED - nr ))
+    [ "$delta" -gt 0 ] || delta=0
+    if [ "$delta" -eq 0 ]; then
+        # Pool preexistente já cobre a necessidade. Ele é BASELINE a preservar,
+        # não sobra a limpar: delta zero significa que a devolução não vai
+        # mexer no pool.
+        mem_dizer "pool já cobre as $MEM_PAGES_NEEDED página(s); nada a adquirir"
+        mem_estado_gravar VERIFIED 0 "$nr" "$livre" "$resv" "$surplus" \
+            || { mem_erro "estado de memória não pôde ser gravado"; return 1; }
+        return 0
+    fi
+
+    alvo=$(( nr + delta ))
+    mem_dizer "adquirindo $delta página(s) de ${MEM_PAGE_KB} kB (de $nr para $alvo)..."
+    # O estado é gravado ANTES da escrita: se o hook morrer entre adquirir e
+    # registrar, o release não saberia o que é dele para devolver.
+    mem_estado_gravar ACQUIRED "$delta" "$nr" "$livre" "$resv" "$surplus" \
+        || { mem_erro "estado de memória não pôde ser gravado; nada foi adquirido"; return 1; }
+    if ! mem_escrever_pool "$alvo"; then
+        mem_erro "aquisição parcial ou recusada pelo kernel; restaurando o baseline"
+        if mem_escrever_pool "$nr"; then
+            mem_dizer "baseline restaurado em $nr página(s)"
+            rm -f -- "$MEM_STATE_FILE" || true
+        else
+            mem_erro "BASELINE NÃO RESTAURADO: nr_hugepages diverge de $nr; estado preservado em $MEM_STATE_FILE"
+            mem_estado_gravar RECOVERY_REQUIRED "$delta" "$nr" "$livre" "$resv" "$surplus" || true
+        fi
+        return 1
+    fi
+    livre_depois="$(mem_campo free_hugepages)" || { mem_erro "free_hugepages ilegível após a aquisição"; return 1; }
+    if [ "$livre_depois" -lt $(( livre + delta )) ]; then
+        mem_erro "as $delta página(s) adquiridas não estão livres (free=$livre_depois); restaurando"
+        mem_escrever_pool "$nr" || mem_erro "BASELINE NÃO RESTAURADO: nr_hugepages diverge de $nr"
+        mem_estado_gravar RECOVERY_REQUIRED "$delta" "$nr" "$livre" "$resv" "$surplus" || true
+        return 1
+    fi
+    mem_estado_gravar VERIFIED "$delta" "$nr" "$livre" "$resv" "$surplus" \
+        || { mem_erro "estado de memória não pôde ser gravado após a prova"; return 1; }
+    mem_dizer "aquisição comprovada: $alvo página(s) no pool, $livre_depois livre(s)"
+    return 0
+}
+
+mem_devolver() {
+    # Usada pelo release. NUNCA aborta: devolve 1 para o chamador contar a
+    # falha e seguir restaurando GPU e display. Abandonar o desktop porque a
+    # memória não voltou é exatamente o que o requisito proíbe.
+    local estado="" boot_state="" modo="" page_kb="" delta="" base_nr=""
+    local base_free="" base_resv="" base_surplus=""
+    local chave valor nr livre resv surplus boot_atual alvo pool
+    [ -e "$MEM_STATE_FILE" ] || { mem_dizer "sem estado de memória; nada a devolver"; return 0; }
+    while IFS='=' read -r chave valor; do
+        case "$chave" in
+            ESTADO) estado="$valor" ;;
+            BOOT_ID) boot_state="$valor" ;;
+            MODO) modo="$valor" ;;
+            PAGE_KB) page_kb="$valor" ;;
+            DELTA) delta="$valor" ;;
+            BASE_NR) base_nr="$valor" ;;
+            BASE_FREE) base_free="$valor" ;;
+            BASE_RESV) base_resv="$valor" ;;
+            BASE_SURPLUS) base_surplus="$valor" ;;
+            '') : ;;
+            *) mem_erro "chave desconhecida no estado de memória: $chave; a devolução segue" ;;
+        esac
+    done < "$MEM_STATE_FILE"
+
+    case "$delta$base_nr$page_kb" in
+        ''|*[!0-9]*) mem_erro "estado de memória ilegível ou incompleto; devolução impossível"; return 1 ;;
+    esac
+
+    boot_atual="$(mem_boot_id)" || { mem_erro "boot_id ilegível; devolução impossível"; return 1; }
+    if [ -n "$boot_state" ] && [ "$boot_state" != "$boot_atual" ]; then
+        # Estado de outro boot. O reboot já limpou o pool, então NÃO há página
+        # nossa para devolver, e mexer em nr_hugepages agora reduziria pool que
+        # pertence a este boot. A reconciliação é descartar o estado.
+        mem_dizer "estado de memória é do boot $boot_state e o atual é $boot_atual; reconciliando sem tocar no pool"
+        rm -f -- "$MEM_STATE_FILE" || { mem_erro "estado obsoleto não pôde ser removido"; return 1; }
+        return 0
+    fi
+
+    if [ "$delta" -eq 0 ]; then
+        mem_dizer "nada havia sido adquirido; o pool preexistente é preservado"
+        rm -f -- "$MEM_STATE_FILE" || { mem_erro "estado não pôde ser removido"; return 1; }
+        return 0
+    fi
+
+    pool="/sys/kernel/mm/hugepages/hugepages-${page_kb}kB"
+    [ -d "$pool" ] || { mem_erro "pool de ${page_kb} kB desapareceu; devolução impossível"; return 1; }
+    MEM_POOL_DIR="$pool"
+    nr="$(mem_campo nr_hugepages)" || { mem_erro "nr_hugepages ilegível"; return 1; }
+    livre="$(mem_campo free_hugepages)" || { mem_erro "free_hugepages ilegível"; return 1; }
+
+    if [ "$livre" -lt "$delta" ]; then
+        # Página em uso na hora de devolver significa QEMU vivo ou vazamento. O
+        # release já provou domínio desligado antes de chegar aqui; se ainda há
+        # consumidor, devolver arrancaria memória de quem a está usando.
+        mem_erro "só $livre de $delta página(s) estão livres; ainda há consumidor ativo"
+        mem_estado_gravar RECOVERY_REQUIRED "$delta" "$base_nr" "$base_free" "$base_resv" "$base_surplus" || true
+        return 1
+    fi
+    if [ "$nr" -lt $(( base_nr + delta )) ]; then
+        mem_erro "pool tem $nr página(s), menos que baseline $base_nr mais delta $delta; alguém mexeu no pool"
+        mem_estado_gravar RECOVERY_REQUIRED "$delta" "$base_nr" "$base_free" "$base_resv" "$base_surplus" || true
+        return 1
+    fi
+
+    alvo=$(( nr - delta ))
+    mem_dizer "devolvendo $delta página(s) de ${page_kb} kB (de $nr para $alvo)..."
+    if ! mem_escrever_pool "$alvo"; then
+        mem_erro "a devolução não pôde ser comprovada; estado preservado em $MEM_STATE_FILE"
+        mem_estado_gravar RECOVERY_REQUIRED "$delta" "$base_nr" "$base_free" "$base_resv" "$base_surplus" || true
+        return 1
+    fi
+    resv="$(mem_campo resv_hugepages)" || resv=""
+    surplus="$(mem_campo surplus_hugepages)" || surplus=""
+    if [ "$alvo" != "$base_nr" ] || [ "$resv" != "$base_resv" ] || [ "$surplus" != "$base_surplus" ]; then
+        mem_erro "o pool não reproduziu o baseline (nr=$alvo esperado $base_nr, resv=$resv esperado $base_resv, surplus=$surplus esperado $base_surplus)"
+        mem_estado_gravar RECOVERY_REQUIRED "$delta" "$base_nr" "$base_free" "$base_resv" "$base_surplus" || true
+        return 1
+    fi
+    rm -f -- "$MEM_STATE_FILE" || { mem_erro "estado não pôde ser removido após a devolução"; return 1; }
+    mem_dizer "devolução comprovada: pool de volta a $base_nr página(s)"
+    return 0
+}
+HOOKMEM
+}
+
 emitir_hook_log_fn() {
     # Insere nos hooks gerados o log persistente de ações do HOST em
     # /var/log/vm-passthrough/hooks.log. O libvirt engole o stdout dos hooks
@@ -531,6 +770,40 @@ CORPO
     } > "$destino"
 }
 
+MEM_PAGE_KB=0
+MEM_PAGES_NEEDED=0
+MEM_PLANO_AVISO=""
+memoria_plano_resolver() {
+    # Deriva tamanho de página e contagem PELO CORE, em vez de repetir a tabela
+    # de modos aqui: o hook executa a aritmética, mas quem a define é
+    # libexec/passthrough_core/resources.py, e duplicar a tabela criaria duas
+    # fontes para a mesma decisão.
+    #
+    # A recusa do plano NÃO impede renderizar: ela costuma ser transitória
+    # (consumidor externo no pool agora, memória apertada agora) e o hook
+    # reavalia no start, que é quando a decisão importa. O que a recusa faz é
+    # avisar o operador no momento da instalação.
+    local -a permitidas=("${CORE_PARES_ENVELOPE[@]}" VALID ERROR MODE RUNTIME
+        RETURNABLE PAGE_KB PAGES_NEEDED BASELINE_NR BASELINE_FREE BASELINE_RESV
+        BASELINE_SURPLUS ACQUIRE_DELTA TARGET_NR NODE_COUNT FINGERPRINT)
+    local -a payload=()
+    local foto=""
+    MEMORIA_MODO="${MEMORIA_MODO:-normal}"
+    MEM_PAGE_KB=0
+    MEM_PAGES_NEEDED=0
+    MEM_PLANO_AVISO=""
+    foto="$(recursos_fotografar)" || foto=""
+    payload=(mode "$MEMORIA_MODO" snapshot "$foto" vm_ram_mib "${VM_RAM_MB:-0}")
+    if ! python_core_pares_payload permitidas MEMPLANO_ resources-plan payload 2>/dev/null; then
+        MEM_PLANO_AVISO="o core não pôde planejar a política de memória: $(_core_diagnostico 'motivo não informado')"
+        return 1
+    fi
+    MEM_PAGE_KB="${MEMPLANO_PAGE_KB:-0}"
+    MEM_PAGES_NEEDED="${MEMPLANO_PAGES_NEEDED:-0}"
+    [ "${MEMPLANO_VALID:-0}" = 1 ] || MEM_PLANO_AVISO="${MEMPLANO_ERROR:-plano de memória recusado}"
+    return 0
+}
+
 gerar_prepare() {
     local destino="$1" audio_pci="${GPU_AUDIO_PCI_ID:-}" audio_id="${GPU_AUDIO_VENDOR_DEVICE_ID:-}"
     audio_pci="${audio_pci,,}"
@@ -554,6 +827,7 @@ CAB
         printf 'HD1_IDENTIDADE=%q\n' "${HD1_IDENTIDADE:-}"
         printf 'HD1_FINGERPRINT=%q\n' "${HD1_DISK_FINGERPRINT:-}"
         emitir_hook_log_fn prepare
+        emitir_hook_memoria_fn prepare
         cat <<'CORPO'
 STATE_DIR=/run/libvirt-gpu-passthrough
 STATE_FILE="$STATE_DIR/${VM_NAME}.state"
@@ -794,6 +1068,12 @@ if [ -n "$GPU_AUDIO_PCI" ]; then
     [ "$(driver_atual "$GPU_AUDIO_PCI")" = snd_hda_intel ] \
         || falha "áudio $GPU_AUDIO_PCI não está em snd_hda_intel antes do start"
 fi
+# REQ-VM-RESOURCE-LIFECYCLE: a memória é adquirida AQUI, antes de o display ser
+# desligado e antes de o libvirt destacar a GPU. Falhar aqui aborta o start com
+# o desktop ainda de pé, que é o ponto: recusar cedo custa uma mensagem, e
+# recusar tarde custa a sessão gráfica do operador.
+mem_adquirir || falha "aquisição de memória recusada; a VM não será iniciada"
+
 DM_ESTADO="$(systemctl show -p ActiveState --value "$DM")" || falha "não foi possível consultar $DM"
 case "$DM_ESTADO" in
     active) DM_WAS_ACTIVE=1 ;;
@@ -927,6 +1207,7 @@ CAB
         printf 'GPU_AUDIO_PCI=%q\n' "$audio_pci"
         printf 'DM=%q\n' "$DM_SERVICE"
         emitir_hook_log_fn release
+        emitir_hook_memoria_fn release
         cat <<'CORPO'
 STATE_FILE="/run/libvirt-gpu-passthrough/${VM_NAME}.state"
 LOCK_DIR=/run/libvirt-gpu-locks
@@ -1057,6 +1338,12 @@ if [[ ! "$AUDIO_DRIVER" =~ ^(snd_hda_intel)?$ ]]; then
     FALHAS=$((FALHAS + 1))
 fi
 
+# REQ-VM-RESOURCE-LIFECYCLE: a devolução acontece antes da restauração da GPU,
+# e a falha dela NÃO pode interromper o que vem depois. mem_devolver nunca
+# aborta: devolve 1, a falha é contada, e GPU e display são restaurados do
+# mesmo jeito.
+mem_devolver || FALHAS=$((FALHAS + 1))
+
 GPU_PRONTA=1
 GPU_ESTAVEL=1
 for modulo in nvidia nvidia_modeset nvidia_drm nvidia_uvm; do
@@ -1140,6 +1427,13 @@ CORPO
 gerar_conjunto_hooks() {
     local diretorio="$1" legado="${2:-}"
     mkdir -p "$diretorio"
+    # A política de memória é resolvida UMA vez, antes de qualquer heredoc: os
+    # valores viajam assados dentro dos hooks, que não podem consultar o core.
+    memoria_plano_resolver || true
+    if [ -n "$MEM_PLANO_AVISO" ]; then
+        aviso "Política de memória: $MEM_PLANO_AVISO"
+        info "Os hooks são renderizados assim mesmo; a decisão que vale é a do start, e é lá que o hook recusa se o pool não permitir."
+    fi
     gerar_dispatcher "$diretorio/qemu" "$legado"
     gerar_prepare "$diretorio/prepare.sh"
     gerar_start "$diretorio/start.sh"

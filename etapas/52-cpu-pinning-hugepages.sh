@@ -219,6 +219,55 @@ _v_inteiro_vm_ram_mb()  { inteiro_na_faixa "${1:-}" 1024 1048576; }
 _v_inteiro_hugepages()  { inteiro_na_faixa "${1:-}" 0 1048576; }
 _v_bootloader_valido()  { case "${1:-}" in grub|kernelstub) return 0 ;; *) return 1 ;; esac; }
 
+MEMORIA_MODO_EFETIVO=""
+XML_MODO_HUGEPAGES=ignorar
+MEMORIA_PAGE_KB=0
+MEMORIA_PAGINAS=0
+MEMORIA_POLITICA_ERRO=""
+
+memoria_modo_resolver() {
+    # Vazio significa "ainda não decidido" e NÃO é sinônimo de nenhum modo: o
+    # requisito proíbe padrão silencioso. Para as checagens estruturais o
+    # verificador usa `normal`, que é o baseline, mas relata a decisão como
+    # pendente em vez de fingir que ela foi tomada.
+    MEMORIA_MODO_EFETIVO="${MEMORIA_MODO:-}"
+    if [ -z "$MEMORIA_MODO_EFETIVO" ]; then
+        MEMORIA_MODO_EFETIVO=normal
+        return 1
+    fi
+    return 0
+}
+
+memoria_politica_viavel() {
+    # Quem decide é o core: aqui só entram a captura da fotografia e o
+    # transporte. Repetir a tabela de modos nesta etapa criaria uma segunda
+    # autoridade sobre a mesma política.
+    local -a permitidas=("${CORE_PARES_ENVELOPE[@]}" VALID ERROR MODE RUNTIME
+        RETURNABLE PAGE_KB PAGES_NEEDED BASELINE_NR BASELINE_FREE BASELINE_RESV
+        BASELINE_SURPLUS ACQUIRE_DELTA TARGET_NR NODE_COUNT FINGERPRINT)
+    local -a payload=()
+    local foto=""
+    MEMORIA_PAGE_KB=0
+    MEMORIA_PAGINAS=0
+    MEMORIA_POLITICA_ERRO=""
+    foto="$(recursos_fotografar)" || {
+        MEMORIA_POLITICA_ERRO="a fotografia de recursos do host não pôde ser capturada"
+        return 1
+    }
+    payload=(mode "$MEMORIA_MODO_EFETIVO" snapshot "$foto" vm_ram_mib "${VM_RAM_MB:-0}")
+    if ! python_core_pares_payload permitidas MEMPOL_ resources-plan payload 2>/dev/null; then
+        MEMORIA_POLITICA_ERRO="$(_core_diagnostico 'o core não respondeu ao plano de memória')"
+        return 1
+    fi
+    MEMORIA_PAGE_KB="${MEMPOL_PAGE_KB:-0}"
+    MEMORIA_PAGINAS="${MEMPOL_PAGES_NEEDED:-0}"
+    if [ "${MEMPOL_VALID:-0}" != 1 ]; then
+        MEMORIA_POLITICA_ERRO="${MEMPOL_ERROR:-plano de memória recusado sem diagnóstico}"
+        return 1
+    fi
+    return 0
+}
+
 verificar() {
     local faltando=0 tmp="" params="" vm_estado=0
     [ -z "${HUGEPAGES_1G:-}" ] || params="$(param_hugepages)"
@@ -227,6 +276,15 @@ verificar() {
     # o verificador seguia usando o valor. Ausente continua sendo pendência;
     # presente e fora do formato é ERRO de configuração, porque reexecutar a
     # etapa não conserta um literal inválido.
+    # A exigência de HugePages no XML é DIRIGIDA PELA POLÍTICA: em perfil
+    # retornável de memória comum o XML tem de NÃO exigir página grande, e
+    # exigir vira defeito — o inverso exato do contrato anterior.
+    memoria_modo_resolver || true
+    case "$MEMORIA_MODO_EFETIVO" in
+        hugetlb-1g|hugetlb-1g-boot) XML_MODO_HUGEPAGES=sim ;;
+        normal) XML_MODO_HUGEPAGES=nao ;;
+        *) XML_MODO_HUGEPAGES=ignorar ;;
+    esac
     v_var_definida VM_NAME nome_vm_valido || faltando=1
     v_var_definida CPUS_VM lista_cpus_valida || faltando=1
     v_var_definida CPUS_HOST lista_cpus_valida || faltando=1
@@ -272,34 +330,95 @@ verificar() {
             elif ! virt-xml-validate "$tmp" domain >/dev/null 2>&1; then
                 v_falta "O XML inativo da VM '$VM_NAME' não passa no schema libvirt."
             elif validar_xml_cpu_pinning "$tmp" "$CPUS_VM" "$CPUS_HOST" \
-                    "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$VM_RAM_MB" sim; then
-                v_ok "XML possui pinning, topologia, memória e página de 1 GiB exatos."
+                    "$VM_VCPUS" "$VM_CORES" "$VM_THREADS" "$VM_RAM_MB" \
+                    "$XML_MODO_HUGEPAGES"; then
+                case "$XML_MODO_HUGEPAGES" in
+                    sim) v_ok "XML possui pinning, topologia, memória e página de 1 GiB exatos." ;;
+                    nao) v_ok "XML possui pinning, topologia e memória exatos, e NÃO exige HugePages: é o que torna a VM iniciável com memória comum." ;;
+                    *)   v_ok "XML possui pinning, topologia e memória exatos." ;;
+                esac
             else
                 v_falta "XML de CPU/HugePages incompleto ou divergente: ${XML_CPU_ERRO:-sem diagnóstico}."
+            fi
+            if [ "$XML_MODO_HUGEPAGES" = ignorar ]; then
+                v_indeterminado "A exigência de HugePages no XML não foi avaliada para o modo '$MEMORIA_MODO_EFETIVO': o validador só distingue página de 1 GiB, e a prova de página de 2 MiB no XML ainda não existe."
             fi
             rm -f -- "$tmp"
         fi
     fi
-    if [ -n "$params" ] && cmdline_parametros_exatos "$params"; then
-        v_ok "As três chaves de HugePages estão ativas uma única vez e com valores exatos."
+    if memoria_modo_resolver; then
+        v_ok "MEMORIA_MODO=$MEMORIA_MODO_EFETIVO"
     else
-        v_falta "Cmdline de HugePages divergente: ${CMDLINE_PARAM_ERRO:-configuração ausente}."
+        v_falta "MEMORIA_MODO não decidido em passthrough.conf; a etapa não assume nenhum modo. Escolha entre normal, hugetlb-2m, hugetlb-1g e hugetlb-1g-boot."
     fi
-    if [ -n "$params" ] && kernel_parametros_persistentes_exatos "$params"; then
-        v_ok "Persistência do boot é exata e coerente entre entradas."
-    else
-        v_kernel_persistencia_falhou "Persistência de HugePages não comprovada: ${KERNEL_PERSISTENCIA_ERRO:-configuração ausente}."
+    if [ -n "${HUGEPAGES_1G:-}" ] && [ "$MEMORIA_MODO_EFETIVO" != hugetlb-1g-boot ]; then
+        v_falta "HUGEPAGES_1G=$HUGEPAGES_1G continua no passthrough.conf, mas o perfil '$MEMORIA_MODO_EFETIVO' não usa reserva estática; é resíduo da configuração legada."
     fi
+    # I9.12 (REQ-VM-RESOURCE-LIFECYCLE): o critério passou a ser a POLÍTICA,
+    # não a reserva estática. Antes, a ausência das três chaves de boot era
+    # relatada como divergência — ou seja, o host com a RAM devolvida ao
+    # operador era acusado de defeito, e o status do menu empurrava de volta
+    # para a reserva permanente. Agora cada modo tem a sua pós-condição, e só
+    # o perfil legado ainda espera chave de boot.
+    case "$MEMORIA_MODO_EFETIVO" in
+        hugetlb-1g-boot)
+            if [ -n "$params" ] && cmdline_parametros_exatos "$params"; then
+                v_ok "Perfil legado: as três chaves de HugePages estão ativas uma única vez e com valores exatos."
+            else
+                v_falta "Cmdline de HugePages divergente: ${CMDLINE_PARAM_ERRO:-configuração ausente}."
+            fi
+            if [ -n "$params" ] && kernel_parametros_persistentes_exatos "$params"; then
+                v_ok "Perfil legado: persistência do boot é exata e coerente entre entradas."
+            else
+                v_kernel_persistencia_falhou "Persistência de HugePages não comprovada: ${KERNEL_PERSISTENCIA_ERRO:-configuração ausente}."
+            fi
+            v_falta "MEMORIA_MODO=hugetlb-1g-boot NÃO é retornável: as páginas ficam fora da RAM comum mesmo com a VM desligada. É perfil opt-in de desempenho, fora da base qualificada."
+            ;;
+        *)
+            # Perfil retornável: a ausência das chaves é a pós-condição, e
+            # provar ausência é tão obrigatório quanto provar presença era.
+            if [ -z "$params" ]; then
+                v_ok "Nenhuma reserva de HugePages no boot: o perfil é retornável."
+            elif ! cmdline_possui_alguma_chave "$CHAVES_HUGEPAGES"; then
+                v_ok "Nenhuma reserva de HugePages na cmdline deste boot."
+            else
+                v_falta "O perfil '$MEMORIA_MODO_EFETIVO' é retornável, mas a cmdline ainda reserva HugePages no boot: ${CMDLINE_PARAM_ERRO:-chaves presentes}. Rode --desfazer."
+            fi
+            if kernel_param_chaves_persistentes_ausentes "$CHAVES_HUGEPAGES" 2>/dev/null; then
+                v_ok "O boot persistente não reserva HugePages."
+            else
+                v_kernel_persistencia_falhou "Ausência persistente de HugePages não comprovada: ${KERNEL_PERSISTENCIA_ERRO:-não verificável}."
+            fi
+            ;;
+    esac
     if [ "$faltando" -eq 0 ] && validar_isolamento_compativel; then
         v_ok "Isolamento está ausente ou exatamente alinhado ao pinning configurado."
     elif [ "$faltando" -eq 0 ]; then
         v_falta "$ISOLAMENTO_COMPAT_ERRO"
     fi
-    if [ -n "${HUGEPAGES_1G:-}" ] && hugepages_estado_exato; then
-        v_ok "Pool ativo: $HUGEPAGES_1G páginas de 1 GiB."
-    else
-        v_falta "Pool de HugePages divergente: ${HUGEPAGES_ERRO:-configuração ausente}."
-    fi
+    # O pool: no perfil legado ele TEM de estar reservado; nos retornáveis ele
+    # é adquirido pelo hook no start e devolvido no stop, então com a VM
+    # desligada o estado correto é o baseline do host, e exigir páginas aqui
+    # seria exigir de volta o defeito que I9.12 removeu.
+    case "$MEMORIA_MODO_EFETIVO" in
+        hugetlb-1g-boot)
+            if [ -n "${HUGEPAGES_1G:-}" ] && hugepages_estado_exato; then
+                v_ok "Perfil legado: pool ativo com $HUGEPAGES_1G páginas de 1 GiB."
+            else
+                v_falta "Pool de HugePages divergente: ${HUGEPAGES_ERRO:-configuração ausente}."
+            fi
+            ;;
+        hugetlb-2m|hugetlb-1g)
+            memoria_politica_viavel \
+                && v_ok "Política '$MEMORIA_MODO_EFETIVO' viável: $MEMORIA_PAGINAS página(s) de $MEMORIA_PAGE_KB kB serão adquiridas no start e devolvidas no stop." \
+                || v_falta "Política '$MEMORIA_MODO_EFETIVO' não é viável: ${MEMORIA_POLITICA_ERRO:-sem diagnóstico}."
+            ;;
+        *)
+            memoria_politica_viavel \
+                && v_ok "Política '$MEMORIA_MODO_EFETIVO': a VM usa memória comum, que volta ao host quando o QEMU termina." \
+                || v_falta "Política de memória inválida: ${MEMORIA_POLITICA_ERRO:-sem diagnóstico}."
+            ;;
+    esac
     v_fim
 }
 
