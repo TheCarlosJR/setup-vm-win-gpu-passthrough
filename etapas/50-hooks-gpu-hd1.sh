@@ -510,6 +510,19 @@ mem_adquirir() {
     # Usada pelo prepare. Falhar aqui ABORTA o start, e é esse o contrato: uma
     # VM que sobe com metade das páginas prometidas mente sobre o próprio
     # perfil. Nenhum fallback silencioso para outro modo.
+    # O bloqueio estrutural vem ANTES do teste de modo, e a ordem é a decisão.
+    # Com ele depois, um modo desconhecido ou vazio devolvia 0 sem nunca olhar
+    # para o plano, e a VM subia com memória comum apesar de o operador ter
+    # declarado outra coisa — que é exatamente o "fallback silencioso entre
+    # 1 GiB, 2 MiB, THP e memória normal" que o requisito proíbe. Recusa
+    # estrutural (modo que não existe, aritmética de página impossível, pool
+    # ausente, NUMA divergente, reserva legada que não cobre) bloqueia o start
+    # seja qual for o modo, porque em nenhum deles o hook consegue honrar o que
+    # foi declarado.
+    if [ "${MEM_PLANO_VALIDO:-1}" != 1 ]; then
+        mem_erro "o plano de memória assado nestes hooks foi recusado por motivo estrutural na renderização; corrija a política e reexecute a etapa 14"
+        return 1
+    fi
     mem_modo_de_runtime || {
         mem_dizer "política de memória '$MEMORIA_MODO': o ciclo de vida não toca no pool"
         return 0
@@ -518,10 +531,6 @@ mem_adquirir() {
     # recusada pelo planejador na renderização (e o hook recebeu 0), ou a
     # configuração está inconsistente. Nos dois casos o start é recusado, em
     # vez de a VM subir sem as páginas que o perfil promete.
-    if [ "${MEM_PLANO_VALIDO:-1}" != 1 ]; then
-        mem_erro "o plano de memória assado nestes hooks foi recusado por motivo estrutural na renderização; corrija a política e reexecute a etapa 14"
-        return 1
-    fi
     case "$MEM_PAGES_NEEDED" in
         ''|*[!0-9]*|0)
             mem_erro "modo '$MEMORIA_MODO' exige páginas, mas o plano assado nos hooks pede $MEM_PAGES_NEEDED; reexecute a etapa 14 depois de corrigir a política"

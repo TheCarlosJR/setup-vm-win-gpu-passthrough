@@ -1289,6 +1289,24 @@ Seis decisões que mudam o desenho e não se re-derivam lendo o código depois.
   e o hook nasce bloqueado. Sem essa distinção havia um buraco real, encontrado
   pelo oráculo: plano recusado por NUMA chegava ao hook com contagem válida e
   ele adquiria.
+- **I9.12-D4b (o bloqueio estrutural vale para QUALQUER modo):** a checagem de
+  `MEM_PLANO_VALIDO` fica **antes** do teste de modo de runtime. Com ela
+  depois, um `MEMORIA_MODO` desconhecido ou vazio devolvia sucesso sem nunca
+  olhar para o plano, e a VM subia com memória comum apesar de o operador ter
+  declarado outra coisa — o "fallback silencioso entre 1 GiB, 2 MiB, THP e
+  memória normal" que o contrato proíbe em letra. O efeito colateral é uma
+  melhoria: reserva estática que não cobre a RAM da VM passou a recusar o start
+  cedo, em vez de deixar o QEMU descobrir depois. A ordem foi encontrada pelo
+  oráculo diferencial, que acusou duas divergências que a correção anterior
+  deveria ter fechado e não fechou.
+- **I9.12-D4c (o padrão de `MEM_PLANO_VALIDO` é permissivo, e é compensado):**
+  `${MEM_PLANO_VALIDO:-1}` faz ausência valer `1`. A chave e a checagem são
+  emitidas JUNTAS por `emitir_hook_memoria_fn`, então um hook ou tem as duas ou
+  não tem nenhuma, e o padrão só é alcançável em hook editado à mão. O controle
+  que compensa é a prova de geração da etapa 14, que acusa hook de versão
+  antiga e manda rerenderizar. Consequência operacional registrada: **instalar
+  esta correção exige reexecutar a etapa 14**; sem isso a decisão estrutural não
+  viaja para dentro do hook instalado.
 - **I9.12-D5 (sair do perfil retornável se digita):** a etapa 18 recusa
   isolamento persistente por padrão e exige `ISOLAMENTO-NAO-RETORNAVEL`
   digitado. `isolcpus`, `nohz_full` e `rcu_nocbs` não devolvem CPU quando a VM

@@ -180,12 +180,12 @@ bloco_de_memoria "$TMP/frag-prepare.sh" > "$TMP/bloco-prepare"
 bloco_de_memoria "$TMP/frag-release.sh" > "$TMP/bloco-release"
 cmp -s "$TMP/bloco-prepare" "$TMP/bloco-release" \
     || fail 'o bloco de memória do prepare e o do release divergem; as duas metades deixaram de sair da mesma fonte'
-CFG_PREPARE=$(grep -E '^(MEMORIA_MODO|MEM_PAGE_KB|MEM_PAGES_NEEDED)=' "$RENDER/prepare.sh")
-CFG_RELEASE=$(grep -E '^(MEMORIA_MODO|MEM_PAGE_KB|MEM_PAGES_NEEDED)=' "$RENDER/release.sh")
+CFG_PREPARE=$(grep -E '^(MEMORIA_MODO|MEM_PAGE_KB|MEM_PAGES_NEEDED|MEM_PLANO_VALIDO)=' "$RENDER/prepare.sh")
+CFG_RELEASE=$(grep -E '^(MEMORIA_MODO|MEM_PAGE_KB|MEM_PAGES_NEEDED|MEM_PLANO_VALIDO)=' "$RENDER/release.sh")
 [ "$CFG_PREPARE" = "$CFG_RELEASE" ] \
     || fail "prepare e release foram renderizados com política de memória diferente:\n$CFG_PREPARE\n---\n$CFG_RELEASE"
-[ "$(printf '%s\n' "$CFG_PREPARE" | wc -l)" -eq 3 ] \
-    || fail 'a renderização deixou de assar as três chaves de política de memória nos hooks'
+[ "$(printf '%s\n' "$CFG_PREPARE" | wc -l)" -eq 4 ] \
+    || fail 'a renderização deixou de assar as quatro chaves de política de memória nos hooks'
 passo
 
 # Os pontos de chamada, que dão sentido ao resto: o prepare ABORTA o start se a
@@ -200,6 +200,82 @@ LINHA_MODPROBE=$(awk -v ini="$LINHA_DEV" 'NR > ini && /modprobe "\$modulo"/ { pr
     || fail 'a devolução de memória passou a acontecer DEPOIS da restauração da GPU; a ordem do release mudou sem prova'
 passo
 
+# --- 2b. A decisão do planejador viaja ASSADA, e quem a assa é a etapa ------
+#
+# O hook é cego a NUMA por construção (I9-D8) e não pode reavaliar uma recusa
+# estrutural. A ponte entre "o núcleo recusou" e "o hook bloqueia" é a etapa 14,
+# que traduz `transient` do plano em `MEM_PLANO_VALIDO`. Sem provar essa
+# tradução, o corpus do oráculo estaria derivando a regra por conta própria e
+# uma etapa que assasse `1` para tudo passaria despercebida — foi exatamente o
+# que uma mutação mostrou em 03/09/2026.
+#
+# As duas renderizações abaixo usam SÓ o passthrough.conf da fixture; a
+# fotografia continua sendo a do host, lida de forma somente leitura.
+POLITICA_DIR="$TMP/politica"
+mkdir -p "$POLITICA_DIR"
+
+renderizar_com_politica() { # renderizar_com_politica NOME MODO RAM_MB
+    local destino="$POLITICA_DIR/$1"
+    mkdir -p "$destino"
+    cat > "$PROJETO/passthrough.conf" <<CONF
+VM_NAME="$VM_TESTE"
+GPU_PCI_ID="0000:01:00.0"
+GPU_AUDIO_PCI_ID=""
+GPU_VENDOR_DEVICE_ID="10de:2503"
+GPU_AUDIO_VENDOR_DEVICE_ID=""
+DM_SERVICE="display-manager"
+IOMMU_GROUP_GPU="7"
+HD1_BY_ID_PATH=""
+HD1_DISPENSADO="sim"
+MEMORIA_MODO="$2"
+VM_RAM_MB="$3"
+CONF
+    chmod 0600 "$PROJETO/passthrough.conf"
+    bash "$PROJETO/etapas/50-hooks-gpu-hd1.sh" --renderizar-hooks "$destino" \
+        > "$POLITICA_DIR/$1.log" 2>&1 \
+        || fail "a renderização com política '$2'/$3 MiB falhou: $(tail -3 "$POLITICA_DIR/$1.log")"
+    POLITICA_SAIDA=$(cat "$POLITICA_DIR/$1.log")
+    POLITICA_VALIDO=$(sed -n 's/^MEM_PLANO_VALIDO=//p' "$destino/prepare.sh" | head -1)
+    POLITICA_PAGES=$(sed -n 's/^MEM_PAGES_NEEDED=//p' "$destino/prepare.sh" | head -1)
+    [ "$POLITICA_VALIDO" = "$(sed -n 's/^MEM_PLANO_VALIDO=//p' "$destino/release.sh" | head -1)" ] \
+        || fail "$1: prepare e release nasceram com MEM_PLANO_VALIDO diferente"
+}
+
+# Recusa ESTRUTURAL: VM_RAM_MB não é múltiplo do tamanho da página. Não depende
+# do host — se a máquina nem expuser o pool de 2 MiB, a recusa vira "pool
+# ausente", que também é estrutural, e o valor assado é o mesmo.
+renderizar_com_politica estrutural hugetlb-2m 8193
+[ "$POLITICA_VALIDO" = 0 ] \
+    || fail "recusa estrutural devia assar MEM_PLANO_VALIDO=0 e assou '$POLITICA_VALIDO'"
+[[ $POLITICA_SAIDA == *'recusa é estrutural'* ]] \
+    || fail "a etapa não avisou que a recusa é estrutural: $POLITICA_SAIDA"
+passo
+
+# Recusa TRANSITÓRIA: memória pedida grande demais para o instante. Aqui o
+# resultado depende do host, e a dependência é declarada em vez de ignorada:
+# com o pool de 2 MiB presente, toda recusa alcançável nesta configuração é
+# transitória (consumidor, resv, surplus ou MemAvailable) e o plano continua
+# valendo; sem o pool, a recusa é "pool ausente", que é estrutural.
+renderizar_com_politica transitorio hugetlb-2m 1048576
+if [ -d /sys/kernel/mm/hugepages/hugepages-2048kB ]; then
+    [ "$POLITICA_VALIDO" = 1 ] \
+        || fail "recusa transitória devia assar MEM_PLANO_VALIDO=1 e assou '$POLITICA_VALIDO': $POLITICA_SAIDA"
+    [ "$POLITICA_PAGES" -gt 0 ] \
+        || fail 'recusa transitória devia manter a contagem de páginas assada, para o hook reavaliar no start'
+    [[ $POLITICA_SAIDA == *'recusa é transitória'* ]] \
+        || fail "a etapa não avisou que a recusa é transitória: $POLITICA_SAIDA"
+else
+    [ "$POLITICA_VALIDO" = 0 ] \
+        || fail "sem pool de 2 MiB a recusa é estrutural e devia assar 0; assou '$POLITICA_VALIDO'"
+fi
+passo
+
+# E o plano ACEITO assa 1: é a renderização principal, com o modo `normal`, que
+# o núcleo aceita sempre. Sem esta ponta, "assa 0" passaria por assar 0 sempre.
+grep -q '^MEM_PLANO_VALIDO=1$' "$RENDER/prepare.sh" \
+    || fail 'o plano aceito devia nascer com MEM_PLANO_VALIDO=1'
+passo
+
 # --- 3. Reescrita para o sandbox, com guarda que aborta ---------------------
 
 for frag in "$TMP/frag-prepare.sh" "$TMP/frag-release.sh"; do
@@ -209,6 +285,7 @@ for frag in "$TMP/frag-prepare.sh" "$TMP/frag-release.sh"; do
         -e "s|/sys/kernel/mm/hugepages/hugepages-|$SIM/hugepages-|g" \
         -e "s|/proc/sys/kernel/random/boot_id|$BOOT_FILE|g" \
         -e '/^MEMORIA_MODO=/d' -e '/^MEM_PAGE_KB=/d' -e '/^MEM_PAGES_NEEDED=/d' \
+        -e '/^MEM_PLANO_VALIDO=/d' \
         "$frag"
     bash -n "$frag" || fail "$frag ficou inválido depois da reescrita"
 
@@ -223,7 +300,7 @@ for frag in "$TMP/frag-prepare.sh" "$TMP/frag-release.sh"; do
         || fail "MEM_POOL_DIR não foi redirecionado em $frag"
     grep -q "pool=\"$SIM/hugepages-\${page_kb}kB\"" "$frag" \
         || fail "o pool reconstruído dentro de mem_devolver não foi redirecionado em $frag"
-    if grep -qE '^MEMORIA_MODO=|^MEM_PAGE_KB=|^MEM_PAGES_NEEDED=' "$frag"; then
+    if grep -qE '^MEMORIA_MODO=|^MEM_PAGE_KB=|^MEM_PAGES_NEEDED=|^MEM_PLANO_VALIDO=' "$frag"; then
         fail "a configuração assada continua em $frag; o caso não controlaria a política"
     fi
 done
@@ -306,6 +383,7 @@ passo
 CASO_MODO=hugetlb-2m
 CASO_PAGE_KB=2048
 CASO_PAGES=0
+CASO_PLANO_VALIDO=1
 K_TETO=999999999
 K_PISO=0
 K_ESCRITA=ok
@@ -317,6 +395,7 @@ caso_padrao() {
     CASO_MODO=hugetlb-2m
     CASO_PAGE_KB=2048
     CASO_PAGES=0
+    CASO_PLANO_VALIDO=1
     K_TETO=999999999
     K_PISO=0
     K_ESCRITA=ok
@@ -375,19 +454,25 @@ EOF
 
 rodar() { # rodar FRAGMENTO FUNÇÃO...
     local fragmento="$1"; shift
-    SAIDA=$(env -i \
-        PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LC_ALL=C \
-        MEMORIA_MODO="$CASO_MODO" \
-        MEM_PAGE_KB="$CASO_PAGE_KB" \
-        MEM_PAGES_NEEDED="$CASO_PAGES" \
-        KERNEL_NR="$SIM/hugepages-${CASO_PAGE_KB}kB/nr_hugepages" \
-        KERNEL_FREE="$SIM/hugepages-${CASO_PAGE_KB}kB/free_hugepages" \
-        KERNEL_SOMBRA="$SOMBRA" \
-        KERNEL_ESCRITAS="$ESCRITAS" \
-        KERNEL_TETO="$K_TETO" \
-        KERNEL_PISO="$K_PISO" \
-        KERNEL_ESCRITA="$K_ESCRITA" \
-        KERNEL_LIVRE="$K_LIVRE" \
+    local -a ambiente=(
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LC_ALL=C
+        MEMORIA_MODO="$CASO_MODO"
+        MEM_PAGE_KB="$CASO_PAGE_KB"
+        MEM_PAGES_NEEDED="$CASO_PAGES"
+        KERNEL_NR="$SIM/hugepages-${CASO_PAGE_KB}kB/nr_hugepages"
+        KERNEL_FREE="$SIM/hugepages-${CASO_PAGE_KB}kB/free_hugepages"
+        KERNEL_SOMBRA="$SOMBRA"
+        KERNEL_ESCRITAS="$ESCRITAS"
+        KERNEL_TETO="$K_TETO"
+        KERNEL_PISO="$K_PISO"
+        KERNEL_ESCRITA="$K_ESCRITA"
+        KERNEL_LIVRE="$K_LIVRE"
+    )
+    # `ausente` simula hook renderizado ANTES de a chave existir: a variável
+    # não é definida de forma nenhuma, e o hook cai no próprio padrão.
+    [ "$CASO_PLANO_VALIDO" = ausente ] \
+        || ambiente+=(MEM_PLANO_VALIDO="$CASO_PLANO_VALIDO")
+    SAIDA=$(env -i "${ambiente[@]}" \
         timeout 60 "$BASH" "$RUNNER" "$fragmento" "$@" 2>&1) || true
     # A promessa da seção E, cobrada em TODO caso: o processo chega vivo ao
     # fim. Um `exit` dentro das funções de memória mataria o release inteiro.
@@ -628,6 +713,76 @@ for pedido in 0 '' quatro; do
     exige_estado_ausente "A12 plano zerado ('${pedido:-vazio}')"
     passo
 done
+
+# A13: modo de runtime com plano recusado por motivo ESTRUTURAL recusa o start.
+#
+# É o irmão do A12, e existe porque o A12 não alcançava o caso: quando o núcleo
+# recusa por NUMA, ele já fixou `pages_needed` antes de chegar à checagem (a
+# recusa mora na linha 472 de resources.py e a contagem na 418), então o hook
+# recebia um número VÁLIDO e adquiria — cego a NUMA por construção (I9-D8).
+# A decisão passou a viajar assada: `MEM_PLANO_VALIDO=0` diz ao hook que o
+# planejador recusou por motivo que não muda com o tempo, e o hook bloqueia sem
+# precisar enxergar o que não pode enxergar. Recusa TRANSITÓRIA (consumidor,
+# resv, surplus, MemAvailable) continua chegando como 1, porque ela é
+# reavaliada no start pelas próprias checagens do hook.
+for valor in 0 2 nao-numerico; do
+    caso_padrao
+    CASO_PAGES=4096
+    CASO_PLANO_VALIDO="$valor"
+    pool_montar 2048 0 0 0 0
+    rodar "$FRAG_PREPARE" mem_adquirir
+    exige_rc mem_adquirir 1 "A13 plano estrutural inválido ('${valor:-vazio}')"
+    exige_texto 'recusado por motivo estrutural na renderização' "A13 plano estrutural inválido ('${valor:-vazio}')"
+    exige_texto 'reexecute a etapa 14' "A13 plano estrutural inválido ('${valor:-vazio}')"
+    exige_pool '0 0 0 0' "A13 plano estrutural inválido ('${valor:-vazio}')"
+    exige_sem_escrita "A13 plano estrutural inválido ('${valor:-vazio}')"
+    exige_estado_ausente "A13 plano estrutural inválido ('${valor:-vazio}')"
+    passo
+done
+
+# A13b: o par que impede a checagem de virar bloqueio permanente. Com o plano
+# válido, a mesma aquisição PRECISA acontecer; senão "recusa estrutural" viraria
+# "nunca adquire" e o teste passaria por não fazer nada.
+caso_padrao
+CASO_PAGES=4096
+CASO_PLANO_VALIDO=1
+pool_montar 2048 0 0 0 0
+rodar "$FRAG_PREPARE" mem_adquirir
+exige_rc mem_adquirir 0 'A13b plano válido adquire'
+exige_pool '4096 4096 0 0' 'A13b plano válido adquire'
+passo
+
+# A13c: o padrão da chave é FAIL-OPEN, e isso é deliberado — declarado aqui
+# para não ser confundido com esquecimento. `${MEM_PLANO_VALIDO:-1}` faz
+# ausência (e string vazia) valerem 1, o que mantém funcionando o hook
+# renderizado ANTES de 03/09/2026, que não conhece a chave. Só o valor literal
+# `1` libera; qualquer outro bloqueia (A13 prova com 0, 2 e texto).
+#
+# O controle que compensa o padrão é o de A12: num plano recusado o núcleo
+# quase sempre entrega `pages_needed=0`, e aí o hook antigo recusa assim mesmo.
+# O LIMITE dessa compensação, medido: a recusa por NUMA fixa `pages_needed`
+# antes de recusar (resources.py, linha 418 contra 472), então o hook ANTIGO
+# recebe contagem válida e adquire. Quem instala a correção precisa RERENDERIZAR
+# os hooks; sem isso a decisão estrutural não viaja. Os dois casos abaixo fixam
+# as duas metades desse contrato.
+caso_padrao
+CASO_PAGES=0
+CASO_PLANO_VALIDO=ausente
+pool_montar 2048 4096 4096 0 0
+rodar "$FRAG_PREPARE" mem_adquirir
+exige_rc mem_adquirir 1 'A13c hook antigo com plano zerado ainda recusa'
+exige_texto 'exige páginas, mas o plano assado nos hooks pede' 'A13c hook antigo com plano zerado'
+exige_sem_escrita 'A13c hook antigo com plano zerado'
+passo
+
+caso_padrao
+CASO_PAGES=4096
+CASO_PLANO_VALIDO=ausente
+pool_montar 2048 0 0 0 0
+rodar "$FRAG_PREPARE" mem_adquirir
+exige_rc mem_adquirir 0 'A13c hook antigo com contagem válida adquire (o padrão é fail-open por compatibilidade)'
+exige_pool '4096 4096 0 0' 'A13c hook antigo com contagem válida'
+passo
 
 # ===========================================================================
 # B. Devolução (mem_devolver)
@@ -1042,7 +1197,7 @@ for linha in linhas:
     try:
         plano = resources.plan({"mode": modo, "snapshot": foto, "vm_ram_mib": ram})
     except DataError as exc:
-        saida.append("\t".join([ident, "dado", "0", "0", "0", str(exc)]))
+        saida.append("\t".join([ident, "dado", "0", "0", "0", "0", str(exc)]))
         continue
     saida.append(
         "\t".join(
@@ -1052,6 +1207,7 @@ for linha in linhas:
                 str(plano["page_kb"]),
                 str(plano["pages_needed"]),
                 str(plano["acquire_delta"]),
+                str(plano["transient"]),
                 plano["error"],
             ]
         )
@@ -1060,42 +1216,45 @@ with open(sys.argv[3], "w", encoding="utf-8") as destino:
     destino.write("\n".join(saida) + "\n")
 PY_EOF
 
-# id|modo|ram_mib|pool_kb|nr|free|resv|surplus|memavail_kb|nodes|teto|py|sh|delta|motivo
+# id|modo|ram_mib|pool_kb|nr|free|resv|surplus|memavail_kb|nodes|teto|plano|py|sh|delta|motivo
 # pool_kb=0: o host não expõe pool nenhum.  nodes: 1, 2 (com contadores por nó)
 # ou 2sem (declara dois nós sem os contadores).  teto=-: kernel sem limite.
+# plano: o MEM_PLANO_VALIDO que a etapa 14 assaria neste plano (0 só quando o
+# núcleo recusa por motivo ESTRUTURAL, isto é com transient=0); o teste o deriva
+# do núcleo e confere contra o declarado aqui.
 # py/sh: veredicto esperado de cada lado.  delta: o delta comum quando os dois
 # aceitam.  motivo: '-' quando concordam; texto quando a divergência é de
 # desenho e está declarada.
 CORPUS=(
-  'normal-baseline|normal|8192|2048|0|0|0|0|20971520|1|-|aceita|aceita|0|-'
-  'normal-pool-de-terceiro-em-uso|normal|8192|2048|100|80|0|0|20971520|1|-|aceita|aceita|0|-'
-  '2m-pool-ausente|hugetlb-2m|8192|0|0|0|0|0|20971520|1|-|recusa|recusa|-|-'
-  '2m-consumidor-externo|hugetlb-2m|8192|2048|4096|4090|0|0|20971520|1|-|recusa|recusa|-|-'
-  '2m-resv-de-terceiro|hugetlb-2m|8192|2048|4096|4096|5|0|20971520|1|-|recusa|recusa|-|-'
-  '2m-surplus|hugetlb-2m|8192|2048|4096|4096|0|7|20971520|1|-|recusa|recusa|-|-'
-  '2m-pool-cobre-de-sobra|hugetlb-2m|8192|2048|5000|5000|0|0|20971520|1|-|aceita|aceita|0|-'
-  '2m-pool-exato|hugetlb-2m|8192|2048|4096|4096|0|0|20971520|1|-|aceita|aceita|0|-'
-  '2m-do-zero|hugetlb-2m|8192|2048|0|0|0|0|20971520|1|-|aceita|aceita|4096|-'
-  '2m-preexistente-parcial|hugetlb-2m|8192|2048|1096|1096|0|0|20971520|1|-|aceita|aceita|3000|-'
-  '1g-runtime-do-zero|hugetlb-1g|22528|1048576|0|0|0|0|29093508|1|-|aceita|aceita|22|-'
-  '1g-runtime-pool-do-boot|hugetlb-1g|22528|1048576|22|22|0|0|29093508|1|-|aceita|aceita|0|-'
-  '1g-runtime-consumidor|hugetlb-1g|22528|1048576|22|20|0|0|29093508|1|-|recusa|recusa|-|-'
-  '1g-boot-cobre|hugetlb-1g-boot|22528|1048576|22|22|0|0|4143904|1|-|aceita|aceita|0|-'
-  '2m-kernel-honesto-sem-memoria|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|100|recusa|recusa|-|-'
-  '2m-memavail-insuficiente|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|-|recusa|aceita|-|o núcleo recusa CEDO por MemAvailable; o hook não lê meminfo (I9-D8) e só reprova pela pós-condição, quando o kernel de fato não entrega. Com kernel generoso o hook aceita, e é o cenário 2m-kernel-honesto-sem-memoria que prova que os dois recusam quando a memória realmente falta'
-  '1g-boot-nao-cobre|hugetlb-1g-boot|22528|1048576|10|10|0|0|4143904|1|-|recusa|aceita|-|hugetlb-1g-boot não é modo de runtime: o hook por contrato NÃO toca no pool e devolve 0. Quem recusa a reserva estática insuficiente é o núcleo, na renderização'
-  'modo-desconhecido|hugetlb-4m|8192|2048|0|0|0|0|20971520|1|-|recusa|aceita|-|modo fora do catálogo: o núcleo recusa nominalmente e o hook aplica o padrão mais seguro que ele pode aplicar sozinho, que é não tocar no pool'
-  'modo-vazio||8192|2048|0|0|0|0|20971520|1|-|recusa|aceita|-|idem modo-desconhecido: modo vazio não é de runtime, o hook não toca no pool e o núcleo recusa por nome'
-  'numa-dois-nos-delta-par|hugetlb-2m|8192|2048|0|0|0|0|20971520|2|-|aceita|aceita|4096|-'
-  'numa-dois-nos-delta-impar|hugetlb-2m|8194|2048|0|0|0|0|20971520|2|-|recusa|aceita|-|NUMA é decisão do planejador e o hook é deliberadamente cego a nós (I9-D8, Bash puro sem o core). A recusa por plano zerado NÃO alcança este caso: resources.py fixa pages_needed ANTES da checagem de NUMA (linha 418 contra 472), então o hook recebe 4097 páginas válidas e adquire. Fechar isto exige a etapa 14 não renderizar hook a partir de plano recusado, não uma checagem local'
-  'numa-dois-nos-sem-contadores|hugetlb-2m|8192|2048|0|0|0|0|20971520|2sem|-|recusa|aceita|-|idem numa-dois-nos-delta-impar: a recusa do núcleo acontece depois da aritmética de páginas, o hook recebe 4096 páginas válidas e não tem como olhar para NUMA sozinho'
-  'ram-nao-multipla-da-pagina|hugetlb-2m|8193|2048|0|0|0|0|20971520|1|-|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026: a recusa nasce DENTRO de _pages_needed, então pages_needed chega 0 ao hook e a nova checagem de plano zerado recusa o start
+  'normal-baseline|normal|8192|2048|0|0|0|0|20971520|1|-|1|aceita|aceita|0|-'
+  'normal-pool-de-terceiro-em-uso|normal|8192|2048|100|80|0|0|20971520|1|-|1|aceita|aceita|0|-'
+  '2m-pool-ausente|hugetlb-2m|8192|0|0|0|0|0|20971520|1|-|0|recusa|recusa|-|-'
+  '2m-consumidor-externo|hugetlb-2m|8192|2048|4096|4090|0|0|20971520|1|-|1|recusa|recusa|-|-'
+  '2m-resv-de-terceiro|hugetlb-2m|8192|2048|4096|4096|5|0|20971520|1|-|1|recusa|recusa|-|-'
+  '2m-surplus|hugetlb-2m|8192|2048|4096|4096|0|7|20971520|1|-|1|recusa|recusa|-|-'
+  '2m-pool-cobre-de-sobra|hugetlb-2m|8192|2048|5000|5000|0|0|20971520|1|-|1|aceita|aceita|0|-'
+  '2m-pool-exato|hugetlb-2m|8192|2048|4096|4096|0|0|20971520|1|-|1|aceita|aceita|0|-'
+  '2m-do-zero|hugetlb-2m|8192|2048|0|0|0|0|20971520|1|-|1|aceita|aceita|4096|-'
+  '2m-preexistente-parcial|hugetlb-2m|8192|2048|1096|1096|0|0|20971520|1|-|1|aceita|aceita|3000|-'
+  '1g-runtime-do-zero|hugetlb-1g|22528|1048576|0|0|0|0|29093508|1|-|1|aceita|aceita|22|-'
+  '1g-runtime-pool-do-boot|hugetlb-1g|22528|1048576|22|22|0|0|29093508|1|-|1|aceita|aceita|0|-'
+  '1g-runtime-consumidor|hugetlb-1g|22528|1048576|22|20|0|0|29093508|1|-|1|recusa|recusa|-|-'
+  '1g-boot-cobre|hugetlb-1g-boot|22528|1048576|22|22|0|0|4143904|1|-|1|aceita|aceita|0|-'
+  '2m-kernel-honesto-sem-memoria|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|100|1|recusa|recusa|-|-'
+  '2m-memavail-insuficiente|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|-|1|recusa|aceita|-|o núcleo recusa CEDO por MemAvailable; o hook não lê meminfo (I9-D8) e só reprova pela pós-condição, quando o kernel de fato não entrega. Com kernel generoso o hook aceita, e é o cenário 2m-kernel-honesto-sem-memoria que prova que os dois recusam quando a memória realmente falta'
+  '1g-boot-nao-cobre|hugetlb-1g-boot|22528|1048576|10|10|0|0|4143904|1|-|0|recusa|aceita|-|hugetlb-1g-boot não é modo de runtime: o hook por contrato NÃO toca no pool e devolve 0. Quem recusa a reserva estática insuficiente é o núcleo, na renderização'
+  'modo-desconhecido|hugetlb-4m|8192|2048|0|0|0|0|20971520|1|-|0|recusa|aceita|-|modo fora do catálogo. MEM_PLANO_VALIDO chega 0, mas NÃO alcança este caso: mem_adquirir consulta mem_modo_de_runtime ANTES do bloqueio estrutural, e um modo que não é de runtime devolve 0 sem olhar para o plano. É defensável (para modo desconhecido, o padrão mais seguro que o hook pode aplicar sozinho é não tocar no pool), e é o desenho atual; se a intenção for bloquear o start em plano estruturalmente recusado seja qual for o modo, a checagem tem de subir para antes de mem_modo_de_runtime'
+  'modo-vazio||8192|2048|0|0|0|0|20971520|1|-|0|recusa|aceita|-|idem modo-desconhecido, e pelo mesmo mecanismo: o bloqueio por MEM_PLANO_VALIDO=0 mora depois de mem_modo_de_runtime, que já devolveu 0 para modo vazio'
+  'numa-dois-nos-delta-par|hugetlb-2m|8192|2048|0|0|0|0|20971520|2|-|1|aceita|aceita|4096|-'
+  'numa-dois-nos-delta-impar|hugetlb-2m|8194|2048|0|0|0|0|20971520|2|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026: o hook continua cego a NUMA, mas a decisão do planejador passou a viajar assada em MEM_PLANO_VALIDO=0 e ele bloqueia sem precisar enxergar
+  'numa-dois-nos-sem-contadores|hugetlb-2m|8192|2048|0|0|0|0|20971520|2sem|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026 pelo mesmo mecanismo
+  'ram-nao-multipla-da-pagina|hugetlb-2m|8193|2048|0|0|0|0|20971520|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026, hoje por dois caminhos: MEM_PLANO_VALIDO=0 bloqueia, e mesmo sem ele pages_needed chega 0 (a recusa nasce DENTRO de _pages_needed) e a checagem de plano zerado recusa
 )
 
 : > "$ORACULO_DIR/corpus.tsv"
 for linha in "${CORPUS[@]}"; do
     IFS='|' read -r c_id c_modo c_ram c_pool_kb c_nr c_free c_resv c_surplus \
-        c_memavail c_nodes c_teto c_py c_sh c_delta c_motivo <<< "$linha"
+        c_memavail c_nodes c_teto c_plano c_py c_sh c_delta c_motivo <<< "$linha"
     foto="$ORACULO_DIR/foto-$c_id.txt"
     {
         case "$c_nodes" in
@@ -1130,21 +1289,35 @@ passo
 DIVERGENCIAS=0
 for linha in "${CORPUS[@]}"; do
     IFS='|' read -r c_id c_modo c_ram c_pool_kb c_nr c_free c_resv c_surplus \
-        c_memavail c_nodes c_teto c_py c_sh c_delta c_motivo <<< "$linha"
+        c_memavail c_nodes c_teto c_plano c_py c_sh c_delta c_motivo <<< "$linha"
 
     py_linha=$(awk -F'\t' -v id="$c_id" '$1 == id { print; exit }' "$ORACULO_DIR/veredictos.tsv")
     [ -n "$py_linha" ] || fail "oráculo: o núcleo não respondeu sobre $c_id"
-    IFS=$'\t' read -r _ py_veredicto py_page_kb py_pages py_delta py_erro <<< "$py_linha"
+    IFS=$'\t' read -r _ py_veredicto py_page_kb py_pages py_delta py_transient py_erro <<< "$py_linha"
     [ "$py_veredicto" != dado ] \
         || fail "oráculo: o corpus produziu fotografia inválida em $c_id: $py_erro"
     [ "$py_veredicto" = "$c_py" ] \
         || fail "oráculo: o núcleo devia '$c_py' em $c_id e respondeu '$py_veredicto' ($py_erro)"
+
+    # MEM_PLANO_VALIDO não é inventado pelo teste: é derivado aqui pela MESMA
+    # regra da etapa 14 (`recusa transitória continua valendo; estrutural
+    # bloqueia`) e conferido contra o que o corpus declara. Assim a coluna do
+    # corpus fixa o contrato de transitoriedade do núcleo, e a derivação prova
+    # que o núcleo continua concordando com ele.
+    if [ "$py_veredicto" = aceita ] || [ "$py_transient" = 1 ]; then
+        plano_valido=1
+    else
+        plano_valido=0
+    fi
+    [ "$plano_valido" = "$c_plano" ] \
+        || fail "oráculo: em $c_id a etapa assaria MEM_PLANO_VALIDO=$plano_valido (valid=$py_veredicto, transient=$py_transient) e o corpus declara $c_plano"
 
     # O hook consome exatamente os números que o núcleo assou na renderização.
     caso_padrao
     CASO_MODO="$c_modo"
     CASO_PAGE_KB="$py_page_kb"
     CASO_PAGES="$py_pages"
+    CASO_PLANO_VALIDO="$plano_valido"
     [ "$c_teto" = '-' ] || K_TETO="$c_teto"
     [ "$c_pool_kb" = 0 ] || pool_montar "$c_pool_kb" "$c_nr" "$c_free" "$c_resv" "$c_surplus"
     rodar "$FRAG_PREPARE" mem_adquirir
@@ -1176,8 +1349,8 @@ for linha in "${CORPUS[@]}"; do
     fi
     passo
 done
-[ "$DIVERGENCIAS" -eq 6 ] \
-    || fail "oráculo: o corpus previa 6 divergências declaradas e observou $DIVERGENCIAS; mudança de comportamento sem revisão do contrato"
+[ "$DIVERGENCIAS" -eq 4 ] \
+    || fail "oráculo: o corpus previa 4 divergências declaradas e observou $DIVERGENCIAS; mudança de comportamento sem revisão do contrato"
 passo
 
 # ===========================================================================
@@ -1192,7 +1365,7 @@ HOST_ESTADO_DEPOIS=$([ -e /var/lib/vm-passthrough ] && echo existe || echo ausen
     || fail '/var/lib/vm-passthrough foi criado ou removido pela suíte'
 [ -n "$(find "$LOG_DIR" -name hooks.log -print -quit)" ] \
     || fail 'o log dos hooks não caiu dentro do sandbox; verifique o redirecionamento de HOOK_LOG_DIR'
-PERMITIDOS=' bloco-prepare bloco-release boot_id estado estado-como-escrito frag-prepare.sh frag-release.sh kernel-escritas kernel-sombra log oraculo projeto render render.log runner.sh sys '
+PERMITIDOS=' bloco-prepare bloco-release boot_id estado estado-como-escrito frag-prepare.sh politica frag-release.sh kernel-escritas kernel-sombra log oraculo projeto render render.log runner.sh sys '
 while IFS= read -r item; do
     case "$PERMITIDOS" in
         *" $item "*) ;;
