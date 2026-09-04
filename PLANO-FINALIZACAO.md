@@ -1318,6 +1318,41 @@ já ausente em vez de ainda presente.
    neste boot; o reboot prova que ela não volta a ser reservada.
 6. Só então declarar `MEMORIA_MODO` e habilitar o ciclo de vida dinâmico.
 
+**Resultado medido dos passos 1 e 2, executados em 03/09/2026.** A reversão do
+XML e a devolução em runtime foram feitas pelo operador (este host exige
+autenticação interativa para `sudo`, então toda etapa mutante é dele):
+
+| | antes | depois |
+|---|---|---|
+| `MemAvailable` | 3.262.344 kB | **26.163.004 kB** |
+| `MemFree` | 453.396 kB | 23.302.840 kB |
+| `HugePages_Total` | 22 | **0** |
+| `Hugetlb` | 23.068.672 kB | **0** |
+| XML da VM | `memoryBacking` de 1 GiB | sem `memoryBacking` |
+
+**21,8 GiB devolvidos ao host sem reiniciar.** Isso confirma na prática o que a
+configuração do kernel indicava: página gigante reservada no boot É devolvível
+em runtime neste kernel, e portanto o modo `hugetlb-1g` em runtime é
+fisicamente possível aqui. A prova vale para o desenho de I9.12 inteiro: sem
+ela, o modo de 1 GiB em runtime seria especulação.
+
+**A inversão de contrato, demonstrada em vez de argumentada.** Com o host já no
+estado que este requisito considera CORRETO, `bash etapas/52-cpu-pinning-hugepages.sh --verificar`
+devolve `rc=2` e diz:
+
+```
+[aviso] Pool de HugePages divergente: HugePages_Total=0; esperado exatamente 22.
+[aviso] XML de CPU/HugePages incompleto ou divergente: memoryBacking/hugepages
+        precisa existir exatamente uma vez.
+```
+
+Ou seja, a etapa 17 hoje reporta como defeito exatamente o estado que
+REQ-VM-RESOURCE-LIFECYCLE persegue. É por isso que I9.12 **substitui** o
+contrato da etapa e não acrescenta um modo ao lado dele: enquanto o
+`--verificar` exigir `HugePages_Total` igual a `HUGEPAGES_1G`, o host correto
+será relatado como divergente, e o operador será empurrado de volta à reserva
+estática pelo próprio status do menu.
+
 A etapa 18 **não entra** nesta sequência neste host: não há `isolcpus`,
 `nohz_full` nem `rcu_nocbs` no `/proc/cmdline`, então o trabalho dela em I9.12 é
 recusar entrar nesse estado, não sair dele.
