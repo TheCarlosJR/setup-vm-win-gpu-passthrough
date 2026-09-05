@@ -84,8 +84,12 @@ exige() {
         coletar nvidia-smi
     fi
 
+    # I9.12: a seção continua, e passou a significar o contrário do que
+    # significava. Com a VM parada o esperado é HugePages_Total=0 e Hugetlb=0
+    # em qualquer MEMORIA_MODO: é a prova do baseline retornável. Valor não
+    # nulo aqui, sem VM rodando, é resíduo do contrato antigo.
     secao "HugePages"
-    coletar grep Huge /proc/meminfo
+    coletar grep -E 'HugePages_|Hugetlb' /proc/meminfo
 
     secao "Memória"
     coletar free -h

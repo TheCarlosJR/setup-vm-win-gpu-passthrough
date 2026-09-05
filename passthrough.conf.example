@@ -60,8 +60,15 @@ VM_CORES=""                     # derivado da topologia SOCKET:CORE do host
 VM_THREADS=""                   # derivado dos siblings online por core
 CPUS_VM=""                      # derivado; aceita IDs e intervalos (ex.: 0-5,8-13)
 CPUS_HOST=""                    # derivado; cobre todo o restante sem sobreposição
-HUGEPAGES_1G=""                 # derivado exatamente de VM_RAM_MB/1024
-                                 # Etapas 52/53 são opcionais e reversíveis.
+                                 # Etapas 52/53 são opcionais e reversíveis:
+                                 # a 52 aplica XML e não toca no boot; a 53 só
+                                 # entra em isolamento persistente com
+                                 # confirmação digitada.
+# HUGEPAGES_1G foi DEPRECIADA em I9.12 (D9): a reserva estática de 1 GiB no
+# boot deixou de existir, a política passou a ser MEMORIA_MODO (abaixo) e a
+# contagem de páginas é derivada de VM_RAM_MB pelo núcleo, conforme o modo. O
+# parser continua aceitando a linha de configurações antigas, sem expor o
+# valor, e a etapa 02 a remove.
 
 # --- ISOs (Capítulo 17): baixe SEMPRE dos canais oficiais -------------------
 ISO_WINDOWS=""                   # caminho local da ISO do Windows 11
@@ -124,16 +131,22 @@ BACKUPS_VM_DIR=""                # destino explícito, com prioridade.
 
 # --- Política de memória da VM (REQ-VM-RESOURCE-LIFECYCLE, I9.12) -------------
 # Decide COMO a RAM da VM é obtida e, principalmente, se ela volta ao host
-# quando a VM para. Vazio = ainda não decidido; a etapa 17 exige a escolha
-# explícita e não assume nenhum modo por padrão.
+# quando a VM para. Quem PERGUNTA é a etapa 02; quem APLICA no XML é a etapa 17;
+# quem assa a decisão nos hooks é a etapa 14. Vazio = ainda não decidido, e
+# nenhuma das três assume um modo por padrão: as etapas 14 e 17 recusam aplicar
+# até a escolha existir.
 #
-#   normal           memória comum, THP oportunístico. Volta ao host quando o
-#                    QEMU termina. É o baseline recomendado.
-#   hugetlb-2m       páginas de 2 MiB adquiridas no start e devolvidas no stop.
-#   hugetlb-1g       páginas de 1 GiB adquiridas no start (best-effort
-#                    fail-closed: cada página exige 1 GiB contíguo) e
-#                    devolvidas no stop.
-#   hugetlb-1g-boot  perfil LEGADO: as páginas vêm de default_hugepagesz,
-#                    hugepagesz e hugepages no boot e NÃO voltam ao host com a
-#                    VM desligada. Opt-in, fora da base qualificada retornável.
+#   normal       memória comum, THP oportunístico. Volta ao host quando o QEMU
+#                termina. É o baseline do requisito.
+#   hugetlb-2m   páginas de 2 MiB adquiridas no start e devolvidas no stop. É o
+#                modo hugetlb preferencial: 2 MiB é ordem de alocação baixa o
+#                bastante para o kernel conseguir compactar depois de uptime.
+#   hugetlb-1g   páginas de 1 GiB adquiridas no start (best-effort fail-closed:
+#                cada página exige 1 GiB fisicamente contíguo, e a alocação
+#                pode ser recusada após uptime longo) e devolvidas no stop.
+#
+# Os três são RETORNÁVEIS. O perfil `hugetlb-1g-boot`, que recebia as páginas
+# de default_hugepagesz/hugepagesz/hugepages no boot e não as devolvia, foi
+# REMOVIDO em I9.12 (D8): ele era declaradamente incompatível com o requisito e
+# manter a opção só para não ser usada empurrava o operador de volta ao defeito.
 MEMORIA_MODO=""

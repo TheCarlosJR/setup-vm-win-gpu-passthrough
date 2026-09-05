@@ -186,7 +186,13 @@ EXAMPLE_HASH_AFTER=$(sha256sum "$ROOT/passthrough.conf.example")
 # Baseline atualizado em I6: o exemplo ganhou os fingerprints físicos de
 # sistema, workingDisk e HD1, todos vazios até a redetecção explícita. O hash
 # anterior era 16dba90bf8513ddccf9ba59ea2e0c80514aea427514dac605240b66c07bc63ff.
-[[ $EXAMPLE_HASH_BEFORE == 77323888c1e12cdfed6bd60a9d169b3d8a9f073000493df3fb30e9fec669ec8e ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
+# Baseline atualizado em I9.12 (05/09/2026) por mudança deliberada: HUGEPAGES_1G
+# saiu do modelo (D9, depreciada e removida pela etapa 02), o comentário das
+# etapas 52/53 passou a descrever o contrato novo, e o bloco de MEMORIA_MODO
+# perdeu o perfil hugetlb-1g-boot (D8, removido do catálogo) e ganhou a
+# explicação de quem pergunta, quem aplica e quem assa a política. O hash
+# anterior era 77323888c1e12cdfed6bd60a9d169b3d8a9f073000493df3fb30e9fec669ec8e.
+[[ $EXAMPLE_HASH_BEFORE == 7144e90ebd550707e17e8957f8400e48a178fb15a055fa7d6dbed3c7a55afa55 ]] || fail 'passthrough.conf.example mudou; atualize explicitamente o baseline I0'
 [[ $ROUNDTRIP_BEFORE != "$(sha256sum "$TMP/batch-before" | cut -d' ' -f1)" ]] || : # mudança anterior foi intencional
 
 # A matriz de I0 deve cobrir cada chave pública individualmente, inclusive as

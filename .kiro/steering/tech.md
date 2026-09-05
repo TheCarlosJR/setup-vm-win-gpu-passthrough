@@ -24,6 +24,7 @@ Reverificados em 03/09/2026 neste host:
 - O `printf` embutido do bash 5.3.9 recusa o especificador posicional `%N$s` (`printf: '$': caractere de formato inválido`); só `/usr/bin/printf` aceita. Mensagens traduzidas (I9B) são renderizadas por expansão de parâmetro, nunca pelo `printf` com o valor do catálogo como formato.
 - O coreutils deste host é o uutils (`/usr/bin/test` aponta para `/usr/lib/cargo/bin/coreutils/test`); o `test` externo ignora grupos suplementares em `-r`/`-w`/`-x`, os builtins do bash acertam.
 - HugePages de 1 GiB reservadas no boot foram devolvidas em runtime neste kernel (7.0.0-30, `CONFIG_CONTIG_ALLOC=y`): 21,8 GiB sem reiniciar. O que persiste é a política do bootloader, não a página.
+- Em I9.12 (05/09/2026) o perfil de reserva de HugePages no boot foi REMOVIDO do projeto, e não apenas desaconselhado: `MEMORIA_MODO` aceita `normal`, `hugetlb-2m` e `hugetlb-1g`, todos retornáveis, e a etapa 17 não grava mais `default_hugepagesz`, `hugepagesz` nem `hugepages`. O único caminho que ainda toca essas chaves é o `--desfazer` da etapa 17, e só para removê-las juntas em hosts vindos do contrato antigo.
 
 Anotados pela sessão de 02/09/2026 e não reproduzidos na árvore (reconfirmar antes de depender):
 

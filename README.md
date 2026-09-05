@@ -57,7 +57,7 @@ popos-win11-passthrough/
 │   ├── 50-hooks-gpu-hd1.sh          14 hooks dinâmicos + HD1
 │   ├── 51-usb-passthrough.sh        15 USB: dispositivos ou controladora (opcional)
 │   ├── 55-driver-nvidia-vm.sh       16 driver NVIDIA na VM (automático)
-│   ├── 52-cpu-pinning-hugepages.sh  17 pinning + HugePages               <reboot>
+│   ├── 52-cpu-pinning-hugepages.sh  17 pinning + política de memória
 │   ├── 53-cpu-isolation.sh          18 isolcpus                          <reboot>
 │   ├── 60-rede-bridge.sh            19 rede final: bridge Ethernet ou NAT
 │   ├── 61-airlock.sh                20 SFTP seguro em bridge/NAT
@@ -189,7 +189,7 @@ Etapas com vários blocos internos os anunciam como `Etapa N.x`, por exemplo
 | 14 | `50-hooks-gpu-hd1` | hooks com os IDs reais + GPU (e disco físico, se houver) no XML; teste o ciclo ligar/desligar |
 | 15 | `51-usb-passthrough` | opcional; dispositivos individuais (vendor:product, inclui adaptadores Bluetooth e o rádio Bluetooth integrado à placa-mãe, sem VFIO e sem tocar no grupo IOMMU) ou uma controladora USB PCI inteira com hotplug nativo nas portas dela |
 | 16 | `55-driver-nvidia-vm` | instala o driver NVIDIA dentro do Windows sem monitor dedicado: baixa o pacote oficial, injeta o `qemu-guest-agent` no QCOW2 se faltar, dispara unidade systemd que liga a VM, instala silenciosamente (`-s -noreboot` via guest-exec), confirma no convidado e desliga |
-| 17 | `52-cpu-pinning-hugepages` | XML + parâmetros de kernel; **reboot** |
+| 17 | `52-cpu-pinning-hugepages` | XML com pinning, topologia e a política de memória de `MEMORIA_MODO`; **sem reboot** (não grava parâmetro de kernel; `--desfazer` remove resíduo do contrato antigo e aí sim pede reboot) |
 | 18 | `53-cpu-isolation` | isolcpus; **reboot**; MSI se aplica dentro do Windows (`windows/Ativar-MSI-GPU.ps1`) |
 | 19 | `60-rede-bridge` | aplica o modo escolhido: bridge somente em Ethernet (`netplan try` + reservas no roteador) ou NAT dedicado Ethernet/Wi-Fi (sem Netplan, reserva libvirt automática) |
 | 20 | `61-airlock` | depende da etapa 19; SFTP chroot + ufw na `REDE_BRIDGE` ou `REDE_BRIDGE_LIBVIRT`; chave gerada NA VM e instalada com `--instalar-chave` |
@@ -278,7 +278,7 @@ depois:
 |---|---|
 | GPU | com uma única GPU, explica que o desktop Linux sai do ar durante a VM e exige confirmação; com duas ou mais, obriga a escolher qual vai para a VM |
 | CPU | teto de núcleos: o host sempre fica com 1 (2 quando há 6+ núcleos) |
-| RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB); valor sempre múltiplo de 1 GiB por causa das HugePages |
+| RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB); valor sempre múltiplo de 1 GiB, para manter o modo `hugetlb-1g` viável (uma página de 1 GiB não se divide) |
 | Disco da VM | o disco da **raiz do Linux** e qualquer disco com partição montada/em uso são recusados; **"nenhum" é opção válida** (a VM fica só com o QCOW2). O workingDisk não é tratado como identidade de disco físico persistida. |
 | Áudio HDMI | se a placa não expõe a função, segue somente com vídeo em vez de abortar |
 | Rede | sempre enumera todas as interfaces físicas, destaca a rota IPv4 efetiva obtida por `ip route get`, rejeita bridge Wi-Fi e avisa NAT em outro uplink; trocar o uplink da bridge limpa os IPs da LAN anterior |
@@ -359,7 +359,7 @@ Verificações chave por fase:
 | VM criada | `virsh --connect qemu:///system dumpxml win11 \| grep -E "loader\|qcow2"` | OVMF + /vm/Windows11.qcow2 |
 | Guest agent | `virsh --connect qemu:///system qemu-agent-command win11 '{"execute":"guest-ping"}'` | `{"return":{}}` |
 | Pinning | `virsh --connect qemu:///system vcpuinfo win11` (VM ligada) | afinidade restrita aos núcleos pinados |
-| HugePages | `grep Huge /proc/meminfo` | `HugePages_Total` = reservado, `Hugepagesize` 1 GiB |
+| HugePages | `grep Huge /proc/meminfo` | com a **VM parada**, `HugePages_Total=0` e `Hugetlb=0`: nada fica reservado. Nos modos `hugetlb-*`, `HugePages_Total` sobe durante a execução e volta a 0 no stop |
 | Isolation | `cat /sys/devices/system/cpu/isolated` | exatamente as CPUs da VM |
 | Rede (bridge) | `bash etapas/60-rede-bridge.sh --verificar`, `ip addr show br0` | uplink Ethernet em `br0`, NIC pelo MAC em `source bridge`, host/VM na LAN |
 | Rede (NAT) | `bash etapas/60-rede-bridge.sh --verificar`, `virsh --connect qemu:///system net-info passthrough-nat` | rede dedicada ativa/autostart, uplink igual à rota IPv4 efetiva, reserva DHCP e NIC em `source network` |
@@ -398,8 +398,12 @@ Verificações chave por fase:
 ### E. Desempenho
 
 Meça, não "sinta": 3DMark (3 execuções por configuração), MSI Afterburner/RTSS
-para 1% low, CrystalDiskMark para I/O. Aplique UM ajuste por vez (pinning,
-depois HugePages, depois isolcpus, depois MSI) e registre a média e a variação.
+para 1% low, CrystalDiskMark para I/O. Aplique UM ajuste por vez e registre a
+média e a variação. A ordem: pinning (etapa 17 com `MEMORIA_MODO=normal`),
+depois a política de memória (`MEMORIA_MODO=hugetlb-2m` na etapa 3, seguida das
+etapas 17 e 14), depois `isolcpus` (etapa 18, que exige confirmação digitada
+porque não é retornável), depois MSI. Nenhum desses passos pede reboot, salvo o
+isolamento da etapa 18.
 
 ---
 

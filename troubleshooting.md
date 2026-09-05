@@ -612,16 +612,33 @@ A configuração pode aplicar globalmente `PasswordAuthentication no`,
 Sem console ou chave administrativa alternativa, uma reversão incompleta pode
 bloquear o próprio operador.
 
-## 10. CPU pinning, HugePages e isolamento
+## 10. CPU pinning, política de memória e isolamento
 
 ### Diagnóstico
 
 ```bash
 bash etapas/52-cpu-pinning-hugepages.sh --verificar
 bash etapas/53-cpu-isolation.sh --verificar
-grep Huge /proc/meminfo
+grep -E 'HugePages_|Hugetlb|MemAvailable' /proc/meminfo
 cat /sys/devices/system/cpu/isolated
 ```
+
+Com a VM PARADA, o esperado é `HugePages_Total=0` e `Hugetlb=0` em qualquer
+modo: nenhuma página fica reservada em repouso. Com a VM LIGADA, nos modos
+`hugetlb-2m` e `hugetlb-1g`, `HugePages_Total` sobe para exatamente as páginas
+da VM e volta a zero no stop.
+
+O que o hook fez em cada ciclo fica registrado:
+
+```bash
+grep 'mem:' /var/log/vm-passthrough/hooks.log     # aquisição e devolução
+sudo cat /var/lib/vm-passthrough/<VM_NAME>.memoria # estado da operação
+```
+
+O arquivo de estado some (ou fica em `RELEASED`) depois de uma devolução
+comprovada. `RECOVERY_REQUIRED` significa que a devolução não pôde ser provada:
+o resto da restauração (GPU, display, CPU) continuou, e este item precisa de
+revisão manual antes do próximo start.
 
 Com a VM ligada apenas para observação:
 
@@ -629,9 +646,10 @@ Com a VM ligada apenas para observação:
 virsh --connect qemu:///system vcpuinfo <VM_NAME>
 ```
 
-HugePages reservam RAM mesmo com a VM desligada. Isolamento retira CPUs do
-scheduler geral do host mesmo sem a VM. A etapa 17 mantém ao menos um core
-físico completo para o host; a etapa 18 exige a CPU 0 no housekeeping.
+Isolamento (etapa 18) é o que ainda retira CPUs do scheduler geral do host
+mesmo sem a VM, e por isso exige confirmação digitada. A etapa 17 mantém ao
+menos um core físico completo para o host; a etapa 18 exige a CPU 0 no
+housekeeping.
 
 ### Desfazer a etapa 17
 
@@ -644,13 +662,17 @@ bash etapas/52-cpu-pinning-hugepages.sh --desfazer
 A reversão é intencionalmente inversa:
 
 1. primeira execução cria backup e remove do XML a exigência de HugePages,
-   preservando o pinning;
+   qualquer que seja o tamanho de página declarado, preservando o pinning;
 2. depois de comprovar o XML, execute `--desfazer` novamente para remover
-   `default_hugepagesz`, `hugepagesz` e `hugepages` da persistência de boot;
+   `default_hugepagesz`, `hugepagesz` e `hugepages` da persistência de boot.
+   Essa fase existe para hosts que vieram do contrato antigo: a etapa 17 nunca
+   mais grava essas chaves, e o `--desfazer` é o único caminho que as toca;
 3. reinicie quando solicitado;
 4. repita os verificadores 52 e 53.
 
-Não remova apenas uma das três chaves de boot.
+Não remova apenas uma das três chaves de boot. Enquanto qualquer uma delas
+existir, a etapa 17 recusa aplicar, em qualquer modo: o host ficaria com página
+reservada permanentemente e o XML declarando outra política.
 
 ### Desfazer a etapa 18
 
@@ -663,13 +685,35 @@ persistência e exige reboot para comprovar o efeito. Se for necessário mudar o
 mapa de pinning enquanto existe isolamento antigo, desfaça primeiro a etapa 18,
 reinicie e só então altere a etapa 17.
 
-### VM não inicia com HugePages
+### VM não inicia nos modos `hugetlb-*`
 
-- mantenha a VM desligada;
-- verifique tamanho, total, páginas livres, reservadas e surplus;
-- confirme que o XML exige o mesmo tamanho configurado no boot;
-- use o `--desfazer` da etapa em vez de editar XML e kernel separadamente;
-- não reduza a reserva de RAM do host para forçar a configuração.
+O start é recusado **pelo hook `prepare`**, de propósito e antes de derrubar o
+display manager ou destacar a GPU: o desktop continua de pé. A causa está no
+log, na linha `mem ERRO`:
+
+```bash
+grep 'mem ERRO' /var/log/vm-passthrough/hooks.log | tail -5
+sudo cat /var/lib/vm-passthrough/<VM_NAME>.memoria
+```
+
+As causas, e o que cada uma quer dizer:
+
+- **consumidor externo, `resv` ou `surplus` no pool**: outra VM ou processo já
+  usa páginas desse pool. Não há como distinguir "nossa" de "dele" na devolução,
+  então o start é recusado em vez de arriscar tirar página de terceiro. É
+  transitória: some quando o outro consumidor sair;
+- **alocação parcial**: o kernel entregou menos páginas do que o pedido. Em
+  `hugetlb-1g` isso é esperado após uptime longo, porque cada página exige
+  1 GiB fisicamente contíguo. O hook devolve o que adquiriu e recusa;
+- **`MEM_PLANO_VALIDO=0`**: a recusa é ESTRUTURAL (modo desconhecido, RAM não
+  múltipla do tamanho de página, pool ausente, NUMA divergente) e viajou assada
+  no hook. Ela não se resolve esperando: corrija a configuração e **reexecute a
+  etapa 14** para reassar os hooks.
+
+Se o modo escolhido não for viável neste host, volte para `MEMORIA_MODO=normal`
+pela etapa 3 e reexecute as etapas 17 e 14. Memória comum é o baseline do
+requisito, não um remendo. Não reduza a reserva de RAM do host para forçar a
+configuração, e use `--desfazer` em vez de editar XML e kernel separadamente.
 
 ## 11. Snapshots, backups e restauração
 

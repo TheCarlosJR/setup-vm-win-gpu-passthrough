@@ -106,9 +106,14 @@ roda nele). A etapa 3 impõe estes tetos automaticamente:
 | RAM | teto = total menos a reserva do host (25% do total, entre 4 e 8 GiB) |
 | Disco | disco da raiz e qualquer disco montado/em uso ficam fora dos candidatos da VM; workingDisk não é persistido como disco físico |
 
-Cuidado específico com **HugePages** (etapa 17): a RAM reservada sai do host de
-forma permanente, no boot, mesmo com a VM desligada. Reservar demais deixa o
-host sem memória para subir a sessão gráfica.
+Cuidado específico com a **política de memória** (`MEMORIA_MODO`, escolhida na
+etapa 3 e aplicada pela etapa 17): desde I9.12 nenhuma RAM fica reservada com a
+VM desligada. Nos modos `hugetlb-2m` e `hugetlb-1g` as páginas são adquiridas
+pelo hook no start e devolvidas no stop. O cuidado, portanto, inverteu de lado:
+não é mais o host ficar sem memória em repouso, e sim a AQUISIÇÃO falhar no
+start — quando o kernel não consegue as páginas (fragmentação, consumidor
+externo, memória apertada), o hook recusa e a VM não sobe, de propósito e antes
+de derrubar o display.
 
 ### 2.4 Baixar ISO só da fonte oficial
 
@@ -174,7 +179,7 @@ conversar sobre o fluxo e a coluna `Script` para localizar o arquivo.
 | 14 | `50-hooks-gpu-hd1.sh` | hooks da GPU e disco físico no XML | |
 | 15 | `51-usb-passthrough.sh` | USB em passthrough: dispositivos individuais ou controladora inteira (opcional) | |
 | 16 | `55-driver-nvidia-vm.sh` | driver NVIDIA dentro da VM, automático via qemu-guest-agent (download oficial, instalação silenciosa, confirmação no convidado) | |
-| 17 | `52-cpu-pinning-hugepages.sh` | CPU pinning e HugePages (opcional) | reboot |
+| 17 | `52-cpu-pinning-hugepages.sh` | CPU pinning e política de memória no XML (opcional) | |
 | 18 | `53-cpu-isolation.sh` | isolamento de CPU (opcional) | reboot |
 | 19 | `60-rede-bridge.sh` | aplica a rede final: bridge Ethernet ou NAT libvirt dedicado | |
 | 20 | `61-airlock.sh` | airlock: SFTP na interface/endereço do modo selecionado | |
@@ -635,7 +640,7 @@ para o host.
 | Etapa | Script em `etapas/` | O que faz | Custo |
 |---|---|---|---|
 | 15 | `51-usb-passthrough.sh` | USB em passthrough: dispositivo por vendor:product ou controladora inteira | o que for passado fica exclusivo da VM enquanto ela roda |
-| 17 | `52-cpu-pinning-hugepages.sh` | CPU pinning, topologia real e HugePages | a RAM reservada sai do host no boot, mesmo com a VM desligada |
+| 17 | `52-cpu-pinning-hugepages.sh` | CPU pinning, topologia real e a política de memória de `MEMORIA_MODO` | nada é retirado do host em repouso: nos modos `hugetlb-*` as páginas são adquiridas no start e devolvidas no stop; se a aquisição falhar, a VM não sobe |
 | 18 | `53-cpu-isolation.sh` | `isolcpus`: tira os núcleos da VM do escalonador | os núcleos isolados param de receber processos do host, sempre |
 
 ```bash
@@ -850,7 +855,7 @@ XML de backup cuja NIC apontava para `network='default'`.
 | Guest agent | `virsh --connect qemu:///system qemu-agent-command win11 '{"execute":"guest-ping"}'` | `{"return":{}}` |
 | Passthrough | ligar a VM | boot do Windows pela GPU real, sem "Code 43" |
 | Pinning | `virsh --connect qemu:///system vcpuinfo win11` (VM ligada) | afinidade restrita aos núcleos escolhidos |
-| HugePages | `grep Huge /proc/meminfo` | `HugePages_Total` igual ao reservado |
+| HugePages | `grep Huge /proc/meminfo` | com a VM parada, `HugePages_Total=0` e `Hugetlb=0`; nos modos `hugetlb-*` sobe durante a execução e volta a 0 no stop |
 | Isolamento | `cat /sys/devices/system/cpu/isolated` | exatamente as CPUs da VM |
 | Rede bridge | `bash etapas/60-rede-bridge.sh --verificar` | bridge ativa, uplink Ethernet membro, NIC pelo MAC em `source bridge`, IPs da LAN |
 | Rede NAT | `bash etapas/60-rede-bridge.sh --verificar` | rede dedicada ativa/autostart, forward no uplink, reserva DHCP e NIC em `source network` |
