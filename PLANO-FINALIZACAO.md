@@ -1390,6 +1390,79 @@ Seis decisões que mudam o desenho e não se re-derivam lendo o código depois.
   menu empurraria o operador de volta ao defeito. Acrescentar um modo ao lado
   do contrato velho manteria dois caminhos mutantes, que a regra 8 proíbe.
 
+#### Decisões de 05/09/2026 (retomada, autoria do usuário)
+
+Sete decisões que reabrem I9.12 para fechar o requisito. Foram tomadas pelo
+usuário antes da primeira linha de código desta retomada e registradas aqui
+primeiro, exatamente pela razão que a nota do mapa de execução dá: o que não
+está na árvore e no plano não sobrevive à sessão.
+
+- **I9.12-D8 (o perfil legado `hugetlb-1g-boot` deixa de existir):** decisão do
+  usuário, "não precisamos de legado, pode remover". O modo sai do núcleo, do
+  schema, do exemplo, da etapa 17, dos testes e das docs. Três motivos, todos
+  já escritos em outro lugar deste plano: o requisito exige perfil retornável e
+  esse modo é declaradamente não retornável; o apply legado era um segundo
+  caminho mutante em produção, que a regra 8 proíbe; e manter a opção "só para
+  não ser usada" é justamente o que empurrava o operador de volta ao defeito
+  (o mesmo argumento de I9.12-D6). O que fica no lugar dele é a memória comum
+  como baseline e os dois modos de runtime.
+- **I9.12-D9 (`HUGEPAGES_1G` vira chave DEPRECIADA, não chave removida do
+  parser):** ela entra em `DEPRECATED_KEYS` de `config.py` e em
+  `CHAVES_CONF_DEPRECIADAS` do shell, pelo mesmo mecanismo já usado por
+  `AIRLOCK_DISPENSADO` e `BACKUP_DISPENSADO`: o parser continua aceitando a
+  linha, para não derrubar configuração existente; o valor não é exposto a
+  consumidor nenhum; e a etapa 3 remove a linha na migração pré-parser.
+  Apagá-la do schema sem depreciar transformaria todo `passthrough.conf`
+  anterior a esta data em "chave desconhecida", que é recusa fail-closed — o
+  operador ficaria travado na etapa 3 sem diagnóstico útil. A contagem de
+  páginas passa a ser derivada de `VM_RAM_MB` pelo núcleo, conforme o modo. A
+  regra "`VM_RAM_MB` múltiplo de 1024 MiB" é MANTIDA: ela deixa `hugetlb-1g`
+  viável e não muda o teto de RAM já caracterizado em I5.
+- **I9.12-D10 (a etapa 17 aplica somente XML, dirigida por `MEMORIA_MODO`, e
+  nunca mais grava parâmetro de boot):** o apply não chama `kernel_param_add`
+  nem pede reboot. `--desfazer` continua sendo o ÚNICO lugar que toca chave de
+  boot de HugePages, e só para REMOVER as três juntas: é o caminho de migração
+  para hosts que vieram do contrato antigo. O `--verificar` trata chave de boot
+  presente como defeito em QUALQUER modo, mandando rodar `--desfazer`. Isso não
+  cria dois caminhos mutantes: adicionar deixou de existir, e o que sobrou é
+  reversão.
+- **I9.12-D11 (uma operação de XML, parametrizada pelo modo):** a operação
+  `cpu-pinning` de `domain_xml.py` ganha a opção OBRIGATÓRIA `memory_mode`, com
+  valores `normal`, `hugetlb-2m` e `hugetlb-1g`. `normal` remove
+  `memoryBacking/hugepages` (e o `memoryBacking` se ele ficar vazio, mesma
+  regra de `remove-hugepages`); `hugetlb-2m` declara
+  `<page size="2048" unit="KiB"/>`; `hugetlb-1g` mantém
+  `<page size="1" unit="GiB"/>`. `validate_cpu_pinning` troca `hugepages_mode`
+  de `sim|nao|ignorar` para `nao|2m|1g|ignorar`, comparando TAMANHO EM BYTES,
+  não texto. `remove-hugepages` permanece, porque é a fase 1 do `--desfazer`.
+  Uma operação parametrizada, e não duas operações, pela regra 8.
+- **I9.12-D12 (a etapa 3 pergunta `MEMORIA_MODO`, sem padrão implícito):** fecha
+  a lacuna reconhecida em I9.12-D7. A pergunta fica na seção 3.7 da etapa 3,
+  logo depois da RAM, com três opções na ordem `normal`, `hugetlb-2m`,
+  `hugetlb-1g`, cada uma dizendo o que custa e o que devolve; repergunta quando
+  a chave está vazia ou em `--redetectar`, como `REDE_MODO` já faz; grava pelo
+  mesmo `salvar_conf` atômico. `escolher_da_lista` não pré-seleciona com três
+  itens, então não há padrão silencioso. A recomendação de desempenho do
+  usuário para este host é `hugetlb-2m`, e recomendação não vira padrão.
+- **I9.12-D13 (a etapa 14 não assa política em silêncio):** o apply da etapa 14
+  exige `MEMORIA_MODO` decidido; `emitir_hook_memoria_fn` e
+  `memoria_plano_resolver` deixam de substituir vazio por `normal`; e o
+  `--verificar` da etapa 14 compara a linha `MEMORIA_MODO=` do hook `prepare`
+  INSTALADO com a configuração atual, relatando pendência ("hooks assados com
+  política de memória diferente; reexecute a etapa 14") quando divergem. Sem
+  essa comparação, trocar o modo na etapa 3 deixaria hooks antigos ativos e o
+  menu diria que está tudo certo — falso sucesso, que REQ-VERIFY-FAILCLOSED
+  proíbe. É a mesma classe de controle que I9.12-D4c já usa para a versão do
+  hook, agora aplicada ao valor.
+- **I9.12-D14 (o alvo operacional deste host é `hugetlb-2m`):** 22 GiB de VM são
+  11264 páginas de 2 MiB, adquiridas no start e devolvidas no stop; o kernel
+  compacta memória para obtê-las, e 2 MiB é ordem de alocação baixa o bastante
+  para isso ser realista depois de uptime. `hugetlb-1g` em runtime continua
+  disponível como best-effort fail-closed (22 blocos de 1 GiB fisicamente
+  contíguos; pode recusar o start após uptime longo) e será medido em I13.
+  `normal` continua sendo o baseline do requisito. Nenhum modo entra como
+  qualificado por fixture, como o Gate I9 exige.
+
 ### Sequência de migração deste host, medida em 03/09/2026 (entrada de I9.12)
 
 A auditoria de I9.12 encontrou algo que muda o tamanho da tarefa: **a etapa 17
@@ -2249,6 +2322,7 @@ Não apagar falhas antigas; adicionar uma linha por tentativa relevante.
 | I9.12 | 2026-09-03 | `43ec863` a `8c84a54` (21 commits) | novos `libexec/passthrough_core/resources.py`, `tests/python/test_resources.py`, `tests/test-i912-memoria-hooks.sh`; alterados `etapas/{50,52,53}`, `lib/shell/{boot,config,probes}.sh`, `libexec/passthrough_core/{cli,config}.py`, `passthrough.conf.example`, `tests/{check-python-boundary.py,check-phase-manifest.sh,test-i5-cpu-boot.sh,test-i9-hooks-isolados.sh,test-i0-characterization.sh}`, `tests/i0/traceability.tsv`, `tests/manifests/i9-files.txt`, este plano | migração no host executada pelo operador (XML sem `memoryBacking`, 21,8 GiB devolvidos em runtime, três chaves fora do GRUB, baseline persistente após reboot com `MemAvailable` 27,7 GiB); `tests/python/test_resources.py`; `bash tests/test-i912-memoria-hooks.sh`; `tests/test-i5-cpu-boot.sh` caso 3e-bis (I9.13) | **PARCIAL** | etapa 18 alterada em `10f5e52` sem teste dirigido; pergunta de `MEMORIA_MODO` ausente (D7); Gate I9 não reexecutado; conf do operador com `MEMORIA_MODO` vazio e `HUGEPAGES_1G=22` residual; etapa 14 precisa ser reexecutada para instalar os hooks novos; passo 3 da migração (VM com memória comum) não executado | fase I9: tabela de provas, decisões I9.12-D1 a D7 e sequência de migração | teste da etapa 18, pergunta na etapa 3, reexecutar o Gate I9 |
 | Auditoria | 2026-09-03 | `8c84a54` (working tree limpa) | `PLANO-FINALIZACAO.md`, `.kiro/steering/{product,safety,structure,tech}.md`, linha `> **Status:**` de `.kiro/specs/*/{requirements,design,tasks}.md`; nenhum arquivo de código, teste, exemplo ou manifesto | verificação por leitura e `grep` (seção 1.6.1); `printf` posicional medido; recontagem da superfície humana; 26 suítes `tests/test-*.sh` aprovadas (sem a campanha I0) e `run_tests.py` com 1146 casos OK; `test-python-core.sh` só reprova sob `FORCE_COLOR=3` do ambiente | plano realinhado: 3 menções a "falta a etapa 18" corrigidas para "feita sem teste dirigido"; decisões I9B-D1 a D12 recuperadas; 3.10 reescrita; seções 10, 12 e 16 completadas; I13.4/11.2 alinhados ao perfil retornável; steering do Kiro atualizado | não reexecutou o gate canônico; não escreveu teste nem código; specs do Kiro só no cabeçalho de status | seção 1.6 | executor: pendências 1 a 3 de I9.12, depois Gate I9; operador: pendência 4 |
 | Decisão CI local | 2026-09-03 | `f2c4258` + working tree | workflow já removido pelo usuário; `PLANO-FINALIZACAO.md`, `tests/manifests/i1-files.txt`, `tests/run-gate-i1.sh` | `bash -n` do runner/checker; `git diff --check`; manifesto cumulativo I9 com 161 caminhos | **APROVADO para o escopo documental**: sem CI ativa; gates locais permanecem obrigatórios | gate canônico de cerca de 1 hora não executado; CI futura exige nova autorização explícita | seção 6 e saída desta sessão | manter pendências 1 a 3 de I9.12, depois Gate I9 |
+| I9.12 (retomada, tentativa 1) | 2026-09-05 | `af07725` + working tree | em curso; baseline registrado antes da primeira mudança; decisões I9.12-D8 a D14 gravadas na fase I9; **passo 1** `libexec/passthrough_core/resources.py` e `tests/python/test_resources.py` | baseline VERDE: `run_tests.py` **1146 casos OK**; `test-python-core.sh` rc 0 (com `env -u FORCE_COLOR`); `test-i912-memoria-hooks.sh` **87 casos** rc 0; `test-cpu-hugepages.sh`, `test-i5-cpu-boot.sh`, `test-i4-config.sh`, `test-i0-characterization.sh`, `test-inventario-redetectar.sh`, `test-i9-hooks-isolados.sh` rc 0; `check-phase-manifest.sh I9` 161 caminhos; `test-i1-safety-envelope.sh` 30 mutadores + 23 seleções rc 0 | **EM CURSO** | nada implementado ainda nesta linha; o Gate I9 continua sem veredito observado | esta seção e a fase I9 | passo 1 FEITO (`MODES` com três modos, `returnable` sempre 1, ramo do perfil estático removido, `PlanBootModeTests` virou `PlanPoolPreexistenteTests` com o oráculo anterior citado; 1146 casos OK); seguir pelos passos 2 a 12: núcleo sem `hugetlb-1g-boot`, `HUGEPAGES_1G` depreciada, XML por tamanho de página, etapas 3/14/17, suíte nova das etapas 17 e 18, docs, gate |
 | I10 | | | | | não iniciado | | | aguarda I9 |
 | I11 | | | | | não iniciado | | | aguarda I10 |
 | I12 | | | | | não iniciado | | | aguarda I11 |

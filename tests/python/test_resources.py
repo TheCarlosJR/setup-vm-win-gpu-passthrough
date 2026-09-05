@@ -561,22 +561,30 @@ class PlanModosTests(unittest.TestCase):
         self.assertEqual(dados["page_kb"], PAGE_1G)
         self.assertEqual(dados["pages_needed"], 22)
 
-    def test_hugetlb_1g_boot_nao_e_runtime_nem_retornavel(self) -> None:
-        dados = plano("hugetlb-1g-boot", vm_ram_mib=22528)
-        self.assertEqual(dados["valid"], 1)
-        self.assertEqual(dados["runtime"], 0)
-        self.assertEqual(dados["returnable"], 0)
-        self.assertEqual(dados["page_kb"], PAGE_1G)
-        self.assertEqual(dados["pages_needed"], 22)
-        self.assertEqual(dados["acquire_delta"], 0)
-        self.assertEqual(dados["baseline_nr"], 22)
+    def test_perfil_de_reserva_estatica_saiu_do_catalogo(self) -> None:
+        """I9.12-D8: `hugetlb-1g-boot` foi REMOVIDO do catálogo de modos.
 
-    def test_matriz_dos_quatro_modos(self) -> None:
+        Oráculo anterior (árvore de `af07725`): o modo era aceito com
+        `valid=1`, `runtime=0`, `returnable=0`, `page_kb=1048576`,
+        `pages_needed=22` e `baseline_nr=22`. Agora ele é apenas mais um texto
+        desconhecido, e recusa como qualquer outro: `valid=0`, `transient=0`
+        (recusa estrutural, que esperar não conserta), e o campo `mode` volta
+        vazio porque a recusa acontece antes de ler a fotografia.
+        """
+        dados = plano("hugetlb-1g-boot", vm_ram_mib=22528)
+        self.assertEqual(dados["valid"], 0)
+        self.assertEqual(dados["transient"], 0)
+        self.assertEqual(dados["mode"], "")
+        self.assertIn("Modo de memória desconhecido: hugetlb-1g-boot.", dados["error"])
+        self.assertNotIn("hugetlb-1g-boot", dados["error"].split("Aceitos:")[1])
+        self.assertNotIn("hugetlb-1g-boot", resources.MODES)
+
+    def test_matriz_dos_tres_modos(self) -> None:
+        # I9.12: eram quatro modos até `af07725`; `hugetlb-1g-boot` saiu por D8.
         esperado = {
             "normal": (0, 1, 0),
             "hugetlb-2m": (1, 1, PAGE_2M),
             "hugetlb-1g": (1, 1, PAGE_1G),
-            "hugetlb-1g-boot": (0, 0, PAGE_1G),
         }
         self.assertEqual(sorted(esperado), sorted(resources.MODES))
         for mode, (runtime, returnable, page_kb) in esperado.items():
@@ -592,7 +600,7 @@ class PlanModosTests(unittest.TestCase):
         self.assertEqual(dados["valid"], 0)
         self.assertEqual(dados["mode"], "")
         self.assertIn("Modo de memória desconhecido: hugetlb-4k.", dados["error"])
-        self.assertIn("normal, hugetlb-2m, hugetlb-1g, hugetlb-1g-boot", dados["error"])
+        self.assertIn("normal, hugetlb-2m, hugetlb-1g.", dados["error"])
 
     def test_modo_vazio_e_modo_nao_texto(self) -> None:
         dados = resources.plan({})
@@ -609,46 +617,66 @@ class PlanModosTests(unittest.TestCase):
         self.assertNotIn("rm -rf", dados["error"])
 
 
-class PlanBootModeTests(unittest.TestCase):
-    def test_reserva_estatica_menor_que_o_necessario_recusa(self) -> None:
+class PlanPoolPreexistenteTests(unittest.TestCase):
+    """I9.12: era `PlanBootModeTests`, do perfil de reserva estática removido por D8.
+
+    O que o perfil legado provava continua valendo e continua provado, agora
+    pelo modo de runtime `hugetlb-1g` sobre um pool que o boot deixou pronto:
+    pool que já cobre a necessidade é BASELINE de terceiro, o delta é 0 e a
+    operação não adquire nada. O que MUDOU é que o pool insuficiente deixou de
+    ser recusa ("reserva estática menor que o necessário") e passou a ser
+    aquisição do delta que falta, porque em runtime o modo pode crescer o pool.
+    """
+
+    def test_pool_preexistente_menor_que_o_necessario_adquire_o_delta(self) -> None:
+        # Oráculo anterior: `hugetlb-1g-boot` recusava com "Reserva estática de
+        # 8 páginas de 1048576 kB é menor que as 22 exigidas."
         pequena = foto(pools=((PAGE_1G, 8, 8),))
-        dados = plano("hugetlb-1g-boot", snapshot=pequena, vm_ram_mib=22528)
-        self.assertEqual(dados["valid"], 0)
-        self.assertIn(
-            "Reserva estática de 8 páginas de 1048576 kB é menor que as 22 exigidas.",
-            dados["error"],
-        )
-        self.assertEqual(dados["runtime"], 0)
-        self.assertEqual(dados["returnable"], 0)
+        dados = plano("hugetlb-1g", snapshot=pequena, vm_ram_mib=22528)
+        self.assertEqual(dados["valid"], 1)
+        self.assertEqual(dados["runtime"], 1)
+        self.assertEqual(dados["returnable"], 1)
         self.assertEqual(dados["pages_needed"], 22)
         self.assertEqual(dados["baseline_nr"], 8)
-        self.assertEqual(dados["acquire_delta"], 0)
+        self.assertEqual(dados["acquire_delta"], 14)
+        self.assertEqual(dados["target_nr"], 22)
 
-    def test_reserva_estatica_exata_aceita_sem_nada_a_devolver(self) -> None:
-        dados = plano("hugetlb-1g-boot", snapshot=SO_1G, vm_ram_mib=22528)
+    def test_pool_preexistente_exato_nao_adquire_nada(self) -> None:
+        dados = plano("hugetlb-1g", snapshot=SO_1G, vm_ram_mib=22528)
         self.assertEqual(dados["valid"], 1)
         self.assertEqual(dados["error"], "")
-        self.assertEqual(dados["returnable"], 0)
+        self.assertEqual(dados["returnable"], 1)
         self.assertEqual(dados["acquire_delta"], 0)
-        self.assertEqual(dados["target_nr"], 0)
+        self.assertEqual(dados["target_nr"], 22)
 
-    def test_reserva_estatica_maior_tambem_aceita(self) -> None:
-        dados = plano("hugetlb-1g-boot", snapshot=SO_1G, vm_ram_mib=8192)
+    def test_pool_preexistente_maior_e_baseline_a_preservar(self) -> None:
+        dados = plano("hugetlb-1g", snapshot=SO_1G, vm_ram_mib=8192)
         self.assertEqual(dados["valid"], 1)
         self.assertEqual(dados["pages_needed"], 8)
         self.assertEqual(dados["baseline_nr"], 22)
+        self.assertEqual(dados["acquire_delta"], 0)
+        # Nunca desce abaixo do que já existia: o alvo é o baseline, não 8.
+        self.assertEqual(dados["target_nr"], 22)
 
-    def test_modo_de_boot_ignora_consumidor_externo_por_desenho(self) -> None:
-        """Comportamento declarado: o perfil legado só prova que a reserva cobre.
+    def test_consumidor_externo_no_pool_preexistente_recusa(self) -> None:
+        """I9.12: aqui a remoção do perfil legado MUDA o veredito, e para melhor.
 
-        Registrado para que uma mudança nesse desenho seja deliberada, e não
-        efeito colateral: hoje 22 páginas em uso por outra VM não impedem o
-        plano de boot, porque ele não adquire nem devolve nada.
+        Oráculo anterior: com `hugetlb-1g-boot`, 22 páginas em uso por outra VM
+        NÃO impediam o plano (`valid=1`), porque aquele modo não adquiria nem
+        devolvia nada e só conferia cobertura. Em runtime o consumidor externo
+        volta a ser o que o requisito manda: recusa, e transitória, porque
+        depende do pool naquele instante e o hook a reavalia no start.
         """
         ocupado = foto(pools=((PAGE_1G, 22, 0, 0, 0),))
-        dados = plano("hugetlb-1g-boot", snapshot=ocupado, vm_ram_mib=22528)
-        self.assertEqual(dados["valid"], 1)
+        dados = plano("hugetlb-1g", snapshot=ocupado, vm_ram_mib=22528)
+        self.assertEqual(dados["valid"], 0)
+        self.assertEqual(dados["transient"], 1)
         self.assertEqual(dados["baseline_free"], 0)
+        self.assertIn(
+            "Pool de 1048576 kB tem 22 página(s) em uso por outro consumidor;"
+            " start recusado.",
+            dados["error"],
+        )
 
 
 class PlanRuntimeTests(unittest.TestCase):
@@ -1611,15 +1639,21 @@ class ContratoDeChavesTests(unittest.TestCase):
         dados = resources.parse_snapshot(SO_1G)
         real = resources.fingerprint(dados)
         pool_parcial = foto(pools=((PAGE_1G, 22, 14),))
-        reserva_curta = foto(pools=((PAGE_1G, 8, 8),))
+        # I9.12: era `foto(pools=((PAGE_1G, 8, 8),))` recusada pelo perfil de
+        # reserva estática. Em runtime esse pool curto é aceitável (adquire o
+        # delta), então o que recusa aqui é a RAM: 14 páginas de 1 GiB não
+        # cabem nos 3,95 GiB de `MemAvailable` deste host.
+        pool_curto_sem_ram = foto(
+            pools=((PAGE_1G, 8, 8),), memavailable=MEMAVAIL_APERTADA_KB
+        )
         depois_de_ler = (
             (plano("hugetlb-2m", snapshot=SO_1G, vm_ram_mib=8192), SO_1G),
             (plano("hugetlb-1g", snapshot=SO_1G, vm_ram_mib=30721), SO_1G),
             (plano("hugetlb-1g", snapshot=pool_parcial, vm_ram_mib=22528), pool_parcial),
             (plano("hugetlb-1g", snapshot=HOST_APERTADO, vm_ram_mib=30720), HOST_APERTADO),
             (
-                plano("hugetlb-1g-boot", snapshot=reserva_curta, vm_ram_mib=22528),
-                reserva_curta,
+                plano("hugetlb-1g", snapshot=pool_curto_sem_ram, vm_ram_mib=22528),
+                pool_curto_sem_ram,
             ),
         )
         for indice, (recusa, fotografia) in enumerate(depois_de_ler):

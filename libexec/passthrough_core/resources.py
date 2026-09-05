@@ -53,14 +53,14 @@ MIB_PER_GIB = 1024
 MODE_NORMAL = "normal"
 MODE_HUGETLB_2M = "hugetlb-2m"
 MODE_HUGETLB_1G = "hugetlb-1g"
-MODE_HUGETLB_1G_BOOT = "hugetlb-1g-boot"
 
-MODES = (MODE_NORMAL, MODE_HUGETLB_2M, MODE_HUGETLB_1G, MODE_HUGETLB_1G_BOOT)
+MODES = (MODE_NORMAL, MODE_HUGETLB_2M, MODE_HUGETLB_1G)
 
 # Modos que adquirem e devolvem página em runtime. Fora desta tupla, o ciclo de
-# vida não toca no pool: `normal` não usa hugetlb, e `hugetlb-1g-boot` recebe as
-# páginas do boot e por definição NÃO as devolve (é o perfil legado opt-in,
-# declaradamente não retornável).
+# vida não toca no pool: `normal` não usa hugetlb e o kernel devolve tudo quando
+# o QEMU termina. Não existe mais modo que receba a página pronta do boot: o
+# perfil de reserva estática foi REMOVIDO do catálogo em I9.12-D8, e qualquer
+# valor fora de `MODES` é recusado como desconhecido, com `transient=0`.
 RUNTIME_MODES = (MODE_HUGETLB_2M, MODE_HUGETLB_1G)
 
 # Tamanho de página por modo, em kB, como o sysfs nomeia os diretórios
@@ -68,7 +68,6 @@ RUNTIME_MODES = (MODE_HUGETLB_2M, MODE_HUGETLB_1G)
 MODE_PAGE_KB = {
     MODE_HUGETLB_2M: 2048,
     MODE_HUGETLB_1G: 1048576,
-    MODE_HUGETLB_1G_BOOT: 1048576,
 }
 
 # Estados da operação. O ciclo normal é PREPARED -> ACQUIRED -> VERIFIED ->
@@ -383,10 +382,14 @@ def plan(payload: Mapping[str, Any]) -> dict:
 
     runtime = 1 if mode in RUNTIME_MODES else 0
     # `returnable` é o que o requisito mede: o modo devolve o recurso ao host
-    # quando a VM para? `normal` devolve porque nunca tirou; os modos de runtime
-    # devolvem por construção; `hugetlb-1g-boot` não devolve, e mentir sobre
-    # isso seria o pior resultado possível deste módulo.
-    returnable = 0 if mode == MODE_HUGETLB_1G_BOOT else 1
+    # quando a VM para? `normal` devolve porque nunca tirou e os modos de
+    # runtime devolvem por construção, então hoje todo modo ACEITO é retornável
+    # e o campo vale 1 sempre. Ele continua existindo, e continua sendo
+    # publicado, porque é contrato do canal de pares (o hook e a etapa leem
+    # `returnable`) e porque um modo não retornável poder voltar ao catálogo é
+    # exatamente a decisão que I9.12-D8 tomou e pode ser revista; o dia em que
+    # isso acontecer, quem esquecer de publicar 0 aqui mente sobre o requisito.
+    returnable = 1
 
     base = _plan_vazio(mode)
     base["runtime"] = runtime
@@ -425,18 +428,6 @@ def plan(payload: Mapping[str, Any]) -> dict:
     if erro:
         return _recusar(base, erro)
     base["pages_needed"] = pages
-
-    if mode == MODE_HUGETLB_1G_BOOT:
-        # Perfil legado: as páginas vêm do boot e o ciclo de vida não adquire
-        # nem devolve nada. O que ele PODE fazer é provar que a reserva estática
-        # cobre a necessidade, e recusar o start se não cobrir.
-        if pool["nr"] < pages:
-            return _recusar(
-                base,
-                "Reserva estática de %d páginas de %d kB é menor que as %d exigidas."
-                % (pool["nr"], page_kb, pages),
-            )
-        return base
 
     # --- daqui para baixo, modos de runtime -----------------------------------
     # Consumidor externo: alguém já usa páginas deste pool. O requisito manda
