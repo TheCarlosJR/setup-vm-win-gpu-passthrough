@@ -801,6 +801,18 @@ def memory_backing_state(payload: Mapping[str, Any]) -> dict:
 
 # --- Subcomando: validação de CPU/HugePages ---------------------------------
 
+# I9.12-D11: tamanho exigido por modo pedido ao validador, em bytes. `nao` e
+# `ignorar` não exigem tamanho nenhum e valem 0; a diferença entre os dois é que
+# `nao` também RECUSA a presença de HugePages, e `ignorar` não olha.
+_HUGEPAGES_MODE_BYTES = {
+    "nao": 0,
+    "2m": 2 * 1024 ** 2,
+    "1g": 1024 ** 3,
+    "ignorar": 0,
+}
+_HUGEPAGES_MODE_LABEL = {"2m": "2 MiB", "1g": "1 GiB"}
+
+
 
 def validate_cpu_pinning(payload: Mapping[str, Any]) -> dict:
     """Prova, no XML dado, o pinning e a topologia gerenciados pela etapa 16.
@@ -808,6 +820,12 @@ def validate_cpu_pinning(payload: Mapping[str, Any]) -> dict:
     Substitui `validar_xml_cpu_pinning` preservando cada recusa: cardinalidade,
     conjunto exato de CPUs, ordem canônica de vcpupin, modo/check/migratable,
     topologia, memória e o modo de HugePages pedido.
+
+    I9.12-D11: `hugepages_mode` era `sim|nao|ignorar`, e `sim` significava
+    1 GiB. Agora é `nao|2m|1g|ignorar`, porque com dois tamanhos de página em
+    jogo "sim" deixou de identificar um estado: um XML de 2 MiB passaria numa
+    validação pedida para 1 GiB. A comparação é em BYTES, então `2048 KiB` e
+    `2 MiB` são o mesmo estado, como o libvirt entende.
     """
     xml = _require_text(payload, "xml")
     vm_spec = _require_text(payload, "cpus_vm")
@@ -817,9 +835,10 @@ def validate_cpu_pinning(payload: Mapping[str, Any]) -> dict:
     threads = _require_int(payload, "threads", 1)
     ram_mb = _require_int(payload, "ram_mb", 1)
     huge_mode = _optional_text(payload, "hugepages_mode", "ignorar")
-    if huge_mode not in ("sim", "nao", "ignorar"):
+    if huge_mode not in _HUGEPAGES_MODE_BYTES:
         raise DataError(
-            "modo de HugePages inválido: %s" % safe_label(huge_mode)
+            "modo de HugePages inválido: %s. Aceitos: %s."
+            % (safe_label(huge_mode), ", ".join(_HUGEPAGES_MODE_BYTES))
         )
 
     expected_vm = _expand_cpu_list(vm_spec, "cpus_vm")
@@ -919,7 +938,8 @@ def validate_cpu_pinning(payload: Mapping[str, Any]) -> dict:
     huge_nodes = xmlutil.direct(backing, "hugepages") if backing is not None else []
     if len(huge_nodes) > 1:
         raise DataError("<hugepages> duplicado em <memoryBacking>.")
-    if huge_mode == "sim":
+    esperado_bytes = _HUGEPAGES_MODE_BYTES[huge_mode]
+    if esperado_bytes:
         if backing is None or len(huge_nodes) != 1:
             raise DataError("memoryBacking/hugepages precisa existir exatamente uma vez")
         pages = xmlutil.direct(huge_nodes[0], "page")
@@ -927,8 +947,11 @@ def validate_cpu_pinning(payload: Mapping[str, Any]) -> dict:
             raise DataError("hugepages precisa declarar exatamente uma página")
         if _memory_bytes(
             pages[0].get("size", ""), pages[0].get("unit", ""), "KiB", "hugepages/page"
-        ) != 1024 ** 3:
-            raise DataError("a página declarada no XML não tem exatamente 1 GiB")
+        ) != esperado_bytes:
+            raise DataError(
+                "a página declarada no XML não tem exatamente %s"
+                % _HUGEPAGES_MODE_LABEL[huge_mode]
+            )
     elif huge_mode == "nao" and huge_nodes:
         raise DataError("o XML ainda exige HugePages")
 
@@ -1098,14 +1121,61 @@ def _operation_disk_discard(root: ET.Element, options: Mapping[str, Any]) -> boo
     return True
 
 
+# I9.12-D11: tamanho de página declarado no XML, por modo de memória. `normal`
+# não declara página nenhuma: ele REMOVE a exigência, e é por isso que não tem
+# entrada aqui. Os valores são os atributos literais de `<page>`, e o par
+# (size, unit) é o que o libvirt aceita; a comparação, essa sim, é em bytes.
+_MEMORY_MODE_PAGE = {
+    "hugetlb-2m": ("2048", "KiB"),
+    "hugetlb-1g": ("1", "GiB"),
+}
+MEMORY_MODES = ("normal",) + tuple(_MEMORY_MODE_PAGE)
+
+
+def _drop_hugepages(root: ET.Element) -> None:
+    """Tira `hugepages` de `memoryBacking`, e o `memoryBacking` se ficar vazio.
+
+    Extraído em I9.12 porque `remove-hugepages` e o modo `normal` de
+    `cpu-pinning` precisam da MESMA regra: um `memoryBacking` que existia só
+    para hospedar as HugePages não pode sobrar como casca vazia, mas um que
+    carregue `<locked/>`, `<nosharepages/>` ou atributo não gerenciado tem de
+    permanecer intacto. Duas cópias dessa regra divergiriam no primeiro ajuste.
+    """
+    backing = xmlutil.at_most_one(root, "memoryBacking", "XML de domínio")
+    if backing is None:
+        return
+    for child in list(backing):
+        if child.tag == "hugepages":
+            backing.remove(child)
+    if (
+        not xmlutil.elements(backing)
+        and not backing.attrib
+        and not (backing.text or "").strip()
+    ):
+        root.remove(backing)
+
+
 def _operation_cpu_pinning(root: ET.Element, options: Mapping[str, Any]) -> bool:
-    """Aplica pinning, topologia e página de 1 GiB preservando o não gerenciado."""
+    """Aplica pinning, topologia e a política de memória de `memory_mode`.
+
+    I9.12-D11: a operação era fixa em página de 1 GiB. Agora `memory_mode` é
+    OBRIGATÓRIO e decide o que acontece com `memoryBacking/hugepages`:
+    `normal` remove a exigência, `hugetlb-2m` declara 2048 KiB e `hugetlb-1g`
+    declara 1 GiB. Uma operação parametrizada, e não três operações, porque a
+    regra 8 proíbe dois caminhos mutantes para o mesmo efeito.
+    """
     vm_spec = _require_text(options, "cpus_vm")
     host_spec = _require_text(options, "cpus_host")
     vcpus = _require_int(options, "vcpus", 1)
     cores = _require_int(options, "cores", 1)
     threads = _require_int(options, "threads", 1)
     ram_mb = _require_int(options, "ram_mb", 1)
+    memory_mode = _require_text(options, "memory_mode")
+    if memory_mode not in MEMORY_MODES:
+        raise DataError(
+            "modo de memória inválido: %s. Aceitos: %s."
+            % (safe_label(memory_mode), ", ".join(MEMORY_MODES))
+        )
     vm_cpus = _expand_cpu_list(vm_spec, "cpus_vm")
     _expand_cpu_list(host_spec, "cpus_host")
     if len(vm_cpus) != vcpus:
@@ -1155,33 +1225,33 @@ def _operation_cpu_pinning(root: ET.Element, options: Mapping[str, Any]) -> bool
         {"sockets": "1", "dies": "1", "cores": str(cores), "threads": str(threads)},
     )
 
-    backing = xmlutil.ensure_one(root, "memoryBacking", _ANCHORS_MEMORY_BACKING)
-    for child in list(backing):
-        if child.tag == "hugepages":
-            backing.remove(child)
-    hugepages = ET.Element("hugepages")
-    hugepages.append(ET.Element("page", {"size": "1", "unit": "GiB"}))
-    backing.insert(0, hugepages)
+    if memory_mode == "normal":
+        _drop_hugepages(root)
+    else:
+        size, unit = _MEMORY_MODE_PAGE[memory_mode]
+        backing = xmlutil.ensure_one(root, "memoryBacking", _ANCHORS_MEMORY_BACKING)
+        for child in list(backing):
+            if child.tag == "hugepages":
+                backing.remove(child)
+        hugepages = ET.Element("hugepages")
+        hugepages.append(ET.Element("page", {"size": size, "unit": unit}))
+        backing.insert(0, hugepages)
     return xmlutil.fingerprint(root) != before
 
 
 def _operation_remove_hugepages(root: ET.Element, options: Mapping[str, Any]) -> bool:
-    """Remove a exigência de HugePages, apagando `memoryBacking` só se vazio."""
+    """Remove a exigência de HugePages, apagando `memoryBacking` só se vazio.
+
+    Continua existindo depois de I9.12-D11 porque é a FASE 1 do `--desfazer` da
+    etapa 17: ela tira a exigência do XML sem tocar em pinning, topologia nem
+    RAM, que é o que o modo `normal` de `cpu-pinning` faria junto.
+    """
     if options:
         raise DataError("a operação remove-hugepages não aceita opções.")
-    backing = xmlutil.at_most_one(root, "memoryBacking", "XML de domínio")
-    if backing is None:
+    if xmlutil.at_most_one(root, "memoryBacking", "XML de domínio") is None:
         return False
     before = xmlutil.fingerprint(root)
-    for child in list(backing):
-        if child.tag == "hugepages":
-            backing.remove(child)
-    if (
-        not xmlutil.elements(backing)
-        and not backing.attrib
-        and not (backing.text or "").strip()
-    ):
-        root.remove(backing)
+    _drop_hugepages(root)
     return xmlutil.fingerprint(root) != before
 
 

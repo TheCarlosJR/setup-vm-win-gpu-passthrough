@@ -539,12 +539,16 @@ exigir_vm_desligada() {
 
 XML_CPU_ERRO=""
 xml_cpu_gerar_candidato() {
-    # Gera XML com pinning, topologia e página explicitamente de 1 GiB sem
+    # Gera XML com pinning, topologia e a política de memória escolhida, sem
     # remover ajustes não gerenciados de cputune/memoryBacking.
-    # Assinatura preservada: ORIGEM DESTINO CPUS_VM CPUS_HOST VCPUS CORES
-    # THREADS RAM_MB. O destino só é escrito quando o candidato é aceito.
+    # Assinatura: ORIGEM DESTINO CPUS_VM CPUS_HOST VCPUS CORES THREADS RAM_MB
+    # MODO. O destino só é escrito quando o candidato é aceito.
+    #
+    # I9.12-D11: o nono argumento é o valor de MEMORIA_MODO (normal,
+    # hugetlb-2m ou hugetlb-1g). Antes a página era fixa em 1 GiB e não havia
+    # o que escolher; agora `normal` REMOVE a exigência do XML no mesmo apply.
     local origem="$1" destino="$2" cpus_vm="$3" cpus_host="$4"
-    local vcpus="$5" cores="$6" threads="$7" ram_mb="$8"
+    local vcpus="$5" cores="$6" threads="$7" ram_mb="$8" modo="${9:-}"
     local -a permitidas=(
         "${CORE_PARES_ENVELOPE[@]}"
         CHANGED OPERATION_COUNT FINGERPRINT_BEFORE FINGERPRINT_AFTER
@@ -564,6 +568,7 @@ xml_cpu_gerar_candidato() {
         op_0_cores "$cores"
         op_0_threads "$threads"
         op_0_ram_mb "$ram_mb"
+        op_0_memory_mode "$modo"
     )
     if ! python_core_candidato permitidas XMLCPU_ payload "$destino" 2>/dev/null; then
         XML_CPU_ERRO="$(_core_diagnostico 'Falha ao gerar o XML candidato.')"
@@ -592,7 +597,10 @@ xml_cpu_remover_hugepages() {
 
 validar_xml_cpu_pinning() {
     # validar_xml_cpu_pinning XML CPUS_VM CPUS_HOST VCPUS CORES THREADS RAM_MB MODO
-    # MODO: sim exige página de 1 GiB; nao exige ausência; ignorar não avalia.
+    # MODO (I9.12-D11): nao exige ausência de HugePages; 2m exige exatamente
+    # uma página de 2 MiB; 1g exige exatamente uma de 1 GiB; ignorar não avalia.
+    # O valor "sim" deixou de existir: com dois tamanhos em jogo ele não
+    # identificava mais um estado.
     local arquivo="$1" cpus_vm="$2" cpus_host="$3" vcpus="$4"
     local cores="$5" threads="$6" ram_mb="$7" modo="${8:-ignorar}"
     local -a permitidas=(

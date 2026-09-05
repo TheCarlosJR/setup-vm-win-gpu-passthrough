@@ -240,12 +240,14 @@ passo
 # --- 4. CPU: candidato, validação e HugePages ---------------------------------
 
 CPU_CANDIDATO="$TMP/cpu.xml"
-xml_cpu_gerar_candidato "$ORIGINAL" "$CPU_CANDIDATO" '2-5' '0-1,6-7' 4 2 2 8192 \
+# I9.12-D11: nono argumento (MEMORIA_MODO) na geração; `sim` virou `1g` na
+# validação. hugetlb-1g reproduz o XML que a operação gerava fixo até `af07725`.
+xml_cpu_gerar_candidato "$ORIGINAL" "$CPU_CANDIDATO" '2-5' '0-1,6-7' 4 2 2 8192 hugetlb-1g \
     || falha "candidato de CPU: $XML_CPU_ERRO"
-validar_xml_cpu_pinning "$CPU_CANDIDATO" '2-5' '0-1,6-7' 4 2 2 8192 sim \
+validar_xml_cpu_pinning "$CPU_CANDIDATO" '2-5' '0-1,6-7' 4 2 2 8192 1g \
     || falha "validação de CPU: $XML_CPU_ERRO"
 RC=0
-validar_xml_cpu_pinning "$CPU_CANDIDATO" '2-5' '0-1,6-7' 4 2 2 4096 sim || RC=$?
+validar_xml_cpu_pinning "$CPU_CANDIDATO" '2-5' '0-1,6-7' 4 2 2 4096 1g || RC=$?
 [[ $RC -ne 0 ]] || falha 'RAM divergente devia reprovar'
 [[ -n $XML_CPU_ERRO ]] || falha 'validação reprovada sem diagnóstico'
 
@@ -266,7 +268,7 @@ COM_SHARES="$TMP/com-shares.xml"
 sed -e "s|<vcpu placement='static'>4</vcpu>|<vcpu placement='static'>4</vcpu><cputune><shares>2048</shares></cputune>|" \
     "$ORIGINAL" > "$COM_SHARES"
 CPU_SHARES="$TMP/cpu-shares.xml"
-xml_cpu_gerar_candidato "$COM_SHARES" "$CPU_SHARES" '2-5' '0-1,6-7' 4 2 2 8192 \
+xml_cpu_gerar_candidato "$COM_SHARES" "$CPU_SHARES" '2-5' '0-1,6-7' 4 2 2 8192 hugetlb-1g \
     || falha "candidato com shares: $XML_CPU_ERRO"
 grep -q '<shares>2048</shares>' "$CPU_SHARES" || falha 'shares não gerenciado foi perdido'
 xml_dominio_equivalente "$CPU_SHARES" "$CPU_SHARES" cpu-unmanaged \

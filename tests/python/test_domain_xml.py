@@ -472,6 +472,9 @@ class MemoryBackingTests(unittest.TestCase):
             domain_xml.memory_backing_state({"xml": fx.domain(memory_backing=backing)})
 
 
+# I9.12-D11: `memory_mode` é OBRIGATÓRIO na operação. O padrão do dicionário é
+# `hugetlb-1g` porque era exatamente o que a operação fazia fixo até `af07725`,
+# e assim todo caso herdado continua exercitando o mesmo XML de antes.
 CPU_PINNING_OPTIONS = {
     "cpus_vm": "2-5",
     "cpus_host": "0-1,6-7",
@@ -479,6 +482,15 @@ CPU_PINNING_OPTIONS = {
     "cores": 2,
     "threads": 2,
     "ram_mb": 8192,
+    "memory_mode": "hugetlb-1g",
+}
+
+# O mesmo conjunto, sem `memory_mode`, para montar payload do VALIDADOR: ele
+# recebe `hugepages_mode`, que é outra coisa, e não conhece `memory_mode`.
+VALIDATE_CPU_OPTIONS = {
+    chave: valor
+    for chave, valor in CPU_PINNING_OPTIONS.items()
+    if chave != "memory_mode"
 }
 
 
@@ -496,7 +508,7 @@ class CandidateCpuTests(unittest.TestCase):
         self.assertEqual(dados["changed"], 1)
         self.assertNotEqual(dados["fingerprint_before"], dados["fingerprint_after"])
         validado = domain_xml.validate_cpu_pinning(
-            dict({"xml": candidato, "hugepages_mode": "sim"}, **CPU_PINNING_OPTIONS)
+            dict({"xml": candidato, "hugepages_mode": "1g"}, **VALIDATE_CPU_OPTIONS)
         )
         self.assertEqual(validado["valid"], 1)
 
@@ -556,21 +568,147 @@ class CandidateCpuTests(unittest.TestCase):
         self.assertEqual(atual.get("unit"), "MiB")
 
 
+class CandidateCpuMemoryModeTests(unittest.TestCase):
+    """I9.12-D11: um caso por modo, com o XML gerado e a validação cruzada.
+
+    Até `af07725` a operação declarava `<page size="1" unit="GiB"/>` fixo e não
+    havia modo nenhum a escolher. Estes casos são a prova de que a página passou
+    a vir do `memory_mode` e de que `normal` REMOVE a exigência em vez de
+    declarar uma página de tamanho zero.
+    """
+
+    ESPERADO = {
+        "normal": 0,
+        "hugetlb-2m": 2 * 1024 ** 2,
+        "hugetlb-1g": 1024 ** 3,
+    }
+
+    def test_cada_modo_declara_o_seu_tamanho(self) -> None:
+        for modo, page_bytes in self.ESPERADO.items():
+            with self.subTest(modo=modo):
+                _dados, candidato = candidato_cpu(fx.domain(), memory_mode=modo)
+                estado = domain_xml.memory_backing_state({"xml": candidato})
+                self.assertEqual(estado["page_bytes"], page_bytes)
+                self.assertEqual(estado["hugepages_count"], 0 if not page_bytes else 1)
+
+    def test_validador_aprova_o_proprio_modo_e_recusa_os_outros(self) -> None:
+        rotulo = {"normal": "nao", "hugetlb-2m": "2m", "hugetlb-1g": "1g"}
+        for modo, esperado in rotulo.items():
+            _dados, candidato = candidato_cpu(fx.domain(), memory_mode=modo)
+            for pedido in ("nao", "2m", "1g"):
+                with self.subTest(modo=modo, pedido=pedido):
+                    payload = dict(
+                        {"xml": candidato, "hugepages_mode": pedido},
+                        **VALIDATE_CPU_OPTIONS
+                    )
+                    if pedido == esperado:
+                        self.assertEqual(
+                            domain_xml.validate_cpu_pinning(payload)["valid"], 1
+                        )
+                    else:
+                        with self.assertRaises(DataError):
+                            domain_xml.validate_cpu_pinning(payload)
+
+    def test_normal_remove_pagina_de_1_gib_e_o_memorybacking_vazio(self) -> None:
+        _dados, com_pagina = candidato_cpu(fx.domain(), memory_mode="hugetlb-1g")
+        self.assertIn("memoryBacking", com_pagina)
+        _dados, sem_pagina = candidato_cpu(com_pagina, memory_mode="normal")
+        self.assertNotIn("memoryBacking", sem_pagina)
+        self.assertNotIn("hugepages", sem_pagina)
+
+    def test_normal_preserva_memorybacking_com_conteudo_nao_gerenciado(self) -> None:
+        # A casca vazia some; um memoryBacking que carrega <locked/> fica.
+        origem = fx.domain(
+            memory_backing=(
+                "<memoryBacking><hugepages><page size='1' unit='GiB'/></hugepages>"
+                "<locked/></memoryBacking>"
+            )
+        )
+        _dados, candidato = candidato_cpu(origem, memory_mode="normal")
+        raiz = xmlutil.parse_document(candidato, "domain")
+        backing = xmlutil.exactly_one(raiz, "memoryBacking", "ctx")
+        self.assertEqual(len(xmlutil.direct(backing, "hugepages")), 0)
+        self.assertEqual(len(xmlutil.direct(backing, "locked")), 1)
+
+    def test_troca_de_modo_substitui_a_pagina_sem_acumular(self) -> None:
+        _dados, um_giga = candidato_cpu(fx.domain(), memory_mode="hugetlb-1g")
+        _dados, dois_megas = candidato_cpu(um_giga, memory_mode="hugetlb-2m")
+        estado = domain_xml.memory_backing_state({"xml": dois_megas})
+        self.assertEqual(estado["hugepages_count"], 1)
+        self.assertEqual(estado["page_count"], 1)
+        self.assertEqual(estado["page_bytes"], 2 * 1024 ** 2)
+
+    def test_cada_modo_e_idempotente(self) -> None:
+        for modo in self.ESPERADO:
+            with self.subTest(modo=modo):
+                _dados, primeiro = candidato_cpu(fx.domain(), memory_mode=modo)
+                dados, segundo = candidato_cpu(primeiro, memory_mode=modo)
+                self.assertEqual(primeiro, segundo)
+                self.assertEqual(dados["changed"], 0)
+
+    def test_modo_ausente_ou_invalido_e_recusado(self) -> None:
+        opcoes = dict(VALIDATE_CPU_OPTIONS)
+        with self.assertRaises(DataError):
+            domain_xml.build_candidate(
+                {
+                    "xml": fx.domain(),
+                    "operations": [{"op": "cpu-pinning", "options": opcoes}],
+                }
+            )
+        for ruim in ("", "hugetlb-1g-boot", "2m", "NORMAL", "; rm -rf /"):
+            with self.subTest(modo=ruim):
+                with self.assertRaises(DataError) as contexto:
+                    candidato_cpu(fx.domain(), memory_mode=ruim)
+                self.assertNotIn("rm -rf", str(contexto.exception))
+
+
 class ValidateCpuTests(unittest.TestCase):
     def setUp(self) -> None:
         _dados, self.candidato = candidato_cpu(fx.domain())
 
     def valida(self, xml: str, **overrides) -> dict:
-        payload = dict({"xml": xml, "hugepages_mode": "sim"}, **CPU_PINNING_OPTIONS)
+        # I9.12-D11: era `hugepages_mode="sim"`, que queria dizer 1 GiB.
+        payload = dict({"xml": xml, "hugepages_mode": "1g"}, **VALIDATE_CPU_OPTIONS)
         payload.update(overrides)
         return domain_xml.validate_cpu_pinning(payload)
 
     def test_aprovado(self) -> None:
         self.assertEqual(self.valida(self.candidato)["valid"], 1)
 
+    def test_modo_sim_deixou_de_existir(self) -> None:
+        # Oráculo anterior: "sim" era o valor que exigia 1 GiB e aprovava aqui.
+        with self.assertRaises(DataError) as contexto:
+            self.valida(self.candidato, hugepages_mode="sim")
+        self.assertIn("modo de HugePages inválido: sim", str(contexto.exception))
+
     def test_hugepages_modo_nao(self) -> None:
         with self.assertRaises(DataError):
             self.valida(self.candidato, hugepages_mode="nao")
+
+    def test_recusa_cruzada_entre_os_dois_tamanhos(self) -> None:
+        """Era impossível de exprimir com `sim`: um XML de 2 MiB passava.
+
+        É a razão de D11 trocar o vocabulário do validador. A comparação é em
+        bytes, então o diagnóstico nomeia o tamanho ESPERADO, não o encontrado.
+        """
+        _dados, dois_megas = candidato_cpu(fx.domain(), memory_mode="hugetlb-2m")
+        with self.assertRaises(DataError) as contexto:
+            self.valida(dois_megas, hugepages_mode="1g")
+        self.assertIn("não tem exatamente 1 GiB", str(contexto.exception))
+        with self.assertRaises(DataError) as contexto:
+            self.valida(self.candidato, hugepages_mode="2m")
+        self.assertIn("não tem exatamente 2 MiB", str(contexto.exception))
+        self.assertEqual(self.valida(dois_megas, hugepages_mode="2m")["valid"], 1)
+
+    def test_page_em_mib_equivale_a_2048_kib(self) -> None:
+        # A comparação é em bytes: `<page size="2" unit="MiB"/>` é o mesmo
+        # estado que `2048 KiB`, e o validador não pode exigir o texto.
+        _dados, dois_megas = candidato_cpu(fx.domain(), memory_mode="hugetlb-2m")
+        equivalente = dois_megas.replace(
+            '<page size="2048" unit="KiB" />', '<page size="2" unit="MiB" />'
+        )
+        self.assertNotEqual(equivalente, dois_megas)
+        self.assertEqual(self.valida(equivalente, hugepages_mode="2m")["valid"], 1)
 
     def test_hugepages_modo_ignorar(self) -> None:
         self.assertEqual(self.valida(self.candidato, hugepages_mode="ignorar")["valid"], 1)
@@ -955,6 +1093,7 @@ class CandidatePairsTests(unittest.TestCase):
                 "op_0_cores": "2",
                 "op_0_threads": "2",
                 "op_0_ram_mb": "8192",
+                "op_0_memory_mode": "hugetlb-1g",
             }
         )
         self.assertEqual(dados["changed"], 1)

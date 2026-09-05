@@ -249,12 +249,14 @@ function_rc xml_disco_qcow2_estado "$FIXTURES/xml/domain-multiple.xml" /vm/fixtu
 function_rc xml_disco_qcow2_estado "$FIXTURES/xml/domain-malformed.xml" /vm/fixture.qcow2
 [[ $FUNCTION_RC -eq 2 ]] || fail 'XML malformado não falhou fechado'
 CPU_CANDIDATE="$TMP/cpu-candidate.xml"
-xml_cpu_gerar_candidato "$FIXTURES/xml/domain-one.xml" "$CPU_CANDIDATE" '2-5' '0-1,6-7' 4 2 2 8192 || fail "candidato CPU: $XML_CPU_ERRO"
-validar_xml_cpu_pinning "$CPU_CANDIDATE" '2-5' '0-1,6-7' 4 2 2 8192 sim || fail "validação CPU: $XML_CPU_ERRO"
+# I9.12-D11: a geração recebe MEMORIA_MODO e o validador trocou `sim` por
+# `1g`; hugetlb-1g mantém byte a byte o XML caracterizado em I0.
+xml_cpu_gerar_candidato "$FIXTURES/xml/domain-one.xml" "$CPU_CANDIDATE" '2-5' '0-1,6-7' 4 2 2 8192 hugetlb-1g || fail "candidato CPU: $XML_CPU_ERRO"
+validar_xml_cpu_pinning "$CPU_CANDIDATE" '2-5' '0-1,6-7' 4 2 2 8192 1g || fail "validação CPU: $XML_CPU_ERRO"
 grep -q 'fixture-unmanaged="keep"' "$CPU_CANDIDATE" || fail 'candidato CPU removeu atributo não gerenciado'
 grep -q 'alias name="fixture-unmanaged"' "$CPU_CANDIDATE" || fail 'candidato CPU removeu elemento não gerenciado'
 grep -q 'iothreadpin' "$CPU_CANDIDATE" || fail 'candidato CPU removeu iothreadpin não gerenciado'
-expect_failure 'hotplug/NUMA ambíguo' xml_cpu_gerar_candidato "$FIXTURES/xml/domain-hotplug-numa.xml" "$TMP/hotplug-out.xml" '2-5' '0-1,6-7' 4 2 2 8192
+expect_failure 'hotplug/NUMA ambíguo' xml_cpu_gerar_candidato "$FIXTURES/xml/domain-hotplug-numa.xml" "$TMP/hotplug-out.xml" '2-5' '0-1,6-7' 4 2 2 8192 hugetlb-1g
 
 # Inventário atual/legado, ordem, ausência, truncamento e mudança de identidade.
 validar_inventario_principal "$FIXTURES/inventory/current.txt" || fail "$INVENTARIO_ERRO"

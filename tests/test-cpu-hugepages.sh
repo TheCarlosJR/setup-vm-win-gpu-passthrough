@@ -86,12 +86,19 @@ ET.SubElement(node, 'vcpu', {'id': '0', 'enabled': 'yes', 'hotpluggable': 'no', 
 root.insert(list(root).index(root.find('cputune')), node)
 tree.write(path, encoding='utf-8', xml_declaration=True)
 PY
+# I9.12-D11: as chamadas ganharam o nono argumento (MEMORIA_MODO) e o validador
+# trocou `sim` por `1g`. Os casos herdados usam hugetlb-1g porque era o que a
+# operação fazia fixo até `af07725`, então o XML esperado é o mesmo de antes.
 esperar_falha "metadados vcpus/hotplug" xml_cpu_gerar_candidato \
-    "$HOTPLUG" "$TMPDIR_TESTE/hotplug-candidato.xml" "0-1,4-5" "2-3,6-7" 4 2 2 4096
+    "$HOTPLUG" "$TMPDIR_TESTE/hotplug-candidato.xml" "0-1,4-5" "2-3,6-7" 4 2 2 4096 hugetlb-1g
+esperar_falha "modo de memória ausente" xml_cpu_gerar_candidato \
+    "$ORIGINAL" "$TMPDIR_TESTE/sem-modo.xml" "0-1,4-5" "2-3,6-7" 4 2 2 4096
+esperar_falha "modo de memória removido em D8" xml_cpu_gerar_candidato \
+    "$ORIGINAL" "$TMPDIR_TESTE/modo-legado.xml" "0-1,4-5" "2-3,6-7" 4 2 2 4096 hugetlb-1g-boot
 
-xml_cpu_gerar_candidato "$ORIGINAL" "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 \
+xml_cpu_gerar_candidato "$ORIGINAL" "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 hugetlb-1g \
     || falha "geração do XML candidato: $XML_CPU_ERRO"
-validar_xml_cpu_pinning "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 sim \
+validar_xml_cpu_pinning "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 1g \
     || falha "validação do XML candidato: $XML_CPU_ERRO"
 python3 - "$CANDIDATO" <<'PY'
 import sys
@@ -108,9 +115,9 @@ assert root.find("memoryBacking/hugepages/page").attrib == {'size': '1', 'unit':
 assert root.find("cpu/feature[@name='topoext']") is not None
 PY
 
-xml_cpu_gerar_candidato "$ORIGINAL" "$RECONFIGURADO" "0-1,4-5" "2-3,6-7" 4 2 2 8192 \
+xml_cpu_gerar_candidato "$ORIGINAL" "$RECONFIGURADO" "0-1,4-5" "2-3,6-7" 4 2 2 8192 hugetlb-1g \
     || falha "reconfiguração de RAM no candidato: $XML_CPU_ERRO"
-validar_xml_cpu_pinning "$RECONFIGURADO" "0-1,4-5" "2-3,6-7" 4 2 2 8192 sim \
+validar_xml_cpu_pinning "$RECONFIGURADO" "0-1,4-5" "2-3,6-7" 4 2 2 8192 1g \
     || falha "XML com RAM reconfigurada inválido: $XML_CPU_ERRO"
 python3 - "$RECONFIGURADO" <<'PY'
 import sys
@@ -130,9 +137,11 @@ ET.SubElement(tree.getroot().find('cputune'), 'vcpupin', {'vcpu': '0', 'cpuset':
 tree.write(path, encoding='utf-8', xml_declaration=True)
 PY
 esperar_falha "vcpupin duplicado" validar_xml_cpu_pinning \
-    "$INVALIDO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 sim
+    "$INVALIDO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 1g
 esperar_falha "RAM divergente" validar_xml_cpu_pinning \
-    "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 8192 sim
+    "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 8192 1g
+esperar_falha "modo sim saiu do validador" validar_xml_cpu_pinning \
+    "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 sim
 
 xml_cpu_remover_hugepages "$CANDIDATO" "$SEM_HUGE" \
     || falha "remoção de HugePages: $XML_CPU_ERRO"
@@ -145,6 +154,44 @@ root = ET.parse(sys.argv[1]).getroot()
 assert root.find('memoryBacking/hugepages') is None
 assert root.find('memoryBacking/locked') is not None
 PY
+
+# I9.12-D11: os dois modos que a fachada não sabia gerar antes.
+DOIS_MEGAS="$TMPDIR_TESTE/candidato-2m.xml"
+MEMORIA_NORMAL="$TMPDIR_TESTE/candidato-normal.xml"
+
+xml_cpu_gerar_candidato "$ORIGINAL" "$DOIS_MEGAS" "0-1,4-5" "2-3,6-7" 4 2 2 4096 hugetlb-2m \
+    || falha "geração do candidato em hugetlb-2m: $XML_CPU_ERRO"
+validar_xml_cpu_pinning "$DOIS_MEGAS" "0-1,4-5" "2-3,6-7" 4 2 2 4096 2m \
+    || falha "XML de 2 MiB recusado pelo próprio modo: $XML_CPU_ERRO"
+python3 - "$DOIS_MEGAS" <<'XMLCHK'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+assert root.find("memoryBacking/hugepages/page").attrib == {'size': '2048', 'unit': 'KiB'}
+assert root.find('memoryBacking/locked') is not None
+assert len(root.findall('cputune/vcpupin')) == 4
+XMLCHK
+esperar_falha "recusa cruzada 2m contra 1g" validar_xml_cpu_pinning \
+    "$DOIS_MEGAS" "0-1,4-5" "2-3,6-7" 4 2 2 4096 1g
+esperar_falha "recusa cruzada 1g contra 2m" validar_xml_cpu_pinning \
+    "$CANDIDATO" "0-1,4-5" "2-3,6-7" 4 2 2 4096 2m
+
+# `normal` sobre um XML que exigia 1 GiB: a exigência sai no mesmo apply, e o
+# memoryBacking sobrevive porque carrega <locked/> não gerenciado.
+xml_cpu_gerar_candidato "$CANDIDATO" "$MEMORIA_NORMAL" "0-1,4-5" "2-3,6-7" 4 2 2 4096 normal \
+    || falha "geração do candidato em normal: $XML_CPU_ERRO"
+validar_xml_cpu_pinning "$MEMORIA_NORMAL" "0-1,4-5" "2-3,6-7" 4 2 2 4096 nao \
+    || falha "XML sem HugePages recusado no modo normal: $XML_CPU_ERRO"
+python3 - "$MEMORIA_NORMAL" <<'XMLCHK'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+assert root.find('memoryBacking/hugepages') is None
+assert root.find('memoryBacking/locked') is not None
+assert len(root.findall('cputune/vcpupin')) == 4
+XMLCHK
+esperar_falha "normal recusado como 1g" validar_xml_cpu_pinning \
+    "$MEMORIA_NORMAL" "0-1,4-5" "2-3,6-7" 4 2 2 4096 1g
 
 # --desfazer precisa encerrar main, nunca cair novamente no fluxo de aplicação.
 (
