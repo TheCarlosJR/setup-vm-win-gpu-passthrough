@@ -78,16 +78,19 @@ verificar() {
     else
         v_erro "$BOOTLOADER_VALIDACAO_ERRO"
     fi
+    # I9.12-D12: MEMORIA_MODO entrou no lugar de HUGEPAGES_1G. Vazio é
+    # pendência de verdade, não padrão implícito: as etapas 14 e 17 recusam
+    # aplicar sem a decisão, e o requisito proíbe assumir um modo em silêncio.
     for var in VM_NAME GPU_PCI_ID GPU_VENDOR_DEVICE_ID \
                CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS \
-               VM_RAM_MB HUGEPAGES_1G DM_SERVICE; do
+               VM_RAM_MB MEMORIA_MODO DM_SERVICE; do
         if [ -n "${!var:-}" ]; then
             v_ok "$var=${!var}"
         else
             v_falta "$var ainda não definido."
             case "$var" in
                 CPUS_VM|CPUS_HOST|VM_VCPUS|VM_CORES|VM_THREADS) cpu_completa=0 ;;
-                VM_RAM_MB|HUGEPAGES_1G) memoria_completa=0 ;;
+                VM_RAM_MB) memoria_completa=0 ;;
             esac
         fi
     done
@@ -758,7 +761,7 @@ if [ "$CPU_EXISTENTE_VALIDA" -eq 0 ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 7. Memória da VM e HugePages (aplicadas pela etapa 17)
+# 7. Memória da VM: tamanho e política (aplicadas pela etapa 17)
 # ----------------------------------------------------------------------------
 titulo "Etapa 3.7/8 Memória da VM"
 RAM_TOTAL_MB="$(ram_total_mib)"
@@ -771,7 +774,6 @@ info "Reserva do host:   ${RESERVA_HOST_MB} MiB (~$((RESERVA_HOST_MB / 1024)) Gi
 
 if ja_definido VM_RAM_MB && [ "$VM_RAM_MB" -le "$RAM_MAX_VM_MB" ] 2>/dev/null && [ $((VM_RAM_MB % 1024)) -eq 0 ]; then
     info "VM_RAM_MB já definido: $VM_RAM_MB MiB (~$((VM_RAM_MB / 1024)) GiB)"
-    salvar_conf HUGEPAGES_1G "$((VM_RAM_MB / 1024))"
 else
     if [ -n "${VM_RAM_MB:-}" ] && [ "$REDETECTAR" -eq 0 ]; then
         aviso "VM_RAM_MB atual (${VM_RAM_MB}) é inválido: acima do teto ou não múltiplo de 1024 MiB."
@@ -780,13 +782,41 @@ else
     PADRAO_GIB=16
     [ "$PADRAO_GIB" -gt "$MAX_GIB" ] && PADRAO_GIB="$MAX_GIB"
     aviso "Teto para a VM: ${MAX_GIB} GiB. O restante NÃO é negociável: fica com o host."
-    info "A etapa 17 (HugePages) reserva essa RAM no boot, tirando-a do host mesmo com a VM desligada."
+    # I9.12: até `af07725` esta linha dizia que a etapa 17 reservava a RAM no
+    # boot, tirando-a do host com a VM desligada. Isso deixou de ser verdade e
+    # era exatamente o defeito que REQ-VM-RESOURCE-LIFECYCLE removeu.
+    info "A etapa 17 aplica o pinning e a política de memória no XML; nos modos hugetlb as páginas são adquiridas no start e devolvidas no stop, e nenhuma RAM fica reservada com a VM desligada."
     RAM_GIB="$(perguntar_inteiro 'RAM da VM em GiB' "$PADRAO_GIB" 4 "$MAX_GIB")"
     NOVA_RAM_MB=$((RAM_GIB * 1024))
-    salvar_conf_lote \
-        VM_RAM_MB "$NOVA_RAM_MB" \
-        HUGEPAGES_1G "$RAM_GIB"
+    salvar_conf VM_RAM_MB "$NOVA_RAM_MB"
     ok "RAM da VM: $VM_RAM_MB MiB (${RAM_GIB} GiB); host mantém $((RAM_TOTAL_MB - VM_RAM_MB)) MiB."
+fi
+
+# I9.12-D12: a política de memória é escolhida AQUI, pela mesma razão de I9-D7
+# registrada para as dispensas: a etapa 3 publica caminho, fingerprint e
+# escolha num único rename atômico, e escrever o conf a partir da etapa 17
+# ampliaria a superfície de mutação para fazer o que esta já faz. A etapa 17
+# continua sendo quem APLICA e quem VERIFICA.
+#
+# Sem padrão implícito: `escolher_da_lista` só pré-seleciona quando há um item
+# só, e aqui são três. Vazio continua sendo "não decidido", e é assim que as
+# etapas 14 e 17 relatam enquanto ninguém escolher.
+if [ "$REDETECTAR" -eq 0 ] && [ -n "${MEMORIA_MODO:-}" ]; then
+    info "MEMORIA_MODO já definido: $MEMORIA_MODO"
+else
+    MODOS_MEMORIA=(
+        "normal - memória comum com THP oportunístico; baseline, volta ao host quando o QEMU termina"
+        "hugetlb-2m - páginas de 2 MiB adquiridas no start e devolvidas no stop; recomendada quando se quer HugePages"
+        "hugetlb-1g - páginas de 1 GiB em runtime, best-effort: exige blocos contíguos e pode recusar o start após uptime longo"
+    )
+    IDX="$(escolher_da_lista 'Política de memória da VM (número)' nao "${MODOS_MEMORIA[@]}")"
+    case "$IDX" in
+        1) salvar_conf MEMORIA_MODO "normal" ;;
+        2) salvar_conf MEMORIA_MODO "hugetlb-2m" ;;
+        3) salvar_conf MEMORIA_MODO "hugetlb-1g" ;;
+        *) falhar "Índice de política de memória fora da lista: $IDX" ;;
+    esac
+    ok "Política de memória: $MEMORIA_MODO (aplicada no XML pela etapa 17 e assada nos hooks pela etapa 14)."
 fi
 
 # ----------------------------------------------------------------------------

@@ -362,7 +362,13 @@ GRUB
     if validar_isolamento_compativel; then exit 1; fi
 ) || falha "matriz de isolamento antigo/pendente"
 
-# A validação integral do candidato deve ocorrer antes de qualquer SET de boot.
+# A validação integral do candidato deve ocorrer antes de qualquer mutação.
+#
+# I9.12-D10: o oráculo desta seção era `candidate,topologia,boot`, e a etapa
+# gravava as três chaves de HugePages no bootloader e pedia reboot. O apply
+# deixou de tocar em boot: a ordem provada agora é `candidate,topologia,define`,
+# e um double de `kernel_param_add` grava `boot` na trilha justamente para que
+# a asserção possa provar que ele NUNCA é chamado.
 FAKE_HELP_VIRSH="$TMPDIR_TESTE/fake-help-virsh"
 ORDEM_FASES="$TMPDIR_TESTE/ordem-fases"
 cat > "$FAKE_HELP_VIRSH" <<'SH'
@@ -371,38 +377,137 @@ cat > "$FAKE_HELP_VIRSH" <<'SH'
 exit 64
 SH
 chmod +x "$FAKE_HELP_VIRSH"
-(
-    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
-    carregar_conf() {
-        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
-        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
-        HUGEPAGES_1G=4; BOOTLOADER=grub
-    }
+_doubles_etapa17() {
     exigir_nao_root() { :; }
     exigir_sudo() { :; }
     exigir_comando() { :; }
     exigir_conf() { :; }
     exigir_vm_desligada() { :; }
+    exigir_bootloader_coerente() { :; }
     # I5: além do layout, a validação publica o fingerprint da topologia, que a
     # revalidação TOCTOU exige antes de qualquer mutação de boot ou XML.
     validar_configuracao() { CPU_LAYOUT_ONLINE="0,2,4,6"; TOPOLOGIA_FINGERPRINT=fixture; }
     exigir_topologia_inalterada() { echo topologia >> "$ORDEM_FASES"; }
-    validar_suporte_1g() { :; }
     preparar_xml_candidato() { echo candidate >> "$ORDEM_FASES"; }
     validar_isolamento_compativel() { :; }
+    aplicar_xml() { echo define >> "$ORDEM_FASES"; TRANSACAO_OK=1; }
     confirmar() { return 0; }
-    CONTAGEM_PERSISTENCIA=0
-    kernel_parametros_persistentes_exatos() {
-        CONTAGEM_PERSISTENCIA=$((CONTAGEM_PERSISTENCIA + 1))
-        [ "$CONTAGEM_PERSISTENCIA" -gt 1 ]
-    }
+    # Boot limpo: nenhuma das três chaves, nem ativa nem persistente.
+    cmdline_possui_alguma_chave() { return 1; }
+    kernel_param_chaves_persistentes_ausentes() { return 0; }
+    kernel_parametros_persistentes_exatos() { return 0; }
     kernel_param_add() { echo boot >> "$ORDEM_FASES"; }
-    pedir_reboot() { :; }
+    kernel_param_del() { echo boot >> "$ORDEM_FASES"; }
+    pedir_reboot() { echo reboot >> "$ORDEM_FASES"; }
+    memoria_politica_viavel() { MEMORIA_PAGINAS=2048; MEMORIA_PAGE_KB=2048; return 0; }
     VIRSH="$FAKE_HELP_VIRSH"
+}
+(
+    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
+    carregar_conf() {
+        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
+        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
+        MEMORIA_MODO=hugetlb-2m; BOOTLOADER=grub
+    }
+    _doubles_etapa17
     main
 ) || falha "fluxo faseado com doubles"
-[ "$(paste -sd, "$ORDEM_FASES")" = "candidate,topologia,boot" ] \
-    || falha "boot foi chamado antes da validação do candidato ou sem revalidar a topologia"
+[ "$(paste -sd, "$ORDEM_FASES")" = "candidate,topologia,define" ] \
+    || falha "ordem do apply divergente: esperado candidate,topologia,define, obtido $(paste -sd, "$ORDEM_FASES")"
+grep -qx boot "$ORDEM_FASES" && falha "o apply da etapa 17 gravou parâmetro de boot"
+grep -qx reboot "$ORDEM_FASES" && falha "o apply da etapa 17 pediu reboot"
+
+# MEMORIA_MODO vazio recusa ANTES de qualquer efeito.
+: > "$ORDEM_FASES"
+if (
+    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
+    carregar_conf() {
+        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
+        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
+        MEMORIA_MODO=""; BOOTLOADER=grub
+    }
+    _doubles_etapa17
+    main
+); then
+    falha "apply com MEMORIA_MODO vazio deveria falhar"
+fi
+[ ! -s "$ORDEM_FASES" ] \
+    || falha "apply com MEMORIA_MODO vazio produziu efeito: $(paste -sd, "$ORDEM_FASES")"
+
+# Chave de HugePages no boot é resíduo do contrato antigo: recusa fail-closed,
+# em qualquer modo, antes de preparar o candidato.
+: > "$ORDEM_FASES"
+if (
+    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
+    carregar_conf() {
+        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
+        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
+        MEMORIA_MODO=normal; BOOTLOADER=grub
+    }
+    _doubles_etapa17
+    cmdline_possui_alguma_chave() { return 0; }
+    main
+); then
+    falha "apply com HugePages na cmdline deveria falhar"
+fi
+[ ! -s "$ORDEM_FASES" ] \
+    || falha "apply recusado pela cmdline produziu efeito: $(paste -sd, "$ORDEM_FASES")"
+
+# O mesmo pela persistência, mesmo com a cmdline deste boot já limpa.
+: > "$ORDEM_FASES"
+if (
+    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
+    carregar_conf() {
+        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
+        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
+        MEMORIA_MODO=hugetlb-1g; BOOTLOADER=grub
+    }
+    _doubles_etapa17
+    kernel_param_chaves_persistentes_ausentes() { return 1; }
+    main
+); then
+    falha "apply com HugePages persistentes deveria falhar"
+fi
+[ ! -s "$ORDEM_FASES" ] \
+    || falha "apply recusado pela persistência produziu efeito: $(paste -sd, "$ORDEM_FASES")"
+
+# Recusa ESTRUTURAL do plano de memória bloqueia; TRANSITÓRIA só avisa, porque
+# o XML não depende do pool neste instante e o hook reavalia no start (D4).
+: > "$ORDEM_FASES"
+if (
+    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
+    carregar_conf() {
+        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
+        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
+        MEMORIA_MODO=hugetlb-2m; BOOTLOADER=grub
+    }
+    _doubles_etapa17
+    memoria_politica_viavel() {
+        MEMORIA_POLITICA_ERRO="pool ausente"; MEMORIA_POLITICA_TRANSITORIA=0; return 1
+    }
+    main
+); then
+    falha "apply com recusa estrutural do plano deveria falhar"
+fi
+[ ! -s "$ORDEM_FASES" ] \
+    || falha "apply recusado estruturalmente produziu efeito: $(paste -sd, "$ORDEM_FASES")"
+
+: > "$ORDEM_FASES"
+(
+    source "$RAIZ/etapas/52-cpu-pinning-hugepages.sh"
+    carregar_conf() {
+        VM_NAME=fixture; CPUS_VM="2,6"; CPUS_HOST="0,4"
+        VM_CORES=1; VM_THREADS=2; VM_VCPUS=2; VM_RAM_MB=4096
+        MEMORIA_MODO=hugetlb-2m; BOOTLOADER=grub
+    }
+    _doubles_etapa17
+    memoria_politica_viavel() {
+        MEMORIA_POLITICA_ERRO="consumidor externo"; MEMORIA_POLITICA_TRANSITORIA=1; return 1
+    }
+    main
+) || falha "recusa transitória do plano não deveria bloquear o apply"
+[ "$(paste -sd, "$ORDEM_FASES")" = "candidate,topologia,define" ] \
+    || falha "recusa transitória alterou a ordem do apply"
 
 # Double de virsh: uma falha após define deve reinstalar e comprovar o XML
 # original. O fake só copia fixtures no diretório temporário.
@@ -445,8 +550,10 @@ fi
 cmp -s -- "$ROLLBACK_BACKUP" "$FAKE_STATE" \
     || falha "rollback XML não restaurou o domínio original"
 
-grep -Fq '52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|' "$RAIZ/menu.sh" \
-    || falha "etapa 52 não está opcional"
+# I9.12-D10: o título mudou e o campo de reboot ficou vazio, porque o apply não
+# pede mais reboot. O oráculo anterior era 'CPU pinning e HugePages|opcional|'.
+grep -Fq '52-cpu-pinning-hugepages.sh|CPU pinning e política de memória|opcional||cpu.tune' "$RAIZ/menu.sh" \
+    || falha "etapa 52 não está opcional e sem reboot"
 grep -Fq '53-cpu-isolation.sh|CPU isolation|opcional|' "$RAIZ/menu.sh" \
     || falha "etapa 53 não está opcional"
 # I5: a reserva do core da CPU 0 deixou de ser uma linha do planner em Bash e

@@ -34,7 +34,7 @@ ETAPAS=(
     "50-hooks-gpu-hd1.sh|Hooks da GPU e HD1 físico|auto||hooks.configure"
     "51-usb-passthrough.sh|USB passthrough: dispositivos ou controladora inteira|opcional||usb.configure"
     "55-driver-nvidia-vm.sh|Instalar driver NVIDIA na VM (automático)|auto||guest.driver"
-    "52-cpu-pinning-hugepages.sh|CPU pinning e HugePages|opcional|reboot|cpu.tune"
+    "52-cpu-pinning-hugepages.sh|CPU pinning e política de memória|opcional||cpu.tune"
     "53-cpu-isolation.sh|CPU isolation|opcional|reboot|cpu.tune"
     "60-rede-bridge.sh|Rede final: bridge Ethernet ou NAT|auto||network.configure"
     "61-airlock.sh|Airlock: SFTP seguro|auto||airlock.configure"
