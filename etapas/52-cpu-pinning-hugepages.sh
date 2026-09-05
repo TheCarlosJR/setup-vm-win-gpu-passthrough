@@ -392,10 +392,16 @@ verificar() {
                 && v_ok "Política '$MEMORIA_MODO_EFETIVO' viável: $MEMORIA_PAGINAS página(s) de $MEMORIA_PAGE_KB kB serão adquiridas no start e devolvidas no stop." \
                 || v_falta "Política '$MEMORIA_MODO_EFETIVO' não é viável: ${MEMORIA_POLITICA_ERRO:-sem diagnóstico}."
             ;;
-        *)
+        normal)
             memoria_politica_viavel \
-                && v_ok "Política '$MEMORIA_MODO_EFETIVO': a VM usa memória comum, que volta ao host quando o QEMU termina." \
+                && v_ok "Política 'normal': a VM usa memória comum, que volta ao host quando o QEMU termina." \
                 || v_falta "Política de memória inválida: ${MEMORIA_POLITICA_ERRO:-sem diagnóstico}."
+            ;;
+        *)
+            # Modo fora do catálogo já foi relatado como ERRO de configuração
+            # acima. Avaliar a política sobre um valor inválido produziria um
+            # segundo diagnóstico da mesma causa, e o `*)` anterior chegava a
+            # dizer "a VM usa memória comum" sobre um modo que não existe.
             ;;
     esac
     v_fim
