@@ -96,10 +96,10 @@ hugepages_estado_exato() {
 }
 
 validar_configuracao() {
-    # A relação RAM/HugePages e a partição de CPU são decididas pelo core; o
-    # shell só sonda o host e publica o diagnóstico. O fingerprint da topologia
-    # fica guardado para a revalidação TOCTOU antes de cada mutação.
-    plano_memoria_vm "$(ram_total_mib)" "${VM_RAM_MB:-}" "${HUGEPAGES_1G:-}" \
+    # O teto de RAM e a partição de CPU são decididos pelo core; o shell só
+    # sonda o host e publica o diagnóstico. O fingerprint da topologia fica
+    # guardado para a revalidação TOCTOU antes de cada mutação.
+    plano_memoria_vm "$(ram_total_mib)" "${VM_RAM_MB:-}" \
         || { CPU_LAYOUT_ERRO="$CPU_MEMORIA_ERRO"; return 1; }
     TOPOLOGIA_CPU="$(cpu_topologia_csv)" \
         || { CPU_LAYOUT_ERRO="lscpu não forneceu a topologia parseável."; return 1; }

@@ -256,7 +256,6 @@ SCHEMA: dict[str, tuple[Callable[[str], bool], str, str]] = {
     "VM_THREADS": (_ranged(1, 65535), PUBLIC, "inteiro 1..65535"),
     "CPUS_VM": (_cpu_list, PUBLIC, "lista de CPUs"),
     "CPUS_HOST": (_cpu_list, PUBLIC, "lista de CPUs"),
-    "HUGEPAGES_1G": (_ranged(0, 1048576), PUBLIC, "inteiro 0..1048576"),
     "ISO_WINDOWS": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
     "ISO_VIRTIO": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
     "NVIDIA_DRIVER_EXE": (_vm_artifact_path, LOCAL_IDENTIFIER, "filho direto de /vm"),
@@ -284,14 +283,15 @@ SCHEMA: dict[str, tuple[Callable[[str], bool], str, str]] = {
     # I9.12 (REQ-VM-RESOURCE-LIFECYCLE): política de memória da VM. PUBLIC
     # porque é escolha de perfil, não identidade do host. Vazio significa
     # "ainda não decidido" e NÃO é sinônimo de nenhum modo: o requisito proíbe
-    # padrão silencioso, então a etapa 17 exige a decisão explícita antes de
-    # mutar qualquer coisa. Os valores estão em ordem de confiabilidade de
-    # devolução, e `hugetlb-1g-boot` é o perfil legado, declaradamente não
-    # retornável.
+    # padrão silencioso, então as etapas 14 e 17 exigem a decisão explícita
+    # antes de mutar qualquer coisa, e quem pergunta é a etapa 3 (I9.12-D12).
+    # Os valores estão em ordem de confiabilidade de devolução. Todos os três
+    # são retornáveis: o perfil de reserva estática no boot saiu do catálogo em
+    # I9.12-D8, e `HUGEPAGES_1G` foi depreciada junto.
     "MEMORIA_MODO": (
-        _enum("normal", "hugetlb-2m", "hugetlb-1g", "hugetlb-1g-boot"),
+        _enum("normal", "hugetlb-2m", "hugetlb-1g"),
         PUBLIC,
-        "normal, hugetlb-2m, hugetlb-1g ou hugetlb-1g-boot",
+        "normal, hugetlb-2m ou hugetlb-1g",
     ),
 }
 
@@ -321,6 +321,15 @@ DEPRECATED_KEYS: dict[str, str] = {
     "BACKUP_DISPENSADO": (
         "nunca alterou pré-requisito, status ou execução do backup; a etapa 20 "
         "e util/backup-vm.sh sempre decidiram pelo destino configurado"
+    ),
+    # I9.12-D9: pelo mesmo mecanismo das duas acima, e pelo mesmo motivo de não
+    # derrubar configuração existente. Apagar a chave do schema sem depreciar
+    # transformaria todo passthrough.conf anterior a 05/09/2026 em "chave
+    # desconhecida", que é recusa fail-closed logo na carga.
+    "HUGEPAGES_1G": (
+        "a reserva estática de 1 GiB no boot deixou de existir em I9.12; a "
+        "política é MEMORIA_MODO e a contagem de páginas é derivada de "
+        "VM_RAM_MB pelo núcleo, conforme o modo"
     ),
 }
 

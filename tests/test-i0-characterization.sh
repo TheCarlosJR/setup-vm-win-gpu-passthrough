@@ -51,8 +51,9 @@ carregar_conf
 # A carga não define mais essas variáveis e as duas dispensas que restaram
 # continuam sendo carregadas normalmente.
 [[ ${WORKING_DISK_DISPENSADO+x} && ${HD1_DISPENSADO+x} ]] || fail 'allowlist completa não foi carregada'
-[[ -z ${AIRLOCK_DISPENSADO+x} && -z ${BACKUP_DISPENSADO+x} ]] \
-    || fail 'dispensa depreciada continuou sendo exposta como variável'
+# I9.12-D9 acrescentou HUGEPAGES_1G ao mesmo conjunto de chaves depreciadas.
+[[ -z ${AIRLOCK_DISPENSADO+x} && -z ${BACKUP_DISPENSADO+x} && -z ${HUGEPAGES_1G+x} ]] \
+    || fail 'chave depreciada continuou sendo exposta como variável'
 [[ $(stat -c '%a' "$CONF_ARQUIVO") == 640 ]] || fail 'load alterou modo do conf'
 
 salvar_conf VM_NAME fixture-updated
@@ -84,9 +85,11 @@ expect_failure 'lote com chave desconhecida' bash -c '
     salvar_conf_lote VM_RAM_MB 16384 CHAVE_INVALIDA valor
 ' _ "$ROOT/lib/common.sh" "$CONF_ARQUIVO"
 cmp -s "$TMP/batch-before" "$CONF_ARQUIVO" || fail 'lote inválido publicou alteração parcial'
-salvar_conf_lote VM_RAM_MB 16384 HUGEPAGES_1G 16
+# I9.12: o lote caracterizado era `VM_RAM_MB 16384 HUGEPAGES_1G 16`; a chave
+# saiu do schema por D9 e MEMORIA_MODO tomou o lugar dela no mesmo lote.
+salvar_conf_lote VM_RAM_MB 16384 MEMORIA_MODO normal
 carregar_conf
-[[ $VM_RAM_MB == 16384 && $HUGEPAGES_1G == 16 ]] || fail 'lote válido não publicou todos os valores'
+[[ $VM_RAM_MB == 16384 && $MEMORIA_MODO == normal ]] || fail 'lote válido não publicou todos os valores'
 
 NO_NEWLINE="$TMP/no-final-newline.conf"
 cp -- "$FIXTURES/config/no-final-newline.conf" "$NO_NEWLINE"

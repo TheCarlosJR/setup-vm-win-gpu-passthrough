@@ -168,9 +168,11 @@ RC=0
 ( salvar_conf_lote VM_RAM_MB ) >/dev/null 2>&1 || RC=$?
 [[ $RC -ne 0 ]] || falha 'lote com paridade ímpar foi aceito'
 
-salvar_conf_lote VM_RAM_MB 16384 HUGEPAGES_1G 16 CPUS_VM 2-5
+# I9.12-D9: o lote usava HUGEPAGES_1G 16 até `af07725`; a chave saiu do schema
+# e o lote passa a exercitar MEMORIA_MODO, que é a política que a substituiu.
+salvar_conf_lote VM_RAM_MB 16384 MEMORIA_MODO normal CPUS_VM 2-5
 carregar_conf
-[[ $VM_RAM_MB == 16384 && $HUGEPAGES_1G == 16 && $CPUS_VM == 2-5 ]] \
+[[ $VM_RAM_MB == 16384 && $MEMORIA_MODO == normal && $CPUS_VM == 2-5 ]] \
     || falha 'lote válido não publicou todos os valores'
 passo
 
@@ -351,19 +353,26 @@ passo
 
 DISP_CONF="$TMP/dispensas.conf"
 CONF_ARQUIVO="$DISP_CONF"
+# I9.12-D9: HUGEPAGES_1G="22" entrou neste conf porque é exatamente o resíduo
+# que os hosts migrados carregam. Ela precisa CARREGAR sem derrubar o parser,
+# não pode ser exposta a consumidor nenhum, e a migração precisa removê-la.
 printf '%s\n' '# antigo' 'VM_NAME="win11"' 'AIRLOCK_DISPENSADO="sim"' \
-    'BACKUP_DISPENSADO=""' 'VM_RAM_MB="8192"' > "$DISP_CONF"
+    'BACKUP_DISPENSADO=""' 'HUGEPAGES_1G="22"' 'VM_RAM_MB="8192"' > "$DISP_CONF"
 chmod 0600 -- "$DISP_CONF"
 
 carregar_conf > "$TMP/dispensa.out" 2>&1
 grep -q 'dispensa sem efeito' "$TMP/dispensa.out" \
     || falha 'carga não avisou sobre dispensa sem efeito'
 [[ -z ${AIRLOCK_DISPENSADO+x} ]] || falha 'dispensa depreciada foi exposta como variável'
+[[ -z ${HUGEPAGES_1G+x} ]] || falha 'HUGEPAGES_1G depreciada foi exposta como variável'
 [[ $VM_NAME == win11 ]] || falha 'carga com dispensa depreciada perdeu outras chaves'
 
-conf_migrar_dispensas_depreciadas >/dev/null 2>&1 \
+conf_migrar_dispensas_depreciadas > "$TMP/dispensa-migra.out" 2>&1 \
     || falha 'migração de dispensas falhou'
 grep -q 'DISPENSADO' "$DISP_CONF" && falha 'linha depreciada sobreviveu à migração'
+grep -q 'HUGEPAGES_1G' "$DISP_CONF" && falha 'HUGEPAGES_1G sobreviveu à migração'
+grep -q 'MEMORIA_MODO' "$TMP/dispensa-migra.out" \
+    || falha 'migração não explicou o que substituiu HUGEPAGES_1G'
 carregar_conf >/dev/null 2>&1
 [[ $VM_NAME == win11 && $VM_RAM_MB == 8192 ]] || falha 'migração de dispensas perdeu chaves'
 

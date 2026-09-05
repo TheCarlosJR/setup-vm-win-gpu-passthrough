@@ -53,8 +53,11 @@ class SchemaTests(unittest.TestCase):
         )
 
     def test_dispensas_depreciadas(self) -> None:
+        # I9.12-D9: HUGEPAGES_1G entrou aqui em 05/09/2026, pelo mesmo mecanismo
+        # das duas dispensas de I4.8. O oráculo anterior tinha só duas chaves.
         self.assertEqual(
-            set(config.DEPRECATED_KEYS), {"AIRLOCK_DISPENSADO", "BACKUP_DISPENSADO"}
+            set(config.DEPRECATED_KEYS),
+            {"AIRLOCK_DISPENSADO", "BACKUP_DISPENSADO", "HUGEPAGES_1G"},
         )
         for key, motivo in config.DEPRECATED_KEYS.items():
             self.assertNotIn(key, config.SCHEMA, key)
@@ -158,7 +161,16 @@ class ValidatorTests(unittest.TestCase):
     def test_inteiros(self) -> None:
         self.aceita("VM_RAM_MB", "1024", "22528")
         self.recusa("VM_RAM_MB", "1023", "0", "12345678901", "8k", "-1")
-        self.aceita("HUGEPAGES_1G", "0", "22")
+        # I9.12-D9: HUGEPAGES_1G aceitava "0" e "22" pelo schema até `af07725`.
+        # Agora ela não está mais no schema, e `validate_value` a recusa como
+        # qualquer chave que não pertence à allowlist.
+        with self.assertRaises(DataError):
+            config.validate_value("HUGEPAGES_1G", "22")
+
+    def test_politica_de_memoria(self) -> None:
+        # I9.12-D8: eram quatro valores, com `hugetlb-1g-boot` no fim.
+        self.aceita("MEMORIA_MODO", "normal", "hugetlb-2m", "hugetlb-1g")
+        self.recusa("MEMORIA_MODO", "hugetlb-1g-boot", "hugetlb", "2m", "NORMAL")
 
     def test_tamanho_qcow2(self) -> None:
         self.aceita("QCOW2_TAMANHO", "250G", "1T", "500M")

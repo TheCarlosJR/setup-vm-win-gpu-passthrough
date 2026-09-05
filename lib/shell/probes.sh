@@ -754,7 +754,9 @@ ram_reserva_host_mib() {
 
 ram_max_vm_mib() {
     # Teto para a VM: total menos a reserva do host, arredondado para baixo em
-    # múltiplos de 1024 MiB (exigência das HugePages de 1 GiB da etapa 17).
+    # múltiplos de 1024 MiB. Granularidade mantida em I9.12 para o modo
+    # hugetlb-1g: uma página de 1 GiB não se divide, e mudar o alinhamento
+    # mexeria no teto de RAM já caracterizado em I5.
     local total="${1:-}"
     [ -n "$total" ] || total="$(ram_total_mib)" || return 1
     plano_memoria_vm "$total" || return 1
@@ -925,22 +927,26 @@ cpu_plano_pinning() {
 
 CPU_MEMORIA_ERRO=""
 plano_memoria_vm() {
-    # plano_memoria_vm TOTAL_MIB [VM_RAM_MIB] [HUGEPAGES_1G]
-    # Reserva do host, teto da VM e relação RAM/HugePages em um único lugar.
+    # plano_memoria_vm TOTAL_MIB [VM_RAM_MIB]
+    # Reserva do host, teto da VM e a regra do múltiplo em um único lugar.
     # Publica CPUMEM_TOTAL_MIB, CPUMEM_RESERVE_MIB, CPUMEM_MAX_VM_MIB,
-    # CPUMEM_MAX_VM_GIB e CPUMEM_HUGEPAGES_1G.
-    local total="${1:-}" vm_ram="${2:-}" hugepages="${3:-}"
+    # CPUMEM_MAX_VM_GIB e CPUMEM_VM_RAM_MIB.
+    #
+    # I9.12-D9: o terceiro argumento era HUGEPAGES_1G e o core conferia se a
+    # contagem declarada batia com VM_RAM_MB/1024. A chave foi depreciada e a
+    # contagem de páginas passou a ser derivada por modo em resources.py, então
+    # a assinatura perdeu o argumento e a allowlist perdeu a chave.
+    local total="${1:-}" vm_ram="${2:-}"
     local -a permitidas=(
         "${CORE_PARES_ENVELOPE[@]}"
         VALID ERROR TOTAL_MIB RESERVE_MIB MAX_VM_MIB MAX_VM_GIB CHECKED
-        VM_RAM_MIB HUGEPAGES_1G
+        VM_RAM_MIB
     )
     local -a payload=()
     CPU_MEMORIA_ERRO=""
     payload=(
         total_mib "$total"
         vm_ram_mib "$vm_ram"
-        hugepages_1g "$hugepages"
     )
     if ! python_core_pares_payload permitidas CPUMEM_ cpu-memory payload \
             2>/dev/null; then

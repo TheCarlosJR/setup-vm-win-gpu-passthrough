@@ -468,10 +468,15 @@ passou
 # --- 6. Aritmética de memória com uma implementação só ------------------------
 igual 8192 "$(ram_reserva_host_mib)" 'reserva do host divergente do core'
 igual 24576 "$(ram_max_vm_mib)" 'teto de RAM da VM divergente do core'
-plano_memoria_vm "$(ram_total_mib)" 22528 22 \
+# I9.12-D9: a chamada tinha um terceiro argumento (HUGEPAGES_1G) e o caso
+# conferia `CPUMEM_HUGEPAGES_1G == 22`. A derivação de páginas saiu para
+# resources.py, por modo; o que este plano ainda garante é o teto e o múltiplo.
+plano_memoria_vm "$(ram_total_mib)" 22528 \
     || falha "plano de memória coerente recusado: $CPU_MEMORIA_ERRO"
-igual 22 "$CPUMEM_HUGEPAGES_1G" 'contagem de HugePages derivada incorreta'
-esperar_falha 'RAM acima do teto' plano_memoria_vm "$(ram_total_mib)" 30720 30
+igual 22528 "$CPUMEM_VM_RAM_MIB" 'RAM da VM não voltou do core'
+esperar_falha 'RAM não múltipla de 1 GiB' plano_memoria_vm "$(ram_total_mib)" 20000
+contem "$CPU_MEMORIA_ERRO" 'não é múltiplo' 'diagnóstico de múltiplo ausente'
+esperar_falha 'RAM acima do teto' plano_memoria_vm "$(ram_total_mib)" 30720
 contem "$CPU_MEMORIA_ERRO" 'excede o teto' 'diagnóstico de teto de RAM ausente'
 passou
 

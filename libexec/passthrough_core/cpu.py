@@ -581,11 +581,18 @@ def plan_pinning(payload: Mapping[str, Any]) -> dict:
 
 
 def memory_plan(payload: Mapping[str, Any]) -> dict:
-    """Deriva reserva do host, teto da VM e a contagem de páginas de 1 GiB.
+    """Deriva a reserva do host e o teto de RAM da VM.
 
-    A relação entre `VM_RAM_MB` e `HUGEPAGES_1G` é a mesma que as etapas 3 e
-    16 exigiam em Bash: múltiplo exato de 1 GiB, contagem derivada por divisão
-    e teto respeitado. Aqui ela tem uma implementação só.
+    I9.12-D9: `HUGEPAGES_1G` era chave de configuração e este plano conferia se
+    o valor declarado batia com `VM_RAM_MB/1024`. A chave foi depreciada, a
+    contagem de páginas passou a ser derivada pelo `resources.py` conforme o
+    `MEMORIA_MODO`, e o que sobrou aqui é o que sempre foi de CPU/RAM: reserva
+    do host, teto seguro e a regra de múltiplo exato.
+
+    `HUGEPAGE_MIB` continua sendo a granularidade do teto e do múltiplo, e
+    continua valendo 1024. Não é resíduo: é o que mantém o modo `hugetlb-1g`
+    viável (uma página de 1 GiB não se divide) e é o mesmo alinhamento já
+    caracterizado em I5, então mudá-lo mexeria no teto de RAM de todo host.
     """
     total = _require_integer(payload, "total_mib", 0, 1 << 30)
     reserve = total // RAM_RESERVE_FRACTION
@@ -609,12 +616,10 @@ def memory_plan(payload: Mapping[str, Any]) -> dict:
         "max_vm_gib": maximum // HUGEPAGE_MIB,
         "checked": 0,
         "vm_ram_mib": 0,
-        "hugepages_1g": 0,
     }
 
     vm_ram_text = _optional_text(payload, "vm_ram_mib")
-    hugepages_text = _optional_text(payload, "hugepages_1g")
-    if not vm_ram_text and not hugepages_text:
+    if not vm_ram_text:
         return data
 
     data["checked"] = 1
@@ -630,21 +635,6 @@ def memory_plan(payload: Mapping[str, Any]) -> dict:
             "VM_RAM_MB=%d não é múltiplo de %d MiB." % (vm_ram, HUGEPAGE_MIB)
         )
         return data
-    derived = vm_ram // HUGEPAGE_MIB
-    data["hugepages_1g"] = derived
-    if hugepages_text:
-        declared = _integer_in_range(hugepages_text, 1, 1048576)
-        if declared is None:
-            data["valid"] = 0
-            data["error"] = "HUGEPAGES_1G precisa ser um inteiro positivo."
-            return data
-        if declared != derived:
-            data["valid"] = 0
-            data["error"] = (
-                "HUGEPAGES_1G=%d diverge de VM_RAM_MB/%d; corrija conscientemente "
-                "na etapa 3." % (declared, HUGEPAGE_MIB)
-            )
-            return data
     if vm_ram > maximum:
         data["valid"] = 0
         data["error"] = (

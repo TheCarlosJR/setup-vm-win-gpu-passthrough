@@ -270,18 +270,36 @@ class PlanoMemoriaTests(unittest.TestCase):
     def test_host_sem_folga_zera_o_teto(self) -> None:
         self.assertEqual(cpu.memory_plan({"total_mib": "4096"})["max_vm_mib"], 0)
 
-    def test_hugepages_derivadas_e_coerentes(self) -> None:
+    def test_ram_valida_dentro_do_teto(self) -> None:
+        # I9.12-D9: este caso conferia também `hugepages_1g == 22`, derivado
+        # aqui. A derivação saiu para `resources.py`, que a faz por modo; o que
+        # este plano ainda garante é a RAM válida, múltipla e dentro do teto.
         dados = cpu.memory_plan({"total_mib": "32768", "vm_ram_mib": "22528"})
         self.assertEqual(dados["valid"], 1)
         self.assertEqual(dados["checked"], 1)
-        self.assertEqual(dados["hugepages_1g"], 22)
+        self.assertEqual(dados["vm_ram_mib"], 22528)
+        self.assertNotIn("hugepages_1g", dados)
 
-    def test_recusa_hugepages_divergentes(self) -> None:
+    def test_hugepages_1g_no_payload_e_ignorada(self) -> None:
+        """I9.12-D9: a chave saiu do contrato de entrada deste plano.
+
+        Oráculo anterior: `hugepages_1g="20"` com `vm_ram_mib="22528"` recusava
+        com "HUGEPAGES_1G=20 diverge de VM_RAM_MB/1024". Agora o campo não é
+        lido, e um conf antigo que ainda o carregue não muda o veredito. Quem
+        recusa contagem incoerente hoje é `resources.plan`, pelo tamanho de
+        página do modo escolhido.
+        """
         dados = cpu.memory_plan(
             {"total_mib": "32768", "vm_ram_mib": "22528", "hugepages_1g": "20"}
         )
-        self.assertEqual(dados["valid"], 0)
-        self.assertIn("diverge de VM_RAM_MB", dados["error"])
+        self.assertEqual(dados["valid"], 1)
+        self.assertEqual(dados["error"], "")
+
+    def test_hugepages_1g_sozinha_nao_dispara_conferencia(self) -> None:
+        # Oráculo anterior: só `hugepages_1g` já ligava `checked=1`.
+        dados = cpu.memory_plan({"total_mib": "32768", "hugepages_1g": "22"})
+        self.assertEqual(dados["valid"], 1)
+        self.assertEqual(dados["checked"], 0)
 
     def test_recusa_ram_nao_multipla_de_1_gib(self) -> None:
         dados = cpu.memory_plan({"total_mib": "32768", "vm_ram_mib": "20000"})

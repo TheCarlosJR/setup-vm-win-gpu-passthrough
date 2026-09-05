@@ -101,11 +101,11 @@ verificar() {
         fi
     fi
     if [ "$memoria_completa" -eq 1 ]; then
-        if plano_memoria_vm "$(ram_total_mib)" "$VM_RAM_MB" "$HUGEPAGES_1G"; then
+        if plano_memoria_vm "$(ram_total_mib)" "$VM_RAM_MB"; then
             ram_max="$CPUMEM_MAX_VM_MIB"
-            v_ok "RAM e HUGEPAGES_1G são coerentes e respeitam o teto atual de ${ram_max} MiB."
+            v_ok "RAM respeita o teto atual de ${ram_max} MiB."
         else
-            v_falta "VM_RAM_MB/HUGEPAGES_1G recusados: $CPU_MEMORIA_ERRO"
+            v_falta "VM_RAM_MB recusado: $CPU_MEMORIA_ERRO"
         fi
     fi
     if validar_config_rede; then

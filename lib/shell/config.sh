@@ -63,7 +63,7 @@ CHAVES_CONF_PERMITIDAS=(
     WORKING_DISK_PATH WORKING_DISK_FINGERPRINT WORKING_DISK_DISPENSADO
     HD1_BY_ID_PATH HD1_DISK_FINGERPRINT HD1_DISPENSADO
     QCOW2_PATH QCOW2_TAMANHO VM_RAM_MB VM_VCPUS VM_CORES VM_THREADS
-    CPUS_VM CPUS_HOST HUGEPAGES_1G ISO_WINDOWS ISO_VIRTIO NVIDIA_DRIVER_EXE
+    CPUS_VM CPUS_HOST ISO_WINDOWS ISO_VIRTIO NVIDIA_DRIVER_EXE
     REDE_MODO INTERFACE_FISICA REDE_BRIDGE REDE_LIBVIRT
     REDE_BRIDGE_LIBVIRT REDE_NAT_CIDR VM_NIC_MAC VM_IP_FIXO IP_FIXO_HOST
     TRANSFER_USER AIRLOCK_DIR AIRLOCK_BIND
@@ -76,7 +76,13 @@ CHAVES_CONF_PERMITIDAS=(
 # continua aceitando as linhas para não derrubar configuração existente, sem
 # expor o valor, e a etapa 3 remove as linhas na migração. As duas dispensas
 # que permanecem (workingDisk e HD1) têm efeito real e testado.
-CHAVES_CONF_DEPRECIADAS=(AIRLOCK_DISPENSADO BACKUP_DISPENSADO)
+#
+# I9.12-D9 acrescentou HUGEPAGES_1G pelo mesmo mecanismo: a reserva estática de
+# 1 GiB no boot deixou de existir, a política virou MEMORIA_MODO e a contagem
+# de páginas é derivada de VM_RAM_MB pelo núcleo. Depreciar em vez de apagar
+# evita que todo passthrough.conf anterior a 05/09/2026 seja recusado como
+# "chave desconhecida" logo na carga.
+CHAVES_CONF_DEPRECIADAS=(AIRLOCK_DISPENSADO BACKUP_DISPENSADO HUGEPAGES_1G)
 
 chave_conf_permitida() {
     local procurada="${1:-}" chave
@@ -446,19 +452,28 @@ validar_valor_conf() {
 
 CONF_MIGRACAO_DISPENSAS_REMOVIDAS=0
 conf_migrar_dispensas_depreciadas() {
-    # REQ-WAIVERS: remove as linhas das dispensas sem efeito. Configuração já
-    # limpa é no-op exato. A remoção é publicada pelo mesmo rename atômico da
-    # configuração, então nunca há estado intermediário.
+    # REQ-WAIVERS e I9.12-D9: remove as linhas das chaves depreciadas.
+    # Configuração já limpa é no-op exato. A remoção é publicada pelo mesmo
+    # rename atômico da configuração, então nunca há estado intermediário.
     # Retornos: 0 = nada a fazer ou removido; 1 = erro.
-    local chave lista=""
+    #
+    # O nome da função é mantido: ela é chamada por etapas/02-detectar-config.sh
+    # e por tests/test-i4-config.sh, e renomear seria mudança de superfície sem
+    # ganho. A alternância do grep é montada a partir do array, e não escrita à
+    # mão, para que acrescentar uma chave depreciada não exija lembrar de dois
+    # lugares.
+    local chave lista="" alternativa=""
     local -a payload=()
     CONF_MIGRACAO_DISPENSAS_REMOVIDAS=0
     [ -e "$CONF_ARQUIVO" ] || return 0
     _conf_localizar_alvo || return 1
     [ ! -L "$CONF_ARQUIVO" ] || return 1
+    for chave in "${CHAVES_CONF_DEPRECIADAS[@]}"; do
+        alternativa+="${alternativa:+|}$chave"
+    done
+    [ -n "$alternativa" ] || return 0
     # Só remove o que realmente está no arquivo, para não republicar sem motivo.
-    if ! grep -Eq "^[[:space:]]*(AIRLOCK_DISPENSADO|BACKUP_DISPENSADO)[[:space:]]*=" \
-        "$CONF_ARQUIVO"; then
+    if ! grep -Eq "^[[:space:]]*(${alternativa})[[:space:]]*=" "$CONF_ARQUIVO"; then
         return 0
     fi
     for chave in "${CHAVES_CONF_DEPRECIADAS[@]}"; do
@@ -476,8 +491,9 @@ conf_migrar_dispensas_depreciadas() {
     fi
     CONF_MIGRACAO_DISPENSAS_REMOVIDAS="${CFG_REMOVED_COUNT:-0}"
     if [ "$CONF_MIGRACAO_DISPENSAS_REMOVIDAS" != 0 ]; then
-        info "Dispensas sem efeito removidas da configuração: ${lista//$'\n'/, }."
+        info "Chaves depreciadas removidas da configuração: ${lista//$'\n'/, }."
         info "Para não usar o Airlock ou o backup, simplesmente não execute a etapa; o status continua dizendo a verdade."
+        info "HUGEPAGES_1G saiu em I9.12: a política de memória agora é MEMORIA_MODO e a contagem de páginas vem de VM_RAM_MB."
     fi
     return 0
 }
@@ -610,7 +626,7 @@ backup_e_resetar_config_etapa02() {
         NVME_DEVICE SYSTEM_DISK_FINGERPRINT
         WORKING_DISK_PATH WORKING_DISK_FINGERPRINT WORKING_DISK_DISPENSADO
         HD1_BY_ID_PATH HD1_DISK_FINGERPRINT HD1_DISPENSADO
-        CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB HUGEPAGES_1G
+        CPUS_VM CPUS_HOST VM_VCPUS VM_CORES VM_THREADS VM_RAM_MB MEMORIA_MODO
         INTERFACE_FISICA REDE_MODO VM_IP_FIXO IP_FIXO_HOST REDE_NAT_CIDR
         TRANSFER_USER AIRLOCK_DIR ISO_WINDOWS ISO_VIRTIO
     )
