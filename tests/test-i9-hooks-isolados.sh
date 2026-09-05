@@ -50,6 +50,7 @@ DM_SERVICE="display-manager"
 IOMMU_GROUP_GPU="7"
 HD1_BY_ID_PATH=""
 HD1_DISPENSADO="sim"
+MEMORIA_MODO="normal"
 CONF
 chmod 0600 "$PROJETO/passthrough.conf"
 

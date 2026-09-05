@@ -317,6 +317,25 @@ verificar() {
     else
         v_falta "Hooks instalados são de geração antiga (versão diferente de $SCRIPT_VERSION, ou sem log persistente e retomada reforçada do desktop); reexecute a etapa 14 para atualizá-los."
     fi
+    # I9.12-D13: a prova de geração acima compara a VERSÃO do emissor. Ela não
+    # vê o VALOR assado, então trocar MEMORIA_MODO na etapa 3 deixava hooks
+    # antigos ativos com o menu dizendo que estava tudo certo — falso sucesso,
+    # que REQ-VERIFY-FAILCLOSED proíbe. Aqui a linha assada no prepare
+    # instalado é comparada com a configuração atual, no mesmo formato %q que
+    # emitir_hook_memoria_fn usa.
+    if [ ! -e "$prep" ]; then
+        :
+    elif [ ! -r "$prep" ]; then
+        v_indeterminado "Hook prepare/begin existe mas não é legível; a política de memória assada não pôde ser comprovada ($prep)."
+    elif ! LC_ALL=C grep -q '^MEMORIA_MODO=' "$prep" 2>/dev/null; then
+        v_falta "Hook prepare/begin instalado não carimba MEMORIA_MODO; é de geração anterior a I9.12. Reexecute a etapa 14."
+    elif [ -z "${MEMORIA_MODO:-}" ]; then
+        v_falta "MEMORIA_MODO não decidido em passthrough.conf, mas os hooks instalados carregam uma política assada; rode a etapa 3 e reexecute a etapa 14."
+    elif LC_ALL=C grep -qxF "$(printf 'MEMORIA_MODO=%q' "$MEMORIA_MODO")" "$prep" 2>/dev/null; then
+        v_ok "Hooks assados com a política de memória atual (MEMORIA_MODO=$MEMORIA_MODO)."
+    else
+        v_falta "Hooks assados com política de memória diferente da configuração (esperado MEMORIA_MODO=$MEMORIA_MODO); reexecute a etapa 14."
+    fi
     # Um marcador que o hook não consegue ler não é fail-closed: legibilidade e
     # conteúdo passaram a ser provados, no lugar do `[ -f ]` isolado.
     v_prova_arquivo "$obrigatorio" "Marcador fail-closed do gate" \
@@ -398,7 +417,9 @@ verificar() {
 guard_mutation hooks.configure || exit 1
 
 validar_config_hooks() {
-    exigir_conf VM_NAME GPU_PCI_ID GPU_VENDOR_DEVICE_ID DM_SERVICE IOMMU_GROUP_GPU
+    # I9.12-D13: MEMORIA_MODO entrou na exigência porque os hooks ASSAM a
+    # política; sem ela decidida não há o que instalar.
+    exigir_conf VM_NAME GPU_PCI_ID GPU_VENDOR_DEVICE_ID DM_SERVICE IOMMU_GROUP_GPU MEMORIA_MODO
     nome_vm_valido "$VM_NAME" || falhar "VM_NAME inseguro: '$VM_NAME'."
     pci_bdf_valido "$GPU_PCI_ID" || falhar "GPU_PCI_ID inválido: '$GPU_PCI_ID'."
     pci_vendor_device_valido "$GPU_VENDOR_DEVICE_ID" || falhar "GPU_VENDOR_DEVICE_ID inválido."
@@ -431,8 +452,14 @@ emitir_hook_memoria_fn() {
     # antes de executar os hooks). O core é o planejador e o validador usados
     # pela etapa e pelo gate; o hook é a autoridade de runtime. Que as duas
     # implementações concordem é obrigação de teste diferencial, não de fé.
+    #
+    # I9.12-D13: `${MEMORIA_MODO:-normal}` deixou de existir aqui. Assar
+    # `normal` quando ninguém decidiu é exatamente o padrão silencioso que
+    # REQ-VM-RESOURCE-LIFECYCLE proíbe em letra, e o hook resultante diria ao
+    # operador que a política dele está instalada. Quem barra antes é
+    # memoria_plano_resolver; esta função só carimba o que foi decidido.
     local rotulo="$1"
-    printf 'MEMORIA_MODO=%q\n' "${MEMORIA_MODO:-normal}"
+    printf 'MEMORIA_MODO=%q\n' "${MEMORIA_MODO:-}"
     printf 'MEM_PAGE_KB=%q\n' "${MEM_PAGE_KB:-0}"
     printf 'MEM_PAGES_NEEDED=%q\n' "${MEM_PAGES_NEEDED:-0}"
     printf 'MEM_PLANO_VALIDO=%q\n' "${MEM_PLANO_VALIDO:-1}"
@@ -823,11 +850,18 @@ memoria_plano_resolver() {
         BASELINE_SURPLUS ACQUIRE_DELTA TARGET_NR NODE_COUNT FINGERPRINT TRANSIENT)
     local -a payload=()
     local foto=""
-    MEMORIA_MODO="${MEMORIA_MODO:-normal}"
     MEM_PAGE_KB=0
     MEM_PAGES_NEEDED=0
     MEM_PLANO_VALIDO=1
     MEM_PLANO_AVISO=""
+    # I9.12-D13: era `MEMORIA_MODO="${MEMORIA_MODO:-normal}"`. Vazio virava
+    # `normal` em silêncio, e o hook nascia carimbado com uma política que
+    # ninguém escolheu. Agora vazio é recusa, e o apply para antes de renderizar.
+    if [ -z "${MEMORIA_MODO:-}" ]; then
+        MEM_PLANO_VALIDO=0
+        MEM_PLANO_AVISO="MEMORIA_MODO não decidido; rode a etapa 3 e escolha entre normal, hugetlb-2m e hugetlb-1g"
+        return 1
+    fi
     foto="$(recursos_fotografar)" || foto=""
     payload=(mode "$MEMORIA_MODO" snapshot "$foto" vm_ram_mib "${VM_RAM_MB:-0}")
     if ! python_core_pares_payload permitidas MEMPLANO_ resources-plan payload 2>/dev/null; then
@@ -1475,7 +1509,12 @@ gerar_conjunto_hooks() {
     mkdir -p "$diretorio"
     # A política de memória é resolvida UMA vez, antes de qualquer heredoc: os
     # valores viajam assados dentro dos hooks, que não podem consultar o core.
-    memoria_plano_resolver || true
+    # I9.12-D13: `|| true` seguia adiante com qualquer recusa, inclusive a de
+    # política não decidida. Ausência de decisão não é recusa de plano: é
+    # configuração incompleta, e renderizar assim assaria uma política falsa.
+    if ! memoria_plano_resolver && [ -z "${MEMORIA_MODO:-}" ]; then
+        falhar "MEMORIA_MODO não decidido em passthrough.conf; os hooks assam a política e esta etapa não assume nenhuma. Rode a etapa 3 (opção de política de memória) antes desta."
+    fi
     if [ -n "$MEM_PLANO_AVISO" ]; then
         aviso "Política de memória: $MEM_PLANO_AVISO"
         if [ "$MEM_PLANO_VALIDO" = 1 ]; then

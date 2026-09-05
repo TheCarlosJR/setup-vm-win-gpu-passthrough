@@ -145,6 +145,7 @@ DM_SERVICE="display-manager"
 IOMMU_GROUP_GPU="7"
 HD1_BY_ID_PATH=""
 HD1_DISPENSADO="sim"
+MEMORIA_MODO="normal"
 CONF
 chmod 0600 "$PROJETO/passthrough.conf"
 
@@ -215,6 +216,8 @@ POLITICA_DIR="$TMP/politica"
 mkdir -p "$POLITICA_DIR"
 
 renderizar_com_politica() { # renderizar_com_politica NOME MODO RAM_MB
+    # Rende e EXIGE sucesso. Para os casos que precisam provar recusa existe
+    # `renderizar_esperando_recusa`, logo abaixo.
     local destino="$POLITICA_DIR/$1"
     mkdir -p "$destino"
     cat > "$PROJETO/passthrough.conf" <<CONF
@@ -274,6 +277,61 @@ passo
 # o núcleo aceita sempre. Sem esta ponta, "assa 0" passaria por assar 0 sempre.
 grep -q '^MEM_PLANO_VALIDO=1$' "$RENDER/prepare.sh" \
     || fail 'o plano aceito devia nascer com MEM_PLANO_VALIDO=1'
+passo
+
+# --- 2c. Política NÃO DECIDIDA recusa renderizar (I9.12-D13) ----------------
+#
+# Oráculo anterior (árvore de `af07725`): `MEMORIA_MODO` vazio virava `normal`
+# em `emitir_hook_memoria_fn` e em `memoria_plano_resolver`, e a renderização
+# seguia normalmente. O hook nascia carimbado com uma política que ninguém
+# escolheu — o "fallback silencioso entre 1 GiB, 2 MiB, THP e memória normal"
+# que o contrato proíbe em letra. Agora vazio para o apply antes do heredoc.
+renderizar_esperando_recusa() { # renderizar_esperando_recusa NOME MODO RAM_MB
+    local destino="$POLITICA_DIR/$1"
+    mkdir -p "$destino"
+    cat > "$PROJETO/passthrough.conf" <<CONF
+VM_NAME="$VM_TESTE"
+GPU_PCI_ID="0000:01:00.0"
+GPU_AUDIO_PCI_ID=""
+GPU_VENDOR_DEVICE_ID="10de:2503"
+GPU_AUDIO_VENDOR_DEVICE_ID=""
+DM_SERVICE="display-manager"
+IOMMU_GROUP_GPU="7"
+HD1_BY_ID_PATH=""
+HD1_DISPENSADO="sim"
+MEMORIA_MODO="$2"
+VM_RAM_MB="$3"
+CONF
+    chmod 0600 "$PROJETO/passthrough.conf"
+    if bash "$PROJETO/etapas/50-hooks-gpu-hd1.sh" --renderizar-hooks "$destino" \
+            > "$POLITICA_DIR/$1.log" 2>&1; then
+        fail "$1: a renderização com política '$2' devia ter sido recusada"
+    fi
+    POLITICA_SAIDA=$(cat "$POLITICA_DIR/$1.log")
+}
+
+renderizar_esperando_recusa indecisa "" 8192
+# Quem recusa primeiro é `exigir_conf`, que a etapa passou a chamar com
+# MEMORIA_MODO na lista; `memoria_plano_resolver` é a segunda guarda, para o
+# caso de alguém alcançar a renderização por outro caminho. O que importa aqui
+# é que a causa seja NOMEADA e que nenhum hook saia.
+[[ $POLITICA_SAIDA == *MEMORIA_MODO* ]] \
+    || fail "a recusa por política indecisa não nomeou a causa: $POLITICA_SAIDA"
+[[ $POLITICA_SAIDA == *02-detectar-config* || $POLITICA_SAIDA == *'etapa 3'* ]] \
+    || fail "a recusa por política indecisa não disse onde decidir: $POLITICA_SAIDA"
+[ ! -e "$POLITICA_DIR/indecisa/prepare.sh" ] \
+    || fail 'a recusa por política indecisa renderizou o prepare mesmo assim'
+[ ! -e "$POLITICA_DIR/indecisa/release.sh" ] \
+    || fail 'a recusa por política indecisa renderizou o release mesmo assim'
+passo
+
+# E o valor assado é EXATAMENTE o do conf, não um default: se a etapa assasse
+# `normal` para tudo, este caso passaria despercebido.
+renderizar_com_politica carimbo hugetlb-2m 8192
+grep -qxF 'MEMORIA_MODO=hugetlb-2m' "$POLITICA_DIR/carimbo/prepare.sh" \
+    || fail 'a etapa não assou no prepare o MEMORIA_MODO exato do passthrough.conf'
+grep -qxF 'MEMORIA_MODO=hugetlb-2m' "$POLITICA_DIR/carimbo/release.sh" \
+    || fail 'a etapa não assou no release o MEMORIA_MODO exato do passthrough.conf'
 passo
 
 # --- 3. Reescrita para o sandbox, com guarda que aborta ---------------------
@@ -798,6 +856,13 @@ passo
 #
 # Um caso direto diz isto melhor do que uma divergência ausente no oráculo: se
 # alguém reverter a ordem, aqui falha com o nome do que quebrou.
+#
+# I9.12-D8: `hugetlb-1g-boot` saiu do catálogo do núcleo em 05/09/2026 e hoje é
+# um modo DESCONHECIDO, exatamente como `hugetlb-4m` sempre foi. O laço fica
+# como está de propósito: do ponto de vista do HOOK nada mudou — ele nunca
+# conheceu o catálogo, só obedece `MEM_PLANO_VALIDO`, e é isso que o caso
+# prova. O que mudou é quem produz o `0`: antes era o plano de reserva estática
+# curta, agora é a recusa por modo desconhecido.
 for modo in normal hugetlb-1g-boot hugetlb-4m; do
     caso_padrao
     CASO_MODO="$modo"
@@ -814,18 +879,25 @@ for modo in normal hugetlb-1g-boot hugetlb-4m; do
     passo
 done
 
-# E o par: com o plano válido, o perfil legado continua passando sem tocar no
-# pool. Sem esta ponta, "recusa estrutural" viraria "o modo legado nunca sobe".
+# E o par: com o plano válido, um modo que não é de runtime continua passando
+# sem tocar no pool. Sem esta ponta, "recusa estrutural" viraria "modo não-
+# runtime nunca sobe".
+#
+# I9.12-D8: o oráculo anterior usava `hugetlb-1g-boot` aqui, e o par provava
+# que o perfil legado subia sem tocar no pool. O modo saiu do catálogo; o modo
+# `normal` ocupa o lugar dele, porque a propriedade provada é a mesma —
+# `mem_modo_de_runtime` falso com `MEM_PLANO_VALIDO=1` devolve 0 e deixa o pool
+# como estava.
 caso_padrao
-CASO_MODO=hugetlb-1g-boot
+CASO_MODO=normal
 CASO_PAGE_KB=1048576
 CASO_PAGES=22
 pool_montar 1048576 22 22 0 0
 rodar "$FRAG_PREPARE" mem_adquirir
-exige_rc mem_adquirir 0 'A13d par: perfil legado com plano válido não toca no pool'
-exige_texto 'o ciclo de vida não toca no pool' 'A13d par: perfil legado com plano válido'
-exige_pool '22 22 0 0' 'A13d par: perfil legado com plano válido'
-exige_sem_escrita 'A13d par: perfil legado com plano válido'
+exige_rc mem_adquirir 0 'A13d par: modo não-runtime com plano válido não toca no pool'
+exige_texto 'o ciclo de vida não toca no pool' 'A13d par: modo não-runtime com plano válido'
+exige_pool '22 22 0 0' 'A13d par: modo não-runtime com plano válido'
+exige_sem_escrita 'A13d par: modo não-runtime com plano válido'
 passo
 
 # ===========================================================================
@@ -1283,10 +1355,10 @@ CORPUS=(
   '1g-runtime-do-zero|hugetlb-1g|22528|1048576|0|0|0|0|29093508|1|-|1|aceita|aceita|22|-'
   '1g-runtime-pool-do-boot|hugetlb-1g|22528|1048576|22|22|0|0|29093508|1|-|1|aceita|aceita|0|-'
   '1g-runtime-consumidor|hugetlb-1g|22528|1048576|22|20|0|0|29093508|1|-|1|recusa|recusa|-|-'
-  '1g-boot-cobre|hugetlb-1g-boot|22528|1048576|22|22|0|0|4143904|1|-|1|aceita|aceita|0|-'
+  '1g-boot-cobre|hugetlb-1g-boot|22528|1048576|22|22|0|0|4143904|1|-|0|recusa|recusa|-|-'  # I9.12-D8: o perfil de reserva estática SAIU do catálogo em 05/09/2026. O oráculo anterior era 'aceita|aceita|0' com plano=1, porque o núcleo aceitava o modo e só conferia se a reserva cobria. Hoje o modo é desconhecido, a recusa é estrutural (transient=0), MEM_PLANO_VALIDO nasce 0 e o hook bloqueia. A linha fica no corpus justamente para provar a remoção: se alguém devolver o modo ao catálogo, ela reprova
   '2m-kernel-honesto-sem-memoria|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|100|1|recusa|recusa|-|-'
   '2m-memavail-insuficiente|hugetlb-2m|8192|2048|0|0|0|0|1048576|1|-|1|recusa|aceita|-|o núcleo recusa CEDO por MemAvailable; o hook não lê meminfo (I9-D8) e só reprova pela pós-condição, quando o kernel de fato não entrega. Com kernel generoso o hook aceita, e é o cenário 2m-kernel-honesto-sem-memoria que prova que os dois recusam quando a memória realmente falta'
-  '1g-boot-nao-cobre|hugetlb-1g-boot|22528|1048576|10|10|0|0|4143904|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026, e é melhoria, não efeito colateral: reserva estática de 1 GiB que não cobre a RAM da VM passou a recusar o start CEDO, em vez de deixar o QEMU descobrir na hora de mapear o backing store — que é a falha depois do prepare, com o display já derrubado, descrita na sequência de migração do plano
+  '1g-boot-nao-cobre|hugetlb-1g-boot|22528|1048576|10|10|0|0|4143904|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026, e é melhoria, não efeito colateral: reserva estática de 1 GiB que não cobre a RAM da VM passou a recusar o start CEDO, em vez de deixar o QEMU descobrir na hora de mapear o backing store — que é a falha depois do prepare, com o display já derrubado, descrita na sequência de migração do plano. I9.12-D8: o veredicto continua o mesmo, mas o MOTIVO mudou de 'reserva estática curta' para 'modo desconhecido', porque o perfil saiu do catálogo em 05/09/2026
   'modo-desconhecido|hugetlb-4m|8192|2048|0|0|0|0|20971520|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026: o bloqueio estrutural subiu para ANTES de mem_modo_de_runtime, então modo fora do catálogo deixou de devolver 0 sem olhar o plano
   'modo-vazio||8192|2048|0|0|0|0|20971520|1|-|0|recusa|recusa|-|-'  # CONVERGIU em 03/09/2026 pelo mesmo mecanismo de modo-desconhecido
   'numa-dois-nos-delta-par|hugetlb-2m|8192|2048|0|0|0|0|20971520|2|-|1|aceita|aceita|4096|-'
